@@ -38,28 +38,9 @@ smoke: tests abi-check
 demo: examples
 	./scripts/run_demo.sh
 
-# Full proof of everything inside SPARK's analysable subset.  Expected to
-# come back clean: zero unproved checks, zero warnings.
-#
-# gnatprove reports on stderr, and narrates every inlined call and unrolled
-# loop as an "info:" line.  Those are filtered so what remains is what needs
-# a human; the exit status is gnatprove's own.
-prove: | obj
-	@$(ENV) gnatprove -P prove_core.gpr --mode=all --level=2 -j0 --output=oneline \
-	  > obj/prove_core.log 2>&1; status=$$?; \
-	  grep -v "info:" obj/prove_core.log || true; \
-	  grep -A14 "Summary of SPARK analysis" obj/prove_core/gnatprove/gnatprove.out; \
-	  exit $$status
-
-# Flow analysis over the WHOLE runtime including the example mains.  Every
-# body is now inside SPARK's subset or explicitly SPARK_Mode => Off, so this
-# is expected to pass; it exists to catch a stray address-taking expression
-# creeping back into a body that is supposed to be analysable.
-prove-boundary: | obj
-	@$(ENV) gnatprove -P prove.gpr --mode=flow -j0 --output=oneline \
-	  > obj/prove_boundary.log 2>&1; \
-	  grep -vE "info:|violation of aspect SPARK_Mode|launch \"gnatprove --explain|^Phase|Summary logged" \
-	    obj/prove_boundary.log || true
+# Full proof of everything
+prove: 
+	alr gnatprove -P io_uring_async_runtime.gpr --mode=all --level=3 -j0
 
 clean:
 	rm -rf obj lib bin
@@ -69,5 +50,4 @@ help:
 	@echo "make smoke           build and run the runtime self-test"
 	@echo "make demo            traced walkthrough, then 2000 connections"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
-	@echo "make prove           SPARK proof of everything analysable (expected clean)"
-	@echo "make prove-boundary  whole-project flow analysis (expected clean)"
+	@echo "make prove           SPARK proof of everything"

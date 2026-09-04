@@ -7,4 +7,7 @@ maintainers = ["Srayan Jana <srayan.jana@outlook.com>"]
 maintainers-logins = ["ValorZard"]
 licenses = "MIT OR Apache-2.0 WITH LLVM-exception"
 website = ""
-tags = ["io_uring", "async", "spark", "concurrency", "linux", "networking"]
+tags = ["async", "spark", "concurrency", "linux", "networking"]
+
+[[depends-on]]
+gnatprove = "^16.1.0"
