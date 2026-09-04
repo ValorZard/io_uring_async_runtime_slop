@@ -169,7 +169,7 @@ is
    --  Queue one operation.  Fails only when the submission queue is full,
    --  which the caller resolves by flushing and retrying.
    procedure Push (Shard : Shard_Id; Spec : Op_Spec; Queued : out Boolean)
-     with Global => (In_Out => Rings), Always_Terminates;
+     with Global => (In_Out => (Rings, Ffi.Kernel)), Always_Terminates;
 
    --  Hand queued submissions to the kernel, optionally sleeping until
    --  Wait_For completions are available.  This is the only system call on
@@ -193,7 +193,7 @@ is
       Batch : out Completion_Batch;
       Count : out Natural)
      with Post => Count <= Reap_Batch,
-          Global => (In_Out => Rings), Always_Terminates;
+          Global => (In_Out => (Rings, Ffi.Kernel)), Always_Terminates;
 
    --  Operations submitted but not yet completed.  A shard with none of
    --  these and nothing runnable has no reason to stay awake.
@@ -223,6 +223,6 @@ is
    procedure Arm_Idle_Timer
      (Shard : Shard_Id; Level : Natural := 0)
      with Pre => Level <= Max_Backoff,
-          Global => (In_Out => Rings), Always_Terminates;
+          Global => (In_Out => (Rings, Ffi.Kernel)), Always_Terminates;
 
 end Iour.Reactor;

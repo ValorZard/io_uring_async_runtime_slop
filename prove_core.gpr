@@ -1,9 +1,6 @@
---  Everything that falls inside SPARK's analysable subset.
---
---  Excluded: the bodies of Iour.Reactor, Iour.Net and Iour.Time.  Those are
---  the three places that must hand an object's address to the kernel, which
---  SPARK does not permit.  Their specs are analysed, so every caller is
---  checked against them.
+--  The whole runtime, less the example mains.  The two SPARK_Mode => Off
+--  bodies (Iour.Ffi.Fiber, Iour.Ffi.Memory) are included so gnatprove sees
+--  and reports them as such; their specs are verified like any other.
 project Prove_Core is
    for Languages use ("Ada");
    for Source_Dirs use
@@ -16,6 +13,7 @@ project Prove_Core is
       "iour-ffi-sys.ads",       "iour-ffi-sys.adb",
       "iour-ffi-net.ads",       "iour-ffi-net.adb",
       "iour-ffi-uring.ads",
+      "iour-ffi-memory.ads",    "iour-ffi-memory.adb",
       "iour-futures.ads",       "iour-futures.adb",
       "iour-run_queue.ads",     "iour-run_queue.adb",
       "iour-fibers.ads",        "iour-fibers.adb",
@@ -25,9 +23,9 @@ project Prove_Core is
       "iour-promises.ads",      "iour-promises.adb",
       "iour-trace.ads",         "iour-trace.adb",
       "iour-text.ads",          "iour-text.adb",
-      "iour-reactor.ads",
-      "iour-net.ads",
-      "iour-time.ads",
+      "iour-reactor.ads",       "iour-reactor.adb",
+      "iour-net.ads",           "iour-net.adb",
+      "iour-time.ads",          "iour-time.adb",
       "echo_protocol.ads",      "echo_protocol.adb");
    for Object_Dir use "obj/prove_core";
    for Create_Missing_Dirs use "True";

@@ -1,5 +1,6 @@
 with Interfaces.C;
 with System.Storage_Elements;
+with Iour.Ffi.Memory;
 with Iour.Ffi.Sys;
 with Iour.Ffi.Net;
 
@@ -11,6 +12,7 @@ is
    package Uring renames Iour.Ffi.Uring;
    package Sys renames Iour.Ffi.Sys;
    package Net renames Iour.Ffi.Net;
+   package Mem renames Iour.Ffi.Memory;
 
    use System.Storage_Elements;
    use type System.Address;
@@ -31,14 +33,12 @@ is
       Sq_Flags   : System.Address := System.Null_Address;
       Sq_Indices : System.Address := System.Null_Address;
       Sqes       : System.Address := System.Null_Address;
-      Sq_Mask    : Unsigned_32 := 0;
       Sq_Entries : Unsigned_32 := 0;
 
       --  Completion side.
       Cq_Head    : System.Address := System.Null_Address;
       Cq_Tail    : System.Address := System.Null_Address;
       Cqes       : System.Address := System.Null_Address;
-      Cq_Mask    : Unsigned_32 := 0;
       Cq_Entries : Unsigned_32 := 0;
 
       --  Our private copy of the tail.  Operations accumulate here and
@@ -72,18 +72,44 @@ is
       procedure Install (Handle : Ring_Handle);
       procedure Take (Handle : out Ring_Handle);
 
-      procedure Push (Spec : Op_Spec; Queued : out Boolean);
+      --  Push, in two halves around the memory access.  Begin_Push hands
+      --  out what the caller needs to test for room and write the entry;
+      --  Commit_Push records that it did.
+      procedure Begin_Push
+        (Sqes       : out System.Address;
+         Entries    : out Unsigned_32;
+         Head_Addr  : out System.Address;
+         Local_Tail : out Unsigned_32;
+         Ready      : out Boolean)
+        with Post => (if Ready then Entries > 0
+                                   and then Sqes /= System.Null_Address
+                                   and then Head_Addr /= System.Null_Address);
+      procedure Commit_Push;
 
-      --  Publish the tail and report what the kernel should be told to
-      --  submit.  Also yields the descriptor, since the caller needs it for
-      --  io_uring_enter and must not hold the lock across that call.
+      --  Publish, in two halves: report what to submit and where the tail
+      --  lives; the caller does the release store.
       procedure Prepare_Submit
-        (Fd : out Ffi.C_Int; To_Submit : out Unsigned_32);
+        (Fd        : out Ffi.C_Int;
+         To_Submit : out Unsigned_32;
+         Tail_Addr : out System.Address;
+         Tail      : out Unsigned_32);
 
       --  Account for what io_uring_enter actually accepted.
       procedure Accept_Submission (Count : Natural);
 
-      procedure Harvest (Batch : out Completion_Batch; Count : out Natural);
+      --  Harvest, in two halves: where the completion ring is, and then how
+      --  many entries the caller consumed.
+      procedure Begin_Harvest
+        (Cqes      : out System.Address;
+         Entries   : out Unsigned_32;
+         Head_Addr : out System.Address;
+         Tail_Addr : out System.Address;
+         Ready     : out Boolean)
+        with Post => (if Ready then Entries > 0
+                                   and then Cqes /= System.Null_Address
+                                   and then Head_Addr /= System.Null_Address
+                                   and then Tail_Addr /= System.Null_Address);
+      procedure Consumed (Count : Natural);
 
       function Pending return Natural;
       function Fd_Of return Ffi.C_Int;
@@ -106,29 +132,6 @@ is
 
    function As_U64 (Addr : System.Address) return Unsigned_64 is
      (Unsigned_64 (To_Integer (Addr)));
-
-   ---------------------------------------------------------------------------
-   --  Atomic access to the shared ring words
-   ---------------------------------------------------------------------------
-
-   --  The submission and completion rings are memory shared with the
-   --  kernel.  The producer of each index publishes it with a release
-   --  store and the consumer reads it with an acquire load; GNAT compiles
-   --  an Atomic store on x86-64 into a locked exchange and an Atomic load
-   --  into a plain move, which is sequentially consistent and therefore at
-   --  least as strong as the protocol requires.
-
-   function Load (Addr : System.Address) return Unsigned_32 is
-      Cell : Unsigned_32 with Import, Atomic, Address => Addr;
-   begin
-      return Cell;
-   end Load;
-
-   procedure Store (Addr : System.Address; Value : Unsigned_32) is
-      Cell : Unsigned_32 with Import, Atomic, Address => Addr;
-   begin
-      Cell := Value;
-   end Store;
 
    ---------------------------------------------------------------------------
    --  Token encoding
@@ -280,7 +283,12 @@ is
      array (Natural range 0 .. Max_Backoff) of aliased Uring.Kernel_Timespec;
 
    function Backoff_Nanos (Level : Natural) return Long_Long_Integer is
-     (Long_Long_Integer (Idle_Poll_Nanos) * (2 ** Level));
+     (Long_Long_Integer (Idle_Poll_Nanos) * (2 ** Level))
+     with Pre  => Level <= Max_Backoff,
+          Post => Backoff_Nanos'Result >= 0
+                  and then Backoff_Nanos'Result
+                           <= Long_Long_Integer (Idle_Poll_Nanos)
+                              * (2 ** Max_Backoff);
 
    Idle_Timespecs : constant Backoff_Table :=
      [for L in 0 .. Max_Backoff =>
@@ -311,79 +319,41 @@ is
 
       function Pending return Natural is (Ops_Live);
 
-      -----------------------------------------------------------------------
-      --  Push
-      -----------------------------------------------------------------------
-
-      procedure Push (Spec : Op_Spec; Queued : out Boolean) is
-         Consumed : Unsigned_32;
-         Index    : Unsigned_32;
+      procedure Begin_Push
+        (Sqes       : out System.Address;
+         Entries    : out Unsigned_32;
+         Head_Addr  : out System.Address;
+         Local_Tail : out Unsigned_32;
+         Ready      : out Boolean) is
       begin
-         Queued := False;
+         Sqes       := H.Sqes;
+         Entries    := H.Sq_Entries;
+         Head_Addr  := H.Sq_Head;
+         Local_Tail := H.Local_Tail;
+         Ready := H.Sq_Entries > 0
+           and then H.Sqes /= System.Null_Address
+           and then H.Sq_Head /= System.Null_Address;
+      end Begin_Push;
 
-         if H.Sq_Entries = 0 then
-            return;
-         end if;
-
-         --  How many slots the kernel has not yet taken.  Unsigned
-         --  subtraction is what makes this correct across the point where
-         --  the 32-bit counters wrap.
-         Consumed := H.Local_Tail - Load (H.Sq_Head);
-         if Consumed >= H.Sq_Entries then
-            return;  --  queue full; the caller flushes and retries
-         end if;
-
-         Index := H.Local_Tail and H.Sq_Mask;
-
-         declare
-            --  Memory the kernel reads once the tail is published.  Not
-            --  marked Volatile: SPARK forbids a volatile object that is not
-            --  at library level, and this one cannot be, since its address
-            --  is only known after mmap.  The release store of the tail in
-            --  Prepare_Submit is what orders these writes for the kernel.
-            Slots : Uring.Sqe_Array (0 .. H.Sq_Entries - 1)
-              with Import, Address => H.Sqes;
-            E : Uring.Sqe renames Slots (Index);
-         begin
-            --  Every field is written, including the ones this opcode does
-            --  not use: a recycled slot still holds the previous
-            --  operation's bytes, and the kernel would read them.
-            E.Opcode       := Spec.Opcode;
-            E.Flags        := Spec.Sqe_Flags;
-            E.Ioprio       := 0;
-            E.Fd           := Spec.Fd;
-            E.Off          := Spec.Off;
-            E.Addr         := Spec.Addr;
-            E.Len          := Spec.Length;
-            E.Op_Flags     := Spec.Op_Flags;
-            E.User_Data    := Spec.Token;
-            E.Buf_Index    := 0;
-            E.Personality  := 0;
-            E.Splice_Fd_In := 0;
-            E.Addr3        := 0;
-            E.Pad2         := 0;
-         end;
-
+      procedure Commit_Push is
+      begin
          H.Local_Tail := H.Local_Tail + 1;
          Unsent := Unsent + 1;
-         Ops_Live := Ops_Live + 1;
-         Queued := True;
-      end Push;
-
-      -----------------------------------------------------------------------
-      --  Prepare_Submit
-      -----------------------------------------------------------------------
+         if Ops_Live < Natural'Last then
+            Ops_Live := Ops_Live + 1;
+         end if;
+      end Commit_Push;
 
       procedure Prepare_Submit
-        (Fd : out Ffi.C_Int; To_Submit : out Unsigned_32) is
+        (Fd        : out Ffi.C_Int;
+         To_Submit : out Unsigned_32;
+         Tail_Addr : out System.Address;
+         Tail      : out Unsigned_32) is
       begin
-         Fd := H.Fd;
+         Fd        := H.Fd;
          To_Submit := Unsent;
-         if H.Sq_Tail /= System.Null_Address then
-            --  Release store: everything written into the SQEs above must
-            --  be visible to the kernel before it sees the new tail.
-            Store (H.Sq_Tail, H.Local_Tail);
-         end if;
+         Tail_Addr := H.Sq_Tail;
+         Tail      := H.Local_Tail;
       end Prepare_Submit;
 
       procedure Accept_Submission (Count : Natural) is
@@ -396,60 +366,27 @@ is
          end if;
       end Accept_Submission;
 
-      -----------------------------------------------------------------------
-      --  Harvest
-      -----------------------------------------------------------------------
-
-      procedure Harvest (Batch : out Completion_Batch; Count : out Natural) is
-         Head : Unsigned_32;
-         Tail : Unsigned_32;
-         N    : Natural := 0;
+      procedure Begin_Harvest
+        (Cqes      : out System.Address;
+         Entries   : out Unsigned_32;
+         Head_Addr : out System.Address;
+         Tail_Addr : out System.Address;
+         Ready     : out Boolean) is
       begin
-         Batch := [others => (others => <>)];
-         Count := 0;
+         Cqes      := H.Cqes;
+         Entries   := H.Cq_Entries;
+         Head_Addr := H.Cq_Head;
+         Tail_Addr := H.Cq_Tail;
+         Ready := H.Cq_Entries > 0
+           and then H.Cqes /= System.Null_Address
+           and then H.Cq_Head /= System.Null_Address
+           and then H.Cq_Tail /= System.Null_Address;
+      end Begin_Harvest;
 
-         if H.Cq_Entries = 0 then
-            return;
-         end if;
-
-         Head := Load (H.Cq_Head);
-         --  Acquire load: the entries the kernel wrote must be visible
-         --  before we read them.
-         Tail := Load (H.Cq_Tail);
-
-         declare
-            --  Memory the kernel writes as operations complete.  The
-            --  acquire load of the tail above is what makes those writes
-            --  visible before these reads; see the note on the SQE overlay.
-            Slots : Uring.Cqe_Array (0 .. H.Cq_Entries - 1)
-              with Import, Address => H.Cqes;
-         begin
-            while Head /= Tail and then N < Reap_Batch loop
-               declare
-                  E : Uring.Cqe renames Slots (Head and H.Cq_Mask);
-                  --  Each volatile read stands alone as the whole
-                  --  right-hand side, as SPARK requires.
-                  Token : constant Unsigned_64 := E.User_Data;
-                  Res   : constant Integer_32  := E.Res;
-                  Flags : constant Unsigned_32 := E.Flags;
-               begin
-                  Batch (N) := (Token => Token,
-                                Res   => Io_Result (Res),
-                                Flags => Flags);
-               end;
-               Head := Head + 1;
-               N := N + 1;
-            end loop;
-         end;
-
-         if N > 0 then
-            --  Release the slots in one store rather than one per entry.
-            Store (H.Cq_Head, Head);
-            Ops_Live := (if Ops_Live > N then Ops_Live - N else 0);
-         end if;
-
-         Count := N;
-      end Harvest;
+      procedure Consumed (Count : Natural) is
+      begin
+         Ops_Live := (if Ops_Live > Count then Ops_Live - Count else 0);
+      end Consumed;
 
    end Ring_Cell;
 
@@ -487,7 +424,7 @@ is
          Fd     => H.Fd,
          Offset => Uring.Off_Sq_Ring);
       if Base = Sys.Map_Failed then
-         Status := -Io_Result (Sys.Last_Error);
+         Status := Sys.Failure_Code;
          return;
       end if;
 
@@ -506,7 +443,7 @@ is
             Fd     => H.Fd,
             Offset => Uring.Off_Cq_Ring);
          if H.Cq_Ring_Base = Sys.Map_Failed then
-            Status := -Io_Result (Sys.Last_Error);
+            Status := Sys.Failure_Code;
             return;
          end if;
          H.Cq_Ring_Size := Cq_Bytes;
@@ -521,7 +458,7 @@ is
          Fd     => H.Fd,
          Offset => Uring.Off_Sqes);
       if H.Sqes_Base = Sys.Map_Failed then
-         Status := -Io_Result (Sys.Last_Error);
+         Status := Sys.Failure_Code;
          return;
       end if;
 
@@ -532,28 +469,50 @@ is
       H.Sq_Flags   := Offset (H.Sq_Ring_Base, P.Sq_Off.Flags);
       H.Sq_Indices := Offset (H.Sq_Ring_Base, P.Sq_Off.Array_Offset);
       H.Sqes       := H.Sqes_Base;
-      H.Sq_Mask    := Load (Offset (H.Sq_Ring_Base, P.Sq_Off.Ring_Mask));
       H.Sq_Entries := P.Sq_Entries;
 
       H.Cq_Head    := Offset (H.Cq_Ring_Base, P.Cq_Off.Head);
       H.Cq_Tail    := Offset (H.Cq_Ring_Base, P.Cq_Off.Tail);
       H.Cqes       := Offset (H.Cq_Ring_Base, P.Cq_Off.Cqes);
-      H.Cq_Mask    := Load (Offset (H.Cq_Ring_Base, P.Cq_Off.Ring_Mask));
       H.Cq_Entries := P.Cq_Entries;
 
-      H.Local_Tail := Load (H.Sq_Tail);
-
-      --  The submission ring is indirect: the kernel reads an index array
-      --  and then the SQE it points at.  Nothing here ever reorders
-      --  submissions, so the mapping is the identity and is written once.
+      --  The ring sizes are powers of two and the kernel's masks are
+      --  Entries - 1.  The submitter computes its masks from Entries so
+      --  SPARK can see every index is in range; here we check the kernel
+      --  agrees, and refuse the ring if it does not.
       declare
-         --  Written once here, read by the kernel from then on.
-         Indices : Uring.Index_Array (0 .. P.Sq_Entries - 1)
-           with Import, Address => H.Sq_Indices;
+         Sq_Mask_Addr : constant System.Address :=
+           Offset (H.Sq_Ring_Base, P.Sq_Off.Ring_Mask);
+         Cq_Mask_Addr : constant System.Address :=
+           Offset (H.Cq_Ring_Base, P.Cq_Off.Ring_Mask);
+         Sq_Mask : Unsigned_32;
+         Cq_Mask : Unsigned_32;
       begin
-         for I in Indices'Range loop
-            Indices (I) := I;
-         end loop;
+         if Sq_Mask_Addr = System.Null_Address
+           or else Cq_Mask_Addr = System.Null_Address
+           or else H.Sq_Tail = System.Null_Address
+           or else H.Sq_Indices = System.Null_Address
+           or else P.Sq_Entries = 0
+           or else P.Cq_Entries = 0
+         then
+            Status := -E_Invalid;
+            return;
+         end if;
+         Mem.Load_Word (Sq_Mask_Addr, Sq_Mask);
+         Mem.Load_Word (Cq_Mask_Addr, Cq_Mask);
+         if Sq_Mask /= P.Sq_Entries - 1 or else Cq_Mask /= P.Cq_Entries - 1
+         then
+            Status := -E_Invalid;
+            return;
+         end if;
+
+         Mem.Load_Word (H.Sq_Tail, H.Local_Tail);
+
+         --  The submission ring is indirect: the kernel reads an index
+         --  array and then the SQE it points at.  Nothing here ever
+         --  reorders submissions, so the mapping is the identity and is
+         --  written once.
+         Mem.Write_Identity_Map (H.Sq_Indices, P.Sq_Entries);
       end;
    end Map_Ring;
 
@@ -586,7 +545,7 @@ is
 
          --  liburing's exported syscall wrappers report failure as a
          --  negated errno in the result, not as -1 plus errno.
-         Fd := Uring.Setup (Ffi.C_Unsigned (Ring_Entries), P'Address);
+         Fd := Uring.Setup (Ffi.C_Unsigned (Ring_Entries), Mem.Of_Params (P));
          if Fd < 0 then
             Result := Io_Result (Fd);
             return;
@@ -615,24 +574,22 @@ is
    ---------------------------------------------------------------------------
 
    procedure Shut (Shard : Shard_Id) is
-      H       : Ring_Handle;
-      Ignored : Ffi.C_Int;
+      H : Ring_Handle;
    begin
       Cells (Shard).Take (H);
 
       if H.Sqes_Base /= System.Null_Address then
-         Ignored := Sys.Munmap (H.Sqes_Base, H.Sqes_Size);
+         Sys.Unmap (H.Sqes_Base, H.Sqes_Size);
       end if;
       if H.Cq_Ring_Size > 0 and then H.Cq_Ring_Base /= System.Null_Address then
-         Ignored := Sys.Munmap (H.Cq_Ring_Base, H.Cq_Ring_Size);
+         Sys.Unmap (H.Cq_Ring_Base, H.Cq_Ring_Size);
       end if;
       if H.Sq_Ring_Base /= System.Null_Address then
-         Ignored := Sys.Munmap (H.Sq_Ring_Base, H.Sq_Ring_Size);
+         Sys.Unmap (H.Sq_Ring_Base, H.Sq_Ring_Size);
       end if;
       if H.Fd >= 0 then
-         Ignored := Net.C_Close (H.Fd);
+         Net.Close_Quietly (H.Fd);
       end if;
-      pragma Unreferenced (Ignored);
    end Shut;
 
    ---------------------------------------------------------------------------
@@ -641,8 +598,64 @@ is
 
    procedure Push (Shard : Shard_Id; Spec : Op_Spec; Queued : out Boolean)
    is
+      Sqes       : System.Address;
+      Entries    : Unsigned_32;
+      Head_Addr  : System.Address;
+      Local_Tail : Unsigned_32;
+      Ready      : Boolean;
+      Head       : Unsigned_32;
+      Mask       : Unsigned_32;
+      Index      : Unsigned_32;
    begin
-      Cells (Shard).Push (Spec, Queued);
+      Queued := False;
+
+      Cells (Shard).Begin_Push (Sqes, Entries, Head_Addr, Local_Tail, Ready);
+      if not Ready then
+         return;
+      end if;
+
+      --  How many slots the kernel has not yet taken.  Unsigned
+      --  subtraction is what makes this correct across the point where the
+      --  32-bit counters wrap.  Reading the kernel's head happens outside
+      --  the protected action: it is a memory access, and one shard owns
+      --  this ring, so nothing else can be pushing meanwhile.
+      Mem.Load_Word (Head_Addr, Head);
+      if Local_Tail - Head >= Entries then
+         return;  --  queue full; the caller flushes and retries
+      end if;
+
+      --  The ring size is a power of two, so the mask is Entries - 1.
+      --  Computing it here rather than loading the kernel's copy is what
+      --  lets SPARK see that Index is inside the ring; Map_Ring checks the
+      --  kernel agrees.
+      Mask  := Entries - 1;
+      Index := Local_Tail and Mask;
+      pragma Assert (Index <= Mask);
+
+      --  Every field is set, including the ones this opcode does not use:
+      --  a recycled slot still holds the previous operation's bytes, and
+      --  the kernel would read them.
+      Mem.Write_Sqe
+        (Base  => Sqes,
+         Count => Entries,
+         Index => Index,
+         Item  => (Opcode       => Spec.Opcode,
+                   Flags        => Spec.Sqe_Flags,
+                   Ioprio       => 0,
+                   Fd           => Spec.Fd,
+                   Off          => Spec.Off,
+                   Addr         => Spec.Addr,
+                   Len          => Spec.Length,
+                   Op_Flags     => Spec.Op_Flags,
+                   User_Data    => Spec.Token,
+                   Buf_Index    => 0,
+                   Personality  => 0,
+                   Splice_Fd_In => 0,
+                   Addr3        => 0,
+                   Pad2         => 0));
+
+      Cells (Shard).Commit_Push;
+      Queued := True;
    end Push;
 
    procedure Flush
@@ -652,10 +665,18 @@ is
    is
       Fd        : Ffi.C_Int;
       To_Submit : Unsigned_32;
+      Tail_Addr : System.Address;
+      Tail      : Unsigned_32;
       Flags     : Unsigned_32 := 0;
       Result    : Ffi.C_Int;
    begin
-      Cells (Shard).Prepare_Submit (Fd, To_Submit);
+      Cells (Shard).Prepare_Submit (Fd, To_Submit, Tail_Addr, Tail);
+
+      if Tail_Addr /= System.Null_Address then
+         --  Release store: everything written into the SQEs must be
+         --  visible to the kernel before it sees the new tail.
+         Mem.Store_Word (Tail_Addr, Tail);
+      end if;
 
       if Fd < 0 then
          Status := -E_Again;
@@ -689,7 +710,13 @@ is
    procedure Flush_Quietly (Shard : Shard_Id) is
       Status : Io_Result;
    begin
+      pragma Warnings
+        (GNATprove, Off, "*""Status"" is set by ""Flush"" but not used*",
+         Reason => "Discarding the status is this procedure's purpose;"
+                   & " the shard loop is where flush failures are counted.");
       Flush (Shard, 0, Status);
+      pragma Warnings
+        (GNATprove, On, "*""Status"" is set by ""Flush"" but not used*");
    end Flush_Quietly;
 
    procedure Harvest
@@ -697,8 +724,53 @@ is
       Batch : out Completion_Batch;
       Count : out Natural)
    is
+      Cqes      : System.Address;
+      Entries   : Unsigned_32;
+      Head_Addr : System.Address;
+      Tail_Addr : System.Address;
+      Ready     : Boolean;
+      Head      : Unsigned_32;
+      Tail      : Unsigned_32;
+      Mask      : Unsigned_32;
+      N         : Natural range 0 .. Reap_Batch := 0;
+      E         : Uring.Cqe;
    begin
-      Cells (Shard).Harvest (Batch, Count);
+      Batch := [others => (others => <>)];
+      Count := 0;
+
+      Cells (Shard).Begin_Harvest (Cqes, Entries, Head_Addr, Tail_Addr, Ready);
+      if not Ready then
+         return;
+      end if;
+
+      Mem.Load_Word (Head_Addr, Head);
+      --  Acquire load: the entries the kernel wrote must be visible before
+      --  we read them.
+      Mem.Load_Word (Tail_Addr, Tail);
+      Mask := Entries - 1;
+
+      while Head /= Tail and then N < Reap_Batch loop
+         pragma Loop_Variant (Increases => N);
+         pragma Assert ((Head and Mask) <= Mask);
+         Mem.Read_Cqe
+           (Base  => Cqes,
+            Count => Entries,
+            Index => Head and Mask,
+            Item  => E);
+         Batch (N) := (Token => E.User_Data,
+                       Res   => Io_Result (E.Res),
+                       Flags => E.Flags);
+         Head := Head + 1;
+         N := N + 1;
+      end loop;
+
+      if N > 0 then
+         --  Release the slots in one store rather than one per entry.
+         Mem.Store_Word (Head_Addr, Head);
+         Cells (Shard).Consumed (N);
+      end if;
+
+      Count := N;
    end Harvest;
 
    procedure In_Flight (Shard : Shard_Id; Count : out Natural) is
@@ -707,8 +779,9 @@ is
    end In_Flight;
 
    procedure Ring_Descriptor (Shard : Shard_Id; Fd : out Descriptor) is
+      Raw : constant Ffi.C_Int := Cells (Shard).Fd_Of;
    begin
-      Fd := Descriptor (Cells (Shard).Fd_Of);
+      Fd := (if Raw < 0 then Invalid_Descriptor else Descriptor (Raw));
    end Ring_Descriptor;
 
    ---------------------------------------------------------------------------
@@ -722,10 +795,16 @@ is
         (if Level > Max_Backoff then Max_Backoff else Level);
       Queued : Boolean;
    begin
+      pragma Warnings
+        (GNATprove, Off, "*""Queued"" is set by ""Push"" but not used*",
+         Reason => "If the queue is full, submissions are pending, and"
+                   & " their completions will wake the shard instead.");
       Push (Shard,
-            Op_Timeout (Idle_Timespecs (Step)'Address,
+            Op_Timeout (Mem.Of_Timespec (Idle_Timespecs (Step)),
                         Encode (Tag_Timer, Unsigned_32 (Step))),
             Queued);
+      pragma Warnings
+        (GNATprove, On, "*""Queued"" is set by ""Push"" but not used*");
    end Arm_Idle_Timer;
 
 end Iour.Reactor;

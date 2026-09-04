@@ -1,5 +1,7 @@
 with Interfaces; use Interfaces;
+with System;
 with Iour.Async;
+with Iour.Ffi.Memory;
 with Iour.Ffi.Net;
 with Iour.Ffi.Sys;
 
@@ -71,14 +73,22 @@ package body Iour.Net with SPARK_Mode => On is
      (S : Socket; Buffer : out Byte_Array; Result : out Io_Result) is
    begin
       if Buffer'Length = 0 then
+         --  Nothing to fill.  The aggregate is a no-op on an empty array
+         --  but is what lets SPARK see the out parameter as initialised.
+         Buffer := [others => 0];
          Result := 0;
          return;
       end if;
       --  Buffer belongs to the caller's frame, which is on the fiber's own
       --  stack and therefore stays put for as long as the fiber is
       --  suspended -- exactly as long as the kernel needs it.
-      Async.Perform
-        (Reactor.Op_Recv (S, Buffer'Address, Buffer'Length, 0), Result);
+      declare
+         Target : System.Address;
+      begin
+         Target := Ffi.Memory.Of_Output (Buffer);
+         Async.Perform
+           (Reactor.Op_Recv (S, Target, Buffer'Length, 0), Result);
+      end;
    end Receive;
 
    procedure Send
@@ -89,28 +99,35 @@ package body Iour.Net with SPARK_Mode => On is
          return;
       end if;
       Async.Perform
-        (Reactor.Op_Send (S, Buffer'Address, Buffer'Length, 0), Result);
+        (Reactor.Op_Send
+           (S, Ffi.Memory.Of_Bytes (Buffer), Buffer'Length, 0),
+         Result);
    end Send;
 
    procedure Receive_Exact
      (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
    is
-      Got  : Natural := 0;
-      Step : Io_Result;
+      Got    : Natural := 0;
+      Step   : Io_Result;
+      Target : System.Address;
    begin
       if Buffer'Length = 0 then
+         Buffer := [others => 0];
          Result := 0;
          return;
       end if;
 
+      --  One address for the whole buffer; each round reads into the part
+      --  not yet filled, found by advancing it.
+      Target := Ffi.Memory.Of_Output (Buffer);
+
       while Got < Buffer'Length loop
-         declare
-            Rest : Byte_Array renames
-              Buffer (Buffer'First + Got .. Buffer'Last);
-         begin
-            Async.Perform
-              (Reactor.Op_Recv (S, Rest'Address, Rest'Length, 0), Step);
-         end;
+         pragma Loop_Invariant (Got < Buffer'Length);
+         pragma Loop_Variant (Increases => Got);
+         Async.Perform
+           (Reactor.Op_Recv
+              (S, Ffi.Memory.Advance (Target, Got), Buffer'Length - Got, 0),
+            Step);
 
          if Step < 0 then
             Result := Step;
@@ -119,6 +136,11 @@ package body Iour.Net with SPARK_Mode => On is
             --  Peer closed mid-message.  Report a clean end of stream
             --  rather than a partial frame the caller cannot use.
             Result := 0;
+            return;
+         elsif Step > Io_Result (Buffer'Length - Got) then
+            --  The kernel never returns more than was asked for.  Refuse
+            --  to believe it if it ever did, rather than run off the end.
+            Result := -E_Invalid;
             return;
          end if;
 
@@ -131,24 +153,25 @@ package body Iour.Net with SPARK_Mode => On is
    procedure Send_All
      (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
    is
-      Sent  : Natural := 0;
-      Step  : Io_Result;
+      Sent   : Natural := 0;
+      Step   : Io_Result;
+      Source : System.Address;
    begin
       if Buffer'Length = 0 then
          Result := 0;
          return;
       end if;
+      Source := Ffi.Memory.Of_Bytes (Buffer);
 
       --  A stream socket may accept only part of a write; keep going until
       --  it is all gone or the peer stops listening.
       while Sent < Buffer'Length loop
-         declare
-            Chunk : Byte_Array renames
-              Buffer (Buffer'First + Sent .. Buffer'Last);
-         begin
-            Async.Perform
-              (Reactor.Op_Send (S, Chunk'Address, Chunk'Length, 0), Step);
-         end;
+         pragma Loop_Invariant (Sent < Buffer'Length);
+         pragma Loop_Variant (Increases => Sent);
+         Async.Perform
+           (Reactor.Op_Send
+              (S, Ffi.Memory.Advance (Source, Sent), Buffer'Length - Sent, 0),
+            Step);
 
          if Step < 0 then
             Result := Step;
@@ -156,6 +179,9 @@ package body Iour.Net with SPARK_Mode => On is
          elsif Step = 0 then
             --  Nothing moved and no error: the peer is gone.
             Result := -E_Pipe;
+            return;
+         elsif Step > Io_Result (Buffer'Length - Sent) then
+            Result := -E_Invalid;   --  more than offered: not possible
             return;
          end if;
 
@@ -168,28 +194,32 @@ package body Iour.Net with SPARK_Mode => On is
    procedure Write_All
      (Fd : Descriptor; Buffer : Byte_Array; Result : out Io_Result)
    is
-      Sent : Natural := 0;
-      Step : Io_Result;
+      Sent   : Natural := 0;
+      Step   : Io_Result;
+      Source : System.Address;
    begin
       if Buffer'Length = 0 then
          Result := 0;
          return;
       end if;
+      Source := Ffi.Memory.Of_Bytes (Buffer);
 
       while Sent < Buffer'Length loop
-         declare
-            Chunk : Byte_Array renames
-              Buffer (Buffer'First + Sent .. Buffer'Last);
-         begin
-            Async.Perform
-              (Reactor.Op_Write (Fd, Chunk'Address, Chunk'Length, 0), Step);
-         end;
+         pragma Loop_Invariant (Sent < Buffer'Length);
+         pragma Loop_Variant (Increases => Sent);
+         Async.Perform
+           (Reactor.Op_Write
+              (Fd, Ffi.Memory.Advance (Source, Sent), Buffer'Length - Sent, 0),
+            Step);
 
          if Step < 0 then
             Result := Step;
             return;
          elsif Step = 0 then
             Result := -E_Pipe;
+            return;
+         elsif Step > Io_Result (Buffer'Length - Sent) then
+            Result := -E_Invalid;
             return;
          end if;
 
@@ -226,7 +256,7 @@ package body Iour.Net with SPARK_Mode => On is
 
       Async.Perform
         (Reactor.Op_Connect
-           (S, Endpoint'Address, Raw.Sockaddr_In'Size / 8, 0),
+           (S, Ffi.Memory.Of_Sockaddr (Endpoint), Raw.Sockaddr_In'Size / 8, 0),
          Result);
    end Connect;
 

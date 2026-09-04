@@ -26,6 +26,12 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
    --  Read the calling thread's errno.
    function Last_Error return C_Int;
 
+   --  errno as an Io_Result: always negative, so a failure can never be
+   --  mistaken for a count, and never Integer'First, so it can be negated.
+   function Failure_Code return Io_Result
+     with Post => Failure_Code'Result < 0
+                  and then Failure_Code'Result > Io_Result'First;
+
    ---------------------------------------------------------------------------
    --  Memory mapping (used for the io_uring shared rings)
    ---------------------------------------------------------------------------
@@ -52,6 +58,12 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
 
    function Munmap (Addr : System.Address; Length : C_Size) return C_Int
      with Import, Convention => C, External_Name => "munmap", Global => null;
+
+   --  The same call for teardown, where the result carries nothing anyone
+   --  acts on.  Imported as a procedure with its effect declared.
+   procedure Unmap (Addr : System.Address; Length : C_Size)
+     with Import, Convention => C, External_Name => "munmap",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    function Mprotect
      (Addr : System.Address; Length : C_Size; Prot : C_Int) return C_Int

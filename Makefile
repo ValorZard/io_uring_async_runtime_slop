@@ -51,9 +51,10 @@ prove: | obj
 	  grep -A14 "Summary of SPARK analysis" obj/prove_core/gnatprove/gnatprove.out; \
 	  exit $$status
 
-# Flow analysis over the WHOLE runtime, including the three bodies that must
-# hand an object's address to the kernel.  Expected to end in "error during
-# analysis": its purpose is to list exactly those sites, one line each.
+# Flow analysis over the WHOLE runtime including the example mains.  Every
+# body is now inside SPARK's subset or explicitly SPARK_Mode => Off, so this
+# is expected to pass; it exists to catch a stray address-taking expression
+# creeping back into a body that is supposed to be analysable.
 prove-boundary: | obj
 	@$(ENV) gnatprove -P prove.gpr --mode=flow -j0 --output=oneline \
 	  > obj/prove_boundary.log 2>&1; \
@@ -69,4 +70,4 @@ help:
 	@echo "make demo            traced walkthrough, then 2000 connections"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
 	@echo "make prove           SPARK proof of everything analysable (expected clean)"
-	@echo "make prove-boundary  list the sites outside SPARK's subset (expected to error)"
+	@echo "make prove-boundary  whole-project flow analysis (expected clean)"

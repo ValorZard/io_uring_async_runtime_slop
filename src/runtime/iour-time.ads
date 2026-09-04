@@ -22,12 +22,10 @@ package Iour.Time with SPARK_Mode => On is
    --  from a fiber.
    procedure Sleep (Nanoseconds : Natural)
      with Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel)),
-          Always_Terminates;
+                                Fibers.Registry, Ffi.Kernel));
 
    procedure Sleep_Milliseconds (Milliseconds : Natural)
      with Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel)),
-          Always_Terminates;
+                                Fibers.Registry, Ffi.Kernel));
 
 end Iour.Time;

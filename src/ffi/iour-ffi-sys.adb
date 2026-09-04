@@ -19,6 +19,19 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
       return Cell.all;
    end Last_Error;
 
+   function Failure_Code return Io_Result is
+      use type C_Int;
+      E : constant C_Int := Last_Error;
+   begin
+      --  A positive errno is negated; anything else -- errno already
+      --  clear, or a value that would not survive negation -- is reported
+      --  as EINVAL rather than as a success or an overflow.
+      if E > 0 and then E < C_Int'Last then
+         return -Io_Result (E);
+      end if;
+      return -E_Invalid;
+   end Failure_Code;
+
    ---------------------------------------------------------------------------
    --  Map_Failed
    ---------------------------------------------------------------------------

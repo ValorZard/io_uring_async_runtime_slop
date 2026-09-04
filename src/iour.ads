@@ -111,6 +111,11 @@ package Iour with SPARK_Mode => On is
    type Descriptor is range -1 .. 2 ** 31 - 1;
    Invalid_Descriptor : constant Descriptor := -1;
 
+   --  Largest buffer one operation accepts.  io_uring carries a 32-bit
+   --  length; this stays comfortably inside it and inside Natural, so the
+   --  conversions along the way are provable rather than checked.
+   Max_Transfer : constant := 2 ** 30;
+
    type Byte is mod 2 ** 8 with Size => 8;
    type Byte_Array is array (Natural range <>) of Byte
      with Component_Size => 8;

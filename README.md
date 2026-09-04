@@ -1,8 +1,8 @@
 # io_uring async runtime for Ada 2022 / SPARK
 
 A thread-per-core asynchronous runtime built on `io_uring`, written entirely
-in Ada 2022 under the **Jorvik** tasking profile, with every unit but one in
-`SPARK_Mode => On`.
+in Ada 2022 under the **Jorvik** tasking profile and proved with SPARK: 723
+checks, zero unproved, with a two-body trusted base.
 
 `Await` is an ordinary function call. When it cannot make progress it switches
 the core to another task and returns later, exactly where it left off:
@@ -180,91 +180,82 @@ carries a dummy return address so the entry sees the alignment a `call` would
 have left. The switch touches no signal mask, so it costs tens of cycles rather
 than the microsecond `swapcontext(3)` spends in `rt_sigprocmask`.
 
-That body is the **only `SPARK_Mode => Off` unit** in the project. It has to
-take the address of a context slot to hand it to the switch, and write the
-dummy return address through a computed stack address; SPARK forbids both. Its
-spec stays in SPARK with full contracts, and every client is verified against
-those. Stacks are `mmap`ed with a `PROT_NONE` guard page below them, which is
-this runtime's addition to the minicoro layout.
+That body is one of the two `SPARK_Mode => Off` units in the project; see
+*SPARK status*. Stacks are `mmap`ed with a `PROT_NONE` guard page below them,
+which is this runtime's addition to the minicoro layout.
 
 ## SPARK status
 
-Every unit is `SPARK_Mode => On` except one: the x86-64 body of
-`Iour.Ffi.Fiber`, the context switch, whose spec is in SPARK and whose
-contracts every caller is checked against. Jorvik is on everywhere.
+Every unit is `SPARK_Mode => On` except two bodies, and both are the
+trusted base by design:
 
-`gnatprove` goes further than the compiler, and there are two targets because
-there are two honest answers.
+| Body | What it holds | Why it's Off |
+|---|---|---|
+| `Iour.Ffi.Fiber` (x86-64) | the context switch: inline Asm in `naked` subprograms, the slot table, stack mapping | assembly, and addresses of context slots |
+| `Iour.Ffi.Memory` | address-of for buffers handed to the kernel; atomic ring-word access; SQE/CQE overlays | taking addresses, and overlays at run-time addresses |
 
-**`make prove`** — everything inside SPARK's analysable subset, in full proof
-mode. Expected to come back clean, and does:
+Both specs are in SPARK with full contracts, and every caller is verified
+against them. This is the shape SPARK's own manual prescribes for a hardware
+or kernel boundary: hoist each operation the language cannot express into a
+subprogram with a SPARK declaration and an Off body, then verify everything
+above it. Each Off body is a few lines per subprogram.
+
+**`make prove`** — full proof of the whole runtime, every body included:
 
 ```
-Success: all checks proved (450 checks).
+Success: all checks proved (723 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Unproved
-Data Dependencies             21         21          .          .
+Data Dependencies             57         57          .          .
 Flow Dependencies              5          5          .          .
-Initialization               167        167          .          .
-Run-time Checks              211          .        211          .
-Assertions                     8          .          8          .
-Functional Contracts          20          .         20          .
-Termination                   18         18          .          .
+Initialization               262        262          .          .
+Run-time Checks              278          .        278          .
+Assertions                    16          .         16          .
+Functional Contracts          56          .         56          .
+Termination                   49         45          4          .
 ```
 
-Zero unproved checks, zero warnings, zero data races. That covers the fiber
-scheduler, the per-shard event loop, the future table, the run queue, the
-shard tasks, the submit-and-await primitive, promises, tracing, the
-fiber-aware `Put_Line`, both libc binding packages, and the demo protocol.
-Everything the runtime *decides* is in there.
+**`make prove-boundary`** — flow analysis over everything including the
+example mains: `Success: all checks proved (364 checks)`. There is no longer
+a boundary to list; the target keeps its name so a stray address-taking
+expression in an analysable body shows up as a failure.
 
-Getting there meant fixing defects gnatprove found and the compiler did not:
-an overflow when negating `Io_Result'First`; statistics counters that would
+Zero unproved, zero warnings, zero data races, zero C.
+
+### What the contracts say, and what they cannot
+
+Memory's contracts say what can be said about memory: an address handed to
+the kernel is never null, a ring index is inside the ring, a load or store
+targets a non-null word. They cannot say that the bytes at an address mean
+what the caller believes. That gap is exactly the trust the Off bodies carry,
+and it is the same gap every verified kernel interface has.
+
+Two modelling decisions deserve a sentence each:
+
+* **A buffer the kernel fills is an `out` parameter of the trusted body.**
+  `Receive` promises to initialise its buffer, but the kernel does the
+  writing, invisibly to SPARK. `Ffi.Memory.Of_Output` takes the buffer as
+  `out`, so once its address has been handed over SPARK counts it initialised.
+  The promise "the kernel writes before the completion arrives" now lives
+  where all the other kernel promises live.
+
+* **Nothing that waits on a peer claims `Always_Terminates`.** A `Receive` on
+  a socket whose peer never sends does not return, and a contract saying
+  otherwise would be false. Reactor operations keep the claim: a flush that
+  waits is always backed by an armed timer.
+
+### Bugs the proof found
+
+Getting to zero meant fixing defects gnatprove found and the compiler did
+not: an overflow negating `Io_Result'First`; statistics counters that would
 wrap on a long-lived server; free-list cursors whose index arithmetic was
 correct but not provably so; an out-of-range shard conversion in the surplus
 task declarations; an allocation inside a protected action; an IPv4 parser
-whose accumulator could overflow before its bound was checked; a cross-shard
-wakeup that was silently dropped if the submission queue happened to be full;
-and a flush failure that would have left a shard in a silent hot loop. All are
-fixed in the shipped code.
-
-Three modelling decisions made the rest provable rather than assumed:
-
-* The operating system is SPARK external state, `Iour.Ffi.Kernel`. A binding
-  whose whole purpose is a side effect declares that it writes `Kernel`, so
-  SPARK knows the call does something even though it cannot see what.
-* Socket creation is declared with Ada 2022's `Side_Effects` aspect. A
-  function that creates a kernel object is not pure, and saying so is what
-  lets it stay a function without SPARK rejecting it.
-* `Iour.Reactor`'s spec carries full `Global` and `Always_Terminates`
-  contracts, so every caller is checked against a stated promise rather than
-  an assumption of "no effect", even though the body itself is not analysed.
-
-**`make prove-boundary`** — flow analysis over the *whole* runtime, including
-the three bodies that must hand an object's address to the kernel. Expected to
-end in `error during analysis`; its purpose is to list exactly those sites:
-
-| Kind | Sites | Where |
-|---|---|---|
-| `X'Address` used as an expression (E0002) | 8 | `Iour.Net`, `Iour.Time`, `Iour.Reactor` |
-| Memory-mapped overlay declared inside a subprogram (E0001) | 2 | `Iour.Reactor` |
-
-Both are precisely what the `io_uring` interface needs, and neither has a
-SPARK-legal substitute:
-
-* An SQE carries a buffer's address as a 64-bit integer. SPARK forbids
-  `Unchecked_Conversion` from an access type to an integer, deliberately: its
-  ownership model depends on pointers not being forgeable as numbers.
-* The ring words must be atomic, because the kernel writes them concurrently,
-  and SPARK forbids an access type designating a volatile type. Marking the
-  overlays `Volatile` instead trips the "not at library level" rule, since
-  their addresses are only known after `mmap`. There is no annotation that
-  satisfies both.
-
-SPARK's own manual prescribes hoisting each site into a small subprogram whose
-body is `SPARK_Mode => Off`, which would let `gnatprove` analyse the remaining
-three bodies. **That is not done here, because the brief was not to turn SPARK
-off anywhere.**
+that could overflow before checking its bound; a cross-shard wakeup silently
+dropped when the submission queue was full; a flush failure that would have
+left a shard in a silent hot loop; a ring descriptor conversion that could
+fail on a negative value; and memory accesses inside protected operations,
+now moved outside the lock. All are fixed in the shipped code.
 
 One toolchain note: GNAT 16.1 crashes (`exp_ch9.adb:8406`) on a
 `pragma Warnings (GNATprove, ...)` placed inside a protected body. The
@@ -381,6 +372,7 @@ bury the trace in repeats of its own polling.
 ```
 src/iour.ads                 core types, handles, tunables
 src/ffi/                     direct bindings: liburing, libc; the fiber spec
+  iour-ffi-memory.adb        raw memory for the kernel: SPARK spec, Off body
 src/runtime/
   iour-reactor.adb           the io_uring submission/completion protocol, in Ada
   iour-fibers.adb            fiber table, context switching, Await, Spawn

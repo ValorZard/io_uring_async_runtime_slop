@@ -1,5 +1,6 @@
 with Interfaces;
 with Iour.Async;
+with Iour.Ffi.Memory;
 with Iour.Ffi.Uring;
 
 package body Iour.Time with SPARK_Mode => On is
@@ -22,8 +23,14 @@ package body Iour.Time with SPARK_Mode => On is
          Nanoseconds => Interfaces.Integer_64 (Nanoseconds mod Nanos_Per_Second));
 
       --  A timeout reports -ETIME when it expires normally, which is the
-      --  expected outcome, not a failure.
-      Async.Perform (Reactor.Op_Timeout (Deadline'Address, 0), Result);
+      --  expected outcome, not a failure; there is nothing to do with it.
+      pragma Warnings
+        (GNATprove, Off, "*""Result"" is set by ""Perform"" but not used*",
+         Reason => "A timer's only result is that it expired.");
+      Async.Perform
+        (Reactor.Op_Timeout (Ffi.Memory.Of_Timespec (Deadline), 0), Result);
+      pragma Warnings
+        (GNATprove, On, "*""Result"" is set by ""Perform"" but not used*");
    end Sleep;
 
    procedure Sleep_Milliseconds (Milliseconds : Natural) is
