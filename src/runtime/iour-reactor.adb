@@ -12,7 +12,7 @@ package body Iour.Reactor with
                Fds.Cells, Sq_Heads.Cells, Sq_Tails.Cells, Sqe_Arrays.Cells,
                Sq_Sizes.Cells, Cq_Heads.Cells, Cq_Tails.Cells,
                Cqe_Arrays.Cells, Cq_Sizes.Cells, Local_Tails.Cells,
-               Unsents.Cells, Live_Ops.Cells))
+               Unsents.Cells, Live_Ops.Cells, Defers.Cells))
 is
 
    package Uring renames Iour.Ffi.Uring;
@@ -112,6 +112,10 @@ is
 
    --  Submitted, completion not yet seen.
    package Live_Ops    is new Iour.Per_Shard (Natural, 0);
+
+   --  Whether this shard's ring was created with DEFER_TASKRUN, which
+   --  changes when completions become visible.  See Flush.
+   package Defers      is new Iour.Per_Shard (Boolean, False);
 
    ---------------------------------------------------------------------------
    --  Address arithmetic helpers
@@ -444,8 +448,23 @@ is
       --  request rather than refuse it.  A kernel that does not recognise
       --  them fails setup with EINVAL, so fall back rather than refuse to
       --  start.
-      Preferred : constant Unsigned_32 :=
+      Base_Flags : constant Unsigned_32 :=
         Uring.Setup_Single_Issuer or Uring.Setup_Clamp;
+
+      --  DEFER_TASKRUN is the one that matters for throughput.  Without it
+      --  the kernel completes an operation the moment the data is there:
+      --  it queues the completion work onto this shard's thread and sends
+      --  that CPU an inter-processor interrupt to make it run, whatever the
+      --  thread was doing.  On a request/response workload that is one IPI
+      --  per round trip per core, and it is what the profile showed under
+      --  sock_def_readable.
+      --
+      --  With the flag the kernel holds the work until this thread asks for
+      --  it, which is the shape the scheduler already has: run fibers,
+      --  submit, then harvest.  It requires SINGLE_ISSUER, and it changes
+      --  when completions become visible -- see Flush.
+      Deferred_Flags : constant Unsigned_32 :=
+        Base_Flags or Uring.Setup_Defer_Taskrun;
 
       procedure Try (Flags : Unsigned_32; H : out Ring_Handle;
                      Result : out Io_Result);
@@ -472,16 +491,30 @@ is
       end Try;
 
       H : Ring_Handle;
+
+      --  Whether the ring we ended up with actually defers, which is what
+      --  Flush has to know.  Assuming it when the kernel refused the flag
+      --  would cost a syscall per idle pass; assuming it is absent when it
+      --  is not would strand completions until the shard next slept.
+      Defer : Boolean := True;
    begin
-      Try (Preferred, H, Status);
+      Try (Deferred_Flags, H, Status);
 
       if Status < 0 then
-         --  Retry with no optional flags before giving up.
-         Try (0, H, Status);
+         --  A kernel older than 6.1 does not know DEFER_TASKRUN; one older
+         --  than 6.0 does not know SINGLE_ISSUER either.  Step down rather
+         --  than refuse to start.
+         Defer := False;
+         Try (Base_Flags, H, Status);
+
+         if Status < 0 then
+            Try (0, H, Status);
+         end if;
       end if;
 
       if Status >= 0 then
          Cells (Shard).Install (H);
+         Defers.Set (Shard, Defer);
 
          --  Publish what the hot path reads.  The fd goes last: it is the
          --  one field a sibling looks at, and a ring with an fd is a ring
@@ -513,6 +546,7 @@ is
       --  or harvest that somehow followed would find no ring rather than a
       --  stale mapping.
       Fds.Set        (Shard, -1);
+      Defers.Set     (Shard, False);
       Sqe_Arrays.Set (Shard, 0);
       Cqe_Arrays.Set (Shard, 0);
       Sq_Heads.Set   (Shard, 0);
@@ -634,6 +668,8 @@ is
       Flags     : Unsigned_32 := 0;
       Result    : Ffi.C_Int;
       Taken     : Unsigned_32;
+      Defer     : Boolean;
+      Live      : Natural;
    begin
       Fds.Get         (Shard, Fd);
       Unsents.Get     (Shard, To_Submit);
@@ -654,9 +690,30 @@ is
 
       if Wait_For > 0 then
          Flags := Flags or Uring.Enter_Getevents;
-      elsif To_Submit = 0 then
-         Status := 0;
-         return;  --  nothing queued and nothing to wait for
+      else
+         --  On a deferring ring the kernel runs completion work only when
+         --  asked, so a submit that does not ask would leave this shard's
+         --  own completions invisible until it next slept.  GETEVENTS with
+         --  Min_Complete zero is the ask, and it does not block: it runs
+         --  the pending work, publishes whatever is ready, and returns.
+         Defers.Get (Shard, Defer);
+
+         if Defer then
+            Live_Ops.Get (Shard, Live);
+         else
+            --  A non-deferring ring publishes completions on its own, so
+            --  there is nothing to collect and no reason to enter.
+            Live := 0;
+         end if;
+
+         if To_Submit = 0 and then Live = 0 then
+            Status := 0;
+            return;  --  nothing queued, in flight, or to wait for
+         end if;
+
+         if Defer then
+            Flags := Flags or Uring.Enter_Getevents;
+         end if;
       end if;
 
       --  The one system call on the hot path, and the only place a shard

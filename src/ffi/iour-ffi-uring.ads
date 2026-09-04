@@ -168,6 +168,7 @@ package Iour.Ffi.Uring with SPARK_Mode => On is
    Setup_Clamp         : constant := 16;
    Setup_Coop_Taskrun  : constant := 256;
    Setup_Single_Issuer : constant := 4096;
+   Setup_Defer_Taskrun : constant := 8192;
 
    --  io_uring_setup feature reports
    Feat_Single_Mmap : constant := 1;

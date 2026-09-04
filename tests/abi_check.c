@@ -71,6 +71,7 @@ CHECK(IORING_SETUP_SQPOLL == 2,          "Setup_Sqpoll");
 CHECK(IORING_SETUP_CLAMP == 16,          "Setup_Clamp");
 CHECK(IORING_SETUP_COOP_TASKRUN == 256,  "Setup_Coop_Taskrun");
 CHECK(IORING_SETUP_SINGLE_ISSUER == 4096, "Setup_Single_Issuer");
+CHECK(IORING_SETUP_DEFER_TASKRUN == 8192, "Setup_Defer_Taskrun");
 
 CHECK(IORING_FEAT_SINGLE_MMAP == 1, "Feat_Single_Mmap");
 CHECK(IORING_FEAT_NODROP == 2,      "Feat_Nodrop");
