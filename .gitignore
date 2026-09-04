@@ -4,3 +4,6 @@
 /lib/
 /obj/
 *.ali
+/bench/tokio_echo/target/
+/bench/build/
+/bench/results/

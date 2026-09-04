@@ -8,7 +8,7 @@
 SHELL := /bin/bash
 ENV   := source ./env.sh &&
 
-.PHONY: all lib examples tests abi-check smoke demo prove prove-boundary clean help
+.PHONY: all lib examples tests abi-check smoke demo bench prove prove-boundary clean help
 
 all: examples abi-check
 
@@ -38,6 +38,14 @@ smoke: tests abi-check
 demo: examples
 	./scripts/run_demo.sh
 
+# The runtime's echo demo against the tokio equivalent in bench/tokio_echo:
+# every server against every client, then each server alone across core
+# counts, then latency.  Needs cargo.  See the header of scripts/bench.sh
+# for the knobs, and for why running it as root and unprivileged gives
+# different answers.
+bench: examples
+	./scripts/bench.sh
+
 # Full proof of everything
 prove: 
 	alr gnatprove -P io_uring_async_runtime.gpr --mode=all --level=3 -j0
@@ -49,5 +57,6 @@ help:
 	@echo "make examples        build the library, server and client"
 	@echo "make smoke           build and run the runtime self-test"
 	@echo "make demo            traced walkthrough, then 2000 connections"
+	@echo "make bench           benchmark the demo against bench/tokio_echo"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
 	@echo "make prove           SPARK proof of everything"

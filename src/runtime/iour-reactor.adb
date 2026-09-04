@@ -3,10 +3,16 @@ with System.Storage_Elements;
 with Iour.Ffi.Memory;
 with Iour.Ffi.Sys;
 with Iour.Ffi.Net;
+with Iour.Per_Shard;
 
 package body Iour.Reactor with
   SPARK_Mode    => On,
-  Refined_State => (Rings => Cells)
+  Refined_State =>
+    (Rings => (Cells,
+               Fds.Cells, Sq_Heads.Cells, Sq_Tails.Cells, Sqe_Arrays.Cells,
+               Sq_Sizes.Cells, Cq_Heads.Cells, Cq_Tails.Cells,
+               Cqe_Arrays.Cells, Cq_Sizes.Cells, Local_Tails.Cells,
+               Unsents.Cells, Live_Ops.Cells))
 is
 
    package Uring renames Iour.Ffi.Uring;
@@ -60,69 +66,52 @@ is
    --  Ring_Cell -- one shard's ring
    ---------------------------------------------------------------------------
 
-   --  Only ever touched by its owning shard, so the lock is uncontended;
-   --  it is here because SPARK requires state reachable from more than one
-   --  task to be synchronised, and because it keeps the ring's invariants
-   --  in one auditable place.
-   --
-   --  Nothing in here blocks.  io_uring_enter, the one call that can sleep,
-   --  is issued by Flush from outside the protected action.
+   --  The mapping, kept for teardown.  This lock is taken twice in a
+   --  ring's life -- Install at Open, Take at Shut -- and never on the path
+   --  an operation follows.
    protected type Ring_Cell
      with Priority => Runtime_Priority
    is
-
       procedure Install (Handle : Ring_Handle);
       procedure Take (Handle : out Ring_Handle);
-
-      --  Push, in two halves around the memory access.  Begin_Push hands
-      --  out what the caller needs to test for room and write the entry;
-      --  Commit_Push records that it did.
-      procedure Begin_Push
-        (Sqes       : out System.Address;
-         Entries    : out Unsigned_32;
-         Head_Addr  : out System.Address;
-         Local_Tail : out Unsigned_32;
-         Ready      : out Boolean)
-        with Post => (if Ready then Entries > 0
-                                   and then Sqes /= System.Null_Address
-                                   and then Head_Addr /= System.Null_Address);
-      procedure Commit_Push;
-
-      --  Publish, in two halves: report what to submit and where the tail
-      --  lives; the caller does the release store.
-      procedure Prepare_Submit
-        (Fd        : out Ffi.C_Int;
-         To_Submit : out Unsigned_32;
-         Tail_Addr : out System.Address;
-         Tail      : out Unsigned_32);
-
-      --  Account for what io_uring_enter actually accepted.
-      procedure Accept_Submission (Count : Natural);
-
-      --  Harvest, in two halves: where the completion ring is, and then how
-      --  many entries the caller consumed.
-      procedure Begin_Harvest
-        (Cqes      : out System.Address;
-         Entries   : out Unsigned_32;
-         Head_Addr : out System.Address;
-         Tail_Addr : out System.Address;
-         Ready     : out Boolean)
-        with Post => (if Ready then Entries > 0
-                                   and then Cqes /= System.Null_Address
-                                   and then Head_Addr /= System.Null_Address
-                                   and then Tail_Addr /= System.Null_Address);
-      procedure Consumed (Count : Natural);
-
-      function Pending return Natural;
-      function Fd_Of return Ffi.C_Int;
-
    private
-      H         : Ring_Handle;
-      Unsent    : Unsigned_32 := 0;  --  queued but not yet handed to enter
-      Ops_Live  : Natural := 0;      --  submitted, completion not yet seen
+      H : Ring_Handle;
    end Ring_Cell;
 
    Cells : array (Shard_Id) of Ring_Cell;
+
+   --  Everything Push, Flush and Harvest touch, as one atomic cell per
+   --  shard (Iour.Per_Shard).  A ring has exactly one submitter and one
+   --  reaper, the shard that owns it, so none of this is ever contended;
+   --  it used to sit behind the lock above because SPARK needs state that
+   --  more than one task can reach to be synchronised, and atomics are the
+   --  other way to satisfy that.  Two protected actions per push and four
+   --  per scheduler pass become plain loads and stores.
+   --
+   --  The mapped addresses are held as Integer_Address because a cell has
+   --  to be a discrete scalar; To_Address on the way out costs nothing.
+   --  The only cross-shard reader is Ring_Descriptor, which wants the fd of
+   --  a sibling's ring to message it, and that is written once at Open.
+   package Fds         is new Iour.Per_Shard (Ffi.C_Int, -1);
+   package Sq_Heads    is new Iour.Per_Shard (Integer_Address, 0);
+   package Sq_Tails    is new Iour.Per_Shard (Integer_Address, 0);
+   package Sqe_Arrays  is new Iour.Per_Shard (Integer_Address, 0);
+   package Sq_Sizes    is new Iour.Per_Shard (Unsigned_32, 0);
+   package Cq_Heads    is new Iour.Per_Shard (Integer_Address, 0);
+   package Cq_Tails    is new Iour.Per_Shard (Integer_Address, 0);
+   package Cqe_Arrays  is new Iour.Per_Shard (Integer_Address, 0);
+   package Cq_Sizes    is new Iour.Per_Shard (Unsigned_32, 0);
+
+   --  Our private copy of the submission tail: operations accumulate here
+   --  and become visible to the kernel only when Flush publishes it, so a
+   --  burst of submissions costs one release store, not one per entry.
+   package Local_Tails is new Iour.Per_Shard (Unsigned_32, 0);
+
+   --  Queued but not yet handed to io_uring_enter.
+   package Unsents     is new Iour.Per_Shard (Unsigned_32, 0);
+
+   --  Submitted, completion not yet seen.
+   package Live_Ops    is new Iour.Per_Shard (Natural, 0);
 
    ---------------------------------------------------------------------------
    --  Address arithmetic helpers
@@ -307,8 +296,6 @@ is
       procedure Install (Handle : Ring_Handle) is
       begin
          H := Handle;
-         Unsent := 0;
-         Ops_Live := 0;
       end Install;
 
       procedure Take (Handle : out Ring_Handle) is
@@ -316,79 +303,6 @@ is
          Handle := H;
          H := Ring_Handle'(others => <>);
       end Take;
-
-      function Fd_Of return Ffi.C_Int is (H.Fd);
-
-      function Pending return Natural is (Ops_Live);
-
-      procedure Begin_Push
-        (Sqes       : out System.Address;
-         Entries    : out Unsigned_32;
-         Head_Addr  : out System.Address;
-         Local_Tail : out Unsigned_32;
-         Ready      : out Boolean) is
-      begin
-         Sqes       := H.Sqes;
-         Entries    := H.Sq_Entries;
-         Head_Addr  := H.Sq_Head;
-         Local_Tail := H.Local_Tail;
-         Ready := H.Sq_Entries > 0
-           and then H.Sqes /= System.Null_Address
-           and then H.Sq_Head /= System.Null_Address;
-      end Begin_Push;
-
-      procedure Commit_Push is
-      begin
-         H.Local_Tail := H.Local_Tail + 1;
-         Unsent := Unsent + 1;
-         if Ops_Live < Natural'Last then
-            Ops_Live := Ops_Live + 1;
-         end if;
-      end Commit_Push;
-
-      procedure Prepare_Submit
-        (Fd        : out Ffi.C_Int;
-         To_Submit : out Unsigned_32;
-         Tail_Addr : out System.Address;
-         Tail      : out Unsigned_32) is
-      begin
-         Fd        := H.Fd;
-         To_Submit := Unsent;
-         Tail_Addr := H.Sq_Tail;
-         Tail      := H.Local_Tail;
-      end Prepare_Submit;
-
-      procedure Accept_Submission (Count : Natural) is
-      begin
-         if Unsigned_32 (Count) >= Unsent then
-            Unsent := 0;
-         else
-            --  A short submit leaves the remainder queued for next time.
-            Unsent := Unsent - Unsigned_32 (Count);
-         end if;
-      end Accept_Submission;
-
-      procedure Begin_Harvest
-        (Cqes      : out System.Address;
-         Entries   : out Unsigned_32;
-         Head_Addr : out System.Address;
-         Tail_Addr : out System.Address;
-         Ready     : out Boolean) is
-      begin
-         Cqes      := H.Cqes;
-         Entries   := H.Cq_Entries;
-         Head_Addr := H.Cq_Head;
-         Tail_Addr := H.Cq_Tail;
-         Ready := H.Cq_Entries > 0
-           and then H.Cqes /= System.Null_Address
-           and then H.Cq_Head /= System.Null_Address
-           and then H.Cq_Tail /= System.Null_Address;
-      end Begin_Harvest;
-
-      procedure Consumed (Count : Natural) is
-      begin
-         Ops_Live := (if Ops_Live > Count then Ops_Live - Count else 0);
-      end Consumed;
 
    end Ring_Cell;
 
@@ -568,6 +482,22 @@ is
 
       if Status >= 0 then
          Cells (Shard).Install (H);
+
+         --  Publish what the hot path reads.  The fd goes last: it is the
+         --  one field a sibling looks at, and a ring with an fd is a ring
+         --  that is ready.
+         Sq_Heads.Set    (Shard, To_Integer (H.Sq_Head));
+         Sq_Tails.Set    (Shard, To_Integer (H.Sq_Tail));
+         Sqe_Arrays.Set  (Shard, To_Integer (H.Sqes));
+         Sq_Sizes.Set    (Shard, H.Sq_Entries);
+         Cq_Heads.Set    (Shard, To_Integer (H.Cq_Head));
+         Cq_Tails.Set    (Shard, To_Integer (H.Cq_Tail));
+         Cqe_Arrays.Set  (Shard, To_Integer (H.Cqes));
+         Cq_Sizes.Set    (Shard, H.Cq_Entries);
+         Local_Tails.Set (Shard, H.Local_Tail);
+         Unsents.Set     (Shard, 0);
+         Live_Ops.Set    (Shard, 0);
+         Fds.Set         (Shard, H.Fd);
       end if;
    end Open;
 
@@ -578,6 +508,20 @@ is
    procedure Shut (Shard : Shard_Id) is
       H : Ring_Handle;
    begin
+      --  Retire the ring before unmapping it: fd first, so a sibling that
+      --  looks now sees nothing to message, then the addresses, so a push
+      --  or harvest that somehow followed would find no ring rather than a
+      --  stale mapping.
+      Fds.Set        (Shard, -1);
+      Sqe_Arrays.Set (Shard, 0);
+      Cqe_Arrays.Set (Shard, 0);
+      Sq_Heads.Set   (Shard, 0);
+      Sq_Tails.Set   (Shard, 0);
+      Cq_Heads.Set   (Shard, 0);
+      Cq_Tails.Set   (Shard, 0);
+      Sq_Sizes.Set   (Shard, 0);
+      Cq_Sizes.Set   (Shard, 0);
+
       Cells (Shard).Take (H);
 
       if H.Sqes_Base /= System.Null_Address then
@@ -600,27 +544,38 @@ is
 
    procedure Push (Shard : Shard_Id; Spec : Op_Spec; Queued : out Boolean)
    is
+      Sqes_I     : Integer_Address;
+      Head_I     : Integer_Address;
       Sqes       : System.Address;
-      Entries    : Unsigned_32;
       Head_Addr  : System.Address;
+      Entries    : Unsigned_32;
       Local_Tail : Unsigned_32;
-      Ready      : Boolean;
       Head       : Unsigned_32;
       Mask       : Unsigned_32;
       Index      : Unsigned_32;
+      Unsent     : Unsigned_32;
+      Live       : Natural;
    begin
       Queued := False;
 
-      Cells (Shard).Begin_Push (Sqes, Entries, Head_Addr, Local_Tail, Ready);
-      if not Ready then
-         return;
+      Sqe_Arrays.Get  (Shard, Sqes_I);
+      Sq_Sizes.Get    (Shard, Entries);
+      Sq_Heads.Get    (Shard, Head_I);
+      Local_Tails.Get (Shard, Local_Tail);
+      Sqes      := To_Address (Sqes_I);
+      Head_Addr := To_Address (Head_I);
+
+      if Entries = 0
+        or else Sqes = System.Null_Address
+        or else Head_Addr = System.Null_Address
+      then
+         return;  --  no ring
       end if;
 
       --  How many slots the kernel has not yet taken.  Unsigned
       --  subtraction is what makes this correct across the point where the
-      --  32-bit counters wrap.  Reading the kernel's head happens outside
-      --  the protected action: it is a memory access, and one shard owns
-      --  this ring, so nothing else can be pushing meanwhile.
+      --  32-bit counters wrap.  One shard owns this ring, so nothing else
+      --  can be pushing meanwhile.
       Mem.Load_Word (Head_Addr, Head);
       if Local_Tail - Head >= Entries then
          return;  --  queue full; the caller flushes and retries
@@ -656,7 +611,13 @@ is
                    Addr3        => 0,
                    Pad2         => 0));
 
-      Cells (Shard).Commit_Push;
+      Local_Tails.Set (Shard, Local_Tail + 1);
+      Unsents.Get (Shard, Unsent);
+      Unsents.Set (Shard, Unsent + 1);
+      Live_Ops.Get (Shard, Live);
+      if Live < Natural'Last then
+         Live_Ops.Set (Shard, Live + 1);
+      end if;
       Queued := True;
    end Push;
 
@@ -667,12 +628,18 @@ is
    is
       Fd        : Ffi.C_Int;
       To_Submit : Unsigned_32;
+      Tail_I    : Integer_Address;
       Tail_Addr : System.Address;
       Tail      : Unsigned_32;
       Flags     : Unsigned_32 := 0;
       Result    : Ffi.C_Int;
+      Taken     : Unsigned_32;
    begin
-      Cells (Shard).Prepare_Submit (Fd, To_Submit, Tail_Addr, Tail);
+      Fds.Get         (Shard, Fd);
+      Unsents.Get     (Shard, To_Submit);
+      Sq_Tails.Get    (Shard, Tail_I);
+      Local_Tails.Get (Shard, Tail);
+      Tail_Addr := To_Address (Tail_I);
 
       if Tail_Addr /= System.Null_Address then
          --  Release store: everything written into the SQEs must be
@@ -693,8 +660,7 @@ is
       end if;
 
       --  The one system call on the hot path, and the only place a shard
-      --  sleeps.  Issued outside the protected action so no lock is held
-      --  across a blocking call.
+      --  sleeps.
       Result := Uring.Enter
         (Fd           => Ffi.C_Unsigned (Fd),
          To_Submit    => Ffi.C_Unsigned (To_Submit),
@@ -703,7 +669,11 @@ is
          Sig          => System.Null_Address);
 
       if Result > 0 then
-         Cells (Shard).Accept_Submission (Natural (Result));
+         --  Account for what the kernel actually accepted.  A short submit
+         --  leaves the remainder queued for next time.
+         Taken := Unsigned_32 (Result);
+         Unsents.Set (Shard, (if Taken >= To_Submit then 0
+                              else To_Submit - Taken));
       end if;
 
       Status := Io_Result (Result);
@@ -726,23 +696,37 @@ is
       Batch : out Completion_Batch;
       Count : out Natural)
    is
+      Cqes_I    : Integer_Address;
+      Head_I    : Integer_Address;
+      Tail_I    : Integer_Address;
       Cqes      : System.Address;
       Entries   : Unsigned_32;
       Head_Addr : System.Address;
       Tail_Addr : System.Address;
-      Ready     : Boolean;
       Head      : Unsigned_32;
       Tail      : Unsigned_32;
       Mask      : Unsigned_32;
       N         : Natural range 0 .. Reap_Batch := 0;
       E         : Uring.Cqe;
+      Live      : Natural;
    begin
       Batch := [others => (others => <>)];
       Count := 0;
 
-      Cells (Shard).Begin_Harvest (Cqes, Entries, Head_Addr, Tail_Addr, Ready);
-      if not Ready then
-         return;
+      Cqe_Arrays.Get (Shard, Cqes_I);
+      Cq_Sizes.Get   (Shard, Entries);
+      Cq_Heads.Get   (Shard, Head_I);
+      Cq_Tails.Get   (Shard, Tail_I);
+      Cqes      := To_Address (Cqes_I);
+      Head_Addr := To_Address (Head_I);
+      Tail_Addr := To_Address (Tail_I);
+
+      if Entries = 0
+        or else Cqes = System.Null_Address
+        or else Head_Addr = System.Null_Address
+        or else Tail_Addr = System.Null_Address
+      then
+         return;  --  no ring
       end if;
 
       Mem.Load_Word (Head_Addr, Head);
@@ -769,7 +753,8 @@ is
       if N > 0 then
          --  Release the slots in one store rather than one per entry.
          Mem.Store_Word (Head_Addr, Head);
-         Cells (Shard).Consumed (N);
+         Live_Ops.Get (Shard, Live);
+         Live_Ops.Set (Shard, (if Live > N then Live - N else 0));
       end if;
 
       Count := N;
@@ -777,12 +762,13 @@ is
 
    procedure In_Flight (Shard : Shard_Id; Count : out Natural) is
    begin
-      Count := Cells (Shard).Pending;
+      Live_Ops.Get (Shard, Count);
    end In_Flight;
 
    procedure Ring_Descriptor (Shard : Shard_Id; Fd : out Descriptor) is
-      Raw : constant Ffi.C_Int := Cells (Shard).Fd_Of;
+      Raw : Ffi.C_Int;
    begin
+      Fds.Get (Shard, Raw);
       Fd := (if Raw < 0 then Invalid_Descriptor else Descriptor (Raw));
    end Ring_Descriptor;
 

@@ -717,7 +717,6 @@ is
    is
       Resolved : Boolean;
    begin
-      Result := -E_Again;
       loop
          --  Sleep first, ask afterwards.  The waiter was registered when
          --  the future was acquired, and the operation behind it sits in
