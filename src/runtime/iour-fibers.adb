@@ -22,8 +22,8 @@ is
    --  Machine context slots
    ---------------------------------------------------------------------------
 
-   --  Contexts live on the C side; Ada only names them.  Slots 0 ..
-   --  Max_Fibers - 1 belong to fibers, the rest to the shard schedulers
+   --  Contexts live in Iour.Ffi.Fiber; this package only names them.  Slots
+   --  0 .. Max_Fibers - 1 belong to fibers, the rest to the shard schedulers
    --  they switch back to.
    Total_Slots : constant := Max_Fibers + Max_Shards;
 
@@ -743,9 +743,9 @@ is
                --  SPARK proves fiber bodies raise nothing, so this is
                --  unreachable by construction.  It is here because the
                --  alternative, if that ever stopped holding, is an
-               --  exception unwinding off a fiber stack into the assembly
-               --  trampoline, which would take the process down with no
-               --  diagnosis at all.
+               --  exception unwinding off a fiber stack into the trampoline
+               --  and its dummy return address, which would take the process
+               --  down with no diagnosis at all.
                when others =>
                   Status := -E_Canceled;
             end;
@@ -775,7 +775,8 @@ is
          --  Unreachable: the scheduler recycles this slot and re-primes the
          --  stack before anything runs on it again, so control restarts at
          --  the trampoline rather than returning here.  The loop is what
-         --  guarantees the procedure cannot fall through into the assembly.
+         --  guarantees the procedure cannot fall through into the dummy
+         --  return address Prime planted above it.
       end loop;
    end Fiber_Main;
 

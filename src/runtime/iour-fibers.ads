@@ -25,9 +25,9 @@
 --  All mutable state here is protected-object state, and there is one
 --  object per shard rather than one for the runtime, so the locks a shard
 --  takes on its own path are always uncontended.  Machine contexts are not
---  Ada state at all: they live on the C side and are named by slot index,
---  which is what leaves this package with nothing to race over and no
---  address to hand out.
+--  this package's state: they live in Iour.Ffi.Fiber and are named by slot
+--  index, which is what leaves this package with nothing to race over and
+--  no address to hand out.
 ------------------------------------------------------------------------------
 
 package Iour.Fibers with

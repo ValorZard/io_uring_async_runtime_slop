@@ -6,11 +6,13 @@
 --  checked against them.
 project Prove_Core is
    for Languages use ("Ada");
-   for Source_Dirs use ("src", "src/ffi", "src/runtime", "src/net", "examples");
+   for Source_Dirs use
+     ("src", "src/ffi", "src/runtime", "src/net", "src/arch/x86_64",
+      "examples");
    for Source_Files use
      ("iour.ads",
       "iour-ffi.ads",
-      "iour-ffi-fiber.ads",
+      "iour-ffi-fiber.ads",     "iour-ffi-fiber.adb",
       "iour-ffi-sys.ads",       "iour-ffi-sys.adb",
       "iour-ffi-net.ads",       "iour-ffi-net.adb",
       "iour-ffi-uring.ads",

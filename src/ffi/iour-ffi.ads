@@ -1,15 +1,11 @@
 ------------------------------------------------------------------------------
---  Iour.Ffi -- bindings to the C shim and to the libraries the runtime uses.
+--  Iour.Ffi -- bindings to the libraries the runtime uses, and the one
+--  machine-level primitive it needs.
 --
---  The shim exists for reasons that are not negotiable rather than for
---  convenience:
---
---    * iour_fiber -- saving and restoring a machine context cannot be
---      written in Ada at all, and the saved contexts live beside it.
---
---  Everything else binds directly: liburing's two exported syscall wrappers
---  and libc's socket, memory-mapping and resource-limit calls are all real
---  symbols.  No scheduling, buffering or retry policy lives on the C side.
+--  Everything binds directly: liburing's two exported syscall wrappers and
+--  libc's socket, memory-mapping and resource-limit calls are all real
+--  symbols.  The context switch, which no library provides, is GNAT inline
+--  Asm in Iour.Ffi.Fiber.  There is no C in this runtime.
 --
 --  Every binding takes and returns scalars, addresses or access values,
 --  never raw pointers of its own, so the Ada runtime above stays free of

@@ -1,4 +1,7 @@
 # io_uring async runtime for Ada/SPARK -- build, test and verification.
+# Pure Ada: the context switch is GNAT inline Asm.  gcc appears below only
+# to compile the ABI conformance test, which is C on purpose -- it checks the
+# Ada mirrors against the real headers.
 #
 # The GNAT toolchain comes from Alire; env.sh puts it on PATH.
 

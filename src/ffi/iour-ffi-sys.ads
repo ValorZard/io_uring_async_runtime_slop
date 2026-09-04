@@ -30,9 +30,12 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
    --  Memory mapping (used for the io_uring shared rings)
    ---------------------------------------------------------------------------
 
+   Prot_None     : constant := 0;
    Prot_Read     : constant := 1;
    Prot_Write    : constant := 2;
    Map_Shared    : constant := 1;
+   Map_Private   : constant := 2;
+   Map_Anonymous : constant := 16#20#;
    Map_Populate  : constant := 16#8000#;
 
    --  mmap reports failure as (void *) -1 rather than NULL.
@@ -49,6 +52,15 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
 
    function Munmap (Addr : System.Address; Length : C_Size) return C_Int
      with Import, Convention => C, External_Name => "munmap", Global => null;
+
+   function Mprotect
+     (Addr : System.Address; Length : C_Size; Prot : C_Int) return C_Int
+     with Import, Convention => C, External_Name => "mprotect",
+          Global => null;
+
+   function Getpagesize return C_Int
+     with Import, Convention => C, External_Name => "getpagesize",
+          Global => null;
 
    ---------------------------------------------------------------------------
    --  Scheduling and process control

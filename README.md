@@ -1,7 +1,8 @@
 # io_uring async runtime for Ada 2022 / SPARK
 
-A thread-per-core asynchronous runtime built on `io_uring`, written in Ada 2022
-under `SPARK_Mode => On` and the **Jorvik** tasking profile.
+A thread-per-core asynchronous runtime built on `io_uring`, written entirely
+in Ada 2022 under the **Jorvik** tasking profile, with every unit but one in
+`SPARK_Mode => On`.
 
 `Await` is an ordinary function call. When it cannot make progress it switches
 the core to another task and returns later, exactly where it left off:
@@ -79,8 +80,8 @@ figure.
   another, so `Await` can be a plain call. This is the model Seastar exposes as
   `seastar::thread`, and it is what the stack-per-task cost buys.
 
-  The saved contexts themselves live on the C side and are named from Ada by
-  slot index. That split is deliberate: a saved stack pointer is machine state
+  The saved contexts themselves live in the fiber primitive's own table and
+  are named by slot index. That split is deliberate: a saved stack pointer is machine state
   whose only accessor is the assembly, and an Ada array that has to hand out
   addresses into itself can be neither a protected object nor anything SPARK
   will let an access type designate. Naming slots by integer leaves the Ada
@@ -159,27 +160,38 @@ analysable.
 
 Where libc wants a pointer, the Ada binding takes an `access` parameter and the
 caller passes `X'Access` from a declaration of its own. GNAT passes that as a
-plain pointer, so the C side is unchanged, and no Ada code has to take the
+plain pointer, so libc sees what it expects, and no Ada code has to take the
 address of an Ada object: SPARK can follow an access value where it cannot
 follow an address.
 
-### The one C file
+### The context switch
 
-`src/c/iour_fiber.c` is the only C in the project, and it is essentially
-assembly: saving and restoring a machine context cannot be expressed in Ada at
-all. It is about twenty instructions on x86-64 (an AArch64 path is included),
-`mmap` for a fiber stack with a guard page below it, and the table of saved
-contexts that the assembly reads and writes, indexed by slot.
+There is no C in this runtime. The one thing no library provides, saving and
+restoring a machine context, is GNAT inline `Asm` inside `naked` subprograms in
+[iour-ffi-fiber.adb](src/arch/x86_64/iour-ffi-fiber.adb). `naked` tells GCC to
+emit no prologue or epilogue, so the `Asm` text *is* the function and the stack
+pointer is exactly what the caller left.
 
-The switch is deliberately tiny. It saves the SysV callee-saved registers on
-the outgoing stack, swaps the stack pointer, and pops them back. It touches no
-signal mask, so a switch costs tens of cycles rather than the microsecond
-`swapcontext(3)` spends in `rt_sigprocmask`.
+The design follows [minicoro](https://github.com/edubart/minicoro) closely
+enough to be checked against it side by side: registers go in a 64-byte
+context buffer rather than on the stack, a two-instruction trampoline receives
+the entry point in `r12` and its argument in `r13`, and the initial stack
+carries a dummy return address so the entry sees the alignment a `call` would
+have left. The switch touches no signal mask, so it costs tens of cycles rather
+than the microsecond `swapcontext(3)` spends in `rt_sigprocmask`.
+
+That body is the **only `SPARK_Mode => Off` unit** in the project. It has to
+take the address of a context slot to hand it to the switch, and write the
+dummy return address through a computed stack address; SPARK forbids both. Its
+spec stays in SPARK with full contracts, and every client is verified against
+those. Stacks are `mmap`ed with a `PROT_NONE` guard page below them, which is
+this runtime's addition to the minicoro layout.
 
 ## SPARK status
 
-Every unit is `SPARK_Mode => On`, and every unit compiles under GNAT's SPARK
-legality rules. Neither SPARK nor Jorvik is disabled anywhere.
+Every unit is `SPARK_Mode => On` except one: the x86-64 body of
+`Iour.Ffi.Fiber`, the context switch, whose spec is in SPARK and whose
+contracts every caller is checked against. Jorvik is on everywhere.
 
 `gnatprove` goes further than the compiler, and there are two targets because
 there are two honest answers.
@@ -368,7 +380,7 @@ bury the trace in repeats of its own polling.
 
 ```
 src/iour.ads                 core types, handles, tunables
-src/ffi/                     direct bindings: liburing, libc sockets, libc
+src/ffi/                     direct bindings: liburing, libc; the fiber spec
 src/runtime/
   iour-reactor.adb           the io_uring submission/completion protocol, in Ada
   iour-fibers.adb            fiber table, context switching, Await, Spawn
@@ -382,7 +394,8 @@ src/runtime/
   iour-text.adb              Put_Line that suspends a fiber, not a core
   iour-trace.adb             IOUR_TRACE: watch the scheduler decide
 src/net/iour-net.adb         asynchronous sockets
-src/c/iour_fiber.c           the context switch (the only C)
+src/arch/x86_64/
+  iour-ffi-fiber.adb         the context switch: inline Asm, SPARK_Mode Off
 examples/                    echo server and client
 tests/smoke.adb              runtime self-test
 tests/abi_check.c            kernel-ABI conformance, checked at compile time
