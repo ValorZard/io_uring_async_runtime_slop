@@ -1,7 +1,14 @@
 package body Iour.Run_Queue with
   SPARK_Mode    => On,
-  Refined_State => (Queue => Shared)
+  Refined_State => (Queue => (Shared, Occupied))
 is
+
+   --  Mirrors "Held > 0", written only from inside Shared's protected
+   --  actions and read from anywhere.  Atomic rather than protected, which
+   --  is the whole point of it: see Might_Have_Work.
+   Occupied : Boolean := False
+     with Atomic, Async_Readers, Async_Writers,
+          Effective_Reads => False, Effective_Writes => False;
 
    --  One more slot than the maximum number of fibers, so a full queue is
    --  distinguishable from an empty one without a separate count.
@@ -41,6 +48,7 @@ is
          Items (Tail) := Handle;
          Tail := Tail + 1;          --  modular: wraps on its own
          Held := Held + 1;
+         Occupied := True;
          if Lifetime < Natural'Last then
             Lifetime := Lifetime + 1;
          end if;
@@ -56,6 +64,7 @@ is
          Handle := Items (Head);
          Head := Head + 1;
          Held := Held - 1;
+         Occupied := Held > 0;
       end Pop;
 
       procedure Depth (Count : out Natural) is
@@ -84,6 +93,11 @@ is
    begin
       Shared.Depth (Count);
    end Depth;
+
+   procedure Might_Have_Work (Yes : out Boolean) is
+   begin
+      Yes := Occupied;
+   end Might_Have_Work;
 
    procedure Total_Pushed (Count : out Natural) is
    begin

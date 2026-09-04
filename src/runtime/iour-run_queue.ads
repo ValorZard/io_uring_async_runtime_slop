@@ -31,6 +31,16 @@ is
    procedure Depth (Count : out Natural)
      with Global => (In_Out => Queue);
 
+   --  Whether Pop could return anything, read without taking the lock.
+   --  Every shard's loop asks this on every pass, and this queue is the one
+   --  lock all of them share; a plain atomic read is what keeps an idle
+   --  question from becoming contention.  A stale True costs one wasted
+   --  Pop; a stale False cannot happen after the Push that made it stale
+   --  has returned, because the flag is written inside that same protected
+   --  action.
+   procedure Might_Have_Work (Yes : out Boolean)
+     with Global => (Input => Queue);
+
    --  Total items ever published, for reporting.
    procedure Total_Pushed (Count : out Natural)
      with Global => (In_Out => Queue);

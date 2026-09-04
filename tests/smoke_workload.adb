@@ -82,7 +82,13 @@ package body Smoke_Workload with SPARK_Mode => On is
          --  A NOP is trivial as an operation but drives the entire path:
          --  submission slot, io_uring_enter, completion harvest, future
          --  resolution, and the switch back into this fiber.
-         Futures.Acquire (Shard, No_Fiber, Futures.Pending, Handle);
+         Futures.Acquire
+           (Near   => Shard,
+            Worker => No_Fiber,
+            State  => Futures.Pending,
+            Waiter => No_Fiber,
+            Home   => No_Shard,
+            Handle => Handle);
          if Handle /= No_Future then
             Reactor.Push
               (Active_Shard (Shard),

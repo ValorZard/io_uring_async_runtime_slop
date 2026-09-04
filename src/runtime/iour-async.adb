@@ -26,10 +26,14 @@ package body Iour.Async with SPARK_Mode => On is
 
       --  This core's own bank: the completion will be reaped here too, and
       --  the fiber resumed here, so the whole life of this future stays on
-      --  one lock.
+      --  one lock.  Registering as the waiter now, rather than when the
+      --  await begins, is what lets Await_Submitted below go to sleep
+      --  without touching that lock first.
       Futures.Acquire (Near   => Shard,
                        Worker => No_Fiber,
                        State  => Futures.Pending,
+                       Waiter => Me,
+                       Home   => Shard,
                        Handle => Handle);
       if Handle = No_Future then
          --  The future table is full.  Report it rather than wait: the core
@@ -55,7 +59,7 @@ package body Iour.Async with SPARK_Mode => On is
 
       --  The fiber stops here.  Its core moves on to other work and comes
       --  back to this exact point once the completion lands.
-      Fibers.Await (Handle, Result);
+      Fibers.Await_Submitted (Shard, Me, Handle, Result);
    end Perform;
 
 end Iour.Async;

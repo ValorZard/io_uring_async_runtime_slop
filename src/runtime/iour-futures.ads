@@ -53,10 +53,18 @@ is
    --  caller's own shard, or No_Shard from a thread that has none.  Yields
    --  No_Future only when every bank is exhausted, which the caller must
    --  handle: this runtime never blocks waiting for a handle.
+   --
+   --  Waiter and Home register a waiter up front, for the caller that
+   --  already knows it will be the one to wait: a fiber submitting its own
+   --  I/O.  That saves it a trip through the lock later, when it would
+   --  otherwise have to subscribe.  Pass No_Fiber and No_Shard when the
+   --  waiter is not yet known, as for a spawned task or a promise.
    procedure Acquire
      (Near   : Shard_Ref;
       Worker : Fiber_Ref;
       State  : Future_State;
+      Waiter : Fiber_Ref;
+      Home   : Shard_Ref;
       Handle : out Future_Ref)
      with Pre  => State in Queued | Pending,
           Global => (In_Out => Table);
@@ -80,23 +88,21 @@ is
       Home   : out Shard_Ref)
      with Global => (In_Out => Table);
 
-   --  Register the caller as the waiter, unless the future is already
-   --  resolved (in which case Resolved is True and Result is meaningful).
-   --  Doing both in one protected action is what closes the race between a
-   --  fiber deciding to sleep and another core resolving the future
-   --  underneath it.
-   procedure Subscribe
-     (Handle : Future_Id;
-      Waiter : Fiber_Id;
-      Home   : Shard_Id;
+   --  Either take the result, or register to be woken for it.
+   --
+   --  If the future is resolved, Resolved is True, Result carries the
+   --  value and the slot has been freed: the handle is dead.  Otherwise the
+   --  caller is registered as the waiter and should suspend.  Doing the
+   --  test, the registration and the release in one protected action is
+   --  what closes the race between a fiber deciding to sleep and another
+   --  core resolving the future underneath it -- and what makes the whole
+   --  await one lock round trip on the way in and one on the way out.
+   procedure Claim
+     (Handle   : Future_Id;
+      Waiter   : Fiber_Id;
+      Home     : Shard_Id;
       Resolved : out Boolean;
-      Result : out Io_Result)
-     with Global => (In_Out => Table);
-
-   --  Read a resolved future's result and free the slot in one step.
-   procedure Take
-     (Handle : Future_Id;
-      Result : out Io_Result)
+      Result   : out Io_Result)
      with Global => (In_Out => Table);
 
    ---------------------------------------------------------------------------

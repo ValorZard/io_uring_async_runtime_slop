@@ -75,6 +75,8 @@ is
       procedure Acquire
         (Worker : Fiber_Ref;
          State  : Future_State;
+         Waiter : Fiber_Ref;
+         Home   : Shard_Ref;
          Local  : out Local_Index;
          Got    : out Boolean);
       procedure Release (Local : Local_Index);
@@ -83,13 +85,12 @@ is
          Result : Io_Result;
          Waiter : out Fiber_Ref;
          Home   : out Shard_Ref);
-      procedure Subscribe
+      procedure Claim
         (Local    : Local_Index;
          Waiter   : Fiber_Id;
          Home     : Shard_Id;
          Resolved : out Boolean;
          Result   : out Io_Result);
-      procedure Take (Local : Local_Index; Result : out Io_Result);
       procedure Worker_Of (Local : Local_Index; Worker : out Fiber_Ref);
       procedure Adopt (Local : Local_Index; Worker : out Fiber_Ref);
       procedure Stats (Live : out Natural; High_Water : out Natural)
@@ -115,6 +116,8 @@ is
       procedure Acquire
         (Worker : Fiber_Ref;
          State  : Future_State;
+         Waiter : Fiber_Ref;
+         Home   : Shard_Ref;
          Local  : out Local_Index;
          Got    : out Boolean)
       is
@@ -136,8 +139,8 @@ is
 
          Slots (Local) := (State  => State,
                            Result => 0,
-                           Waiter => No_Fiber,
-                           Home   => No_Shard,
+                           Waiter => Waiter,
+                           Home   => Home,
                            Worker => Worker);
 
          Live := Bank_Size - Top;
@@ -185,7 +188,7 @@ is
          Slots (Local).Waiter := No_Fiber;
       end Resolve;
 
-      procedure Subscribe
+      procedure Claim
         (Local    : Local_Index;
          Waiter   : Fiber_Id;
          Home     : Shard_Id;
@@ -194,9 +197,12 @@ is
       is
       begin
          if Slots (Local).State = Ready then
-            --  Resolved before the caller got here: no need to sleep.
+            --  Resolved already: take the value and give the slot back in
+            --  the same action, so the caller neither sleeps nor comes
+            --  back for a second one.
             Resolved := True;
             Result := Slots (Local).Result;
+            Release (Local);
             return;
          end if;
 
@@ -204,13 +210,7 @@ is
          Result := 0;
          Slots (Local).Waiter := Waiter;
          Slots (Local).Home   := Home;
-      end Subscribe;
-
-      procedure Take (Local : Local_Index; Result : out Io_Result) is
-      begin
-         Result := Slots (Local).Result;
-         Release (Local);
-      end Take;
+      end Claim;
 
       procedure Worker_Of (Local : Local_Index; Worker : out Fiber_Ref) is
       begin
@@ -243,6 +243,8 @@ is
      (Near   : Shard_Ref;
       Worker : Fiber_Ref;
       State  : Future_State;
+      Waiter : Fiber_Ref;
+      Home   : Shard_Ref;
       Handle : out Future_Ref)
    is
       --  A thread with no shard of its own -- the environment task during
@@ -262,7 +264,7 @@ is
       --  the other banks sit empty.
       for Step in 0 .. Shard_Count - 1 loop
          Bank_No := Bank_Index ((First + Step) mod Shard_Count);
-         Banks (Bank_No).Acquire (Worker, State, Local, Got);
+         Banks (Bank_No).Acquire (Worker, State, Waiter, Home, Local, Got);
          if Got then
             Handle := Handle_Of (Bank_No, Local);
             return;
@@ -285,21 +287,16 @@ is
         (Local_Of (Handle), Result, Waiter, Home);
    end Resolve;
 
-   procedure Subscribe
-     (Handle : Future_Id;
-      Waiter : Fiber_Id;
-      Home   : Shard_Id;
+   procedure Claim
+     (Handle   : Future_Id;
+      Waiter   : Fiber_Id;
+      Home     : Shard_Id;
       Resolved : out Boolean;
-      Result : out Io_Result) is
+      Result   : out Io_Result) is
    begin
-      Banks (Bank_Of (Handle)).Subscribe
+      Banks (Bank_Of (Handle)).Claim
         (Local_Of (Handle), Waiter, Home, Resolved, Result);
-   end Subscribe;
-
-   procedure Take (Handle : Future_Id; Result : out Io_Result) is
-   begin
-      Banks (Bank_Of (Handle)).Take (Local_Of (Handle), Result);
-   end Take;
+   end Claim;
 
    procedure Worker_Of (Handle : Future_Id; Worker : out Fiber_Ref) is
    begin

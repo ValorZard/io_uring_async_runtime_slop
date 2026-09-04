@@ -224,6 +224,8 @@ package body Iour.Scheduler with SPARK_Mode => On is
 
       Progress : Boolean;
       Useful   : Boolean;
+      Posted   : Boolean;
+      Offered  : Boolean;
       Item     : Future_Ref;
       Fiber    : Fiber_Ref;
       Started  : Boolean;
@@ -286,13 +288,18 @@ package body Iour.Scheduler with SPARK_Mode => On is
          --  0. Wakeups posted by threads that own no ring -------------
          --  The environment task fulfilling a promise lands here.  They are
          --  converted to ordinary local wakeups on this shard, which is the
-         --  only place it is safe to touch this shard's ready queue.
-         loop
-            Fibers.Take_Posted (Shard, Fiber);
-            exit when Fiber = No_Fiber;
-            Fibers.Wake (Shard, Fiber, Shard);
-            Progress := True;
-         end loop;
+         --  only place it is safe to touch this shard's ready queue.  The
+         --  flag is an atomic read, so the usual case -- nothing posted --
+         --  takes no lock.
+         Fibers.Inbox_Pending (Shard, Posted);
+         if Posted then
+            loop
+               Fibers.Take_Posted (Shard, Fiber);
+               exit when Fiber = No_Fiber;
+               Fibers.Wake (Shard, Fiber, Shard);
+               Progress := True;
+            end loop;
+         end if;
 
          --  1. Harvest completions -------------------------------------
          loop
@@ -306,15 +313,21 @@ package body Iour.Scheduler with SPARK_Mode => On is
          end loop;
 
          --  2. Adopt new work from the global queue ---------------------
-         loop
-            Run_Queue.Pop (Item);
-            exit when Item = No_Future;
-            Fibers.Adopt (Shard, Item, Started);
-            if Started then
-               Progress := True;
-               Bump (N_Adopted);
-            end if;
-         end loop;
+         --  Every shard passes here on every loop, and the queue is the one
+         --  lock they all share; asking an atomic flag first is what keeps
+         --  an empty queue from being a point of contention.
+         Run_Queue.Might_Have_Work (Offered);
+         if Offered then
+            loop
+               Run_Queue.Pop (Item);
+               exit when Item = No_Future;
+               Fibers.Adopt (Shard, Item, Started);
+               if Started then
+                  Progress := True;
+                  Bump (N_Adopted);
+               end if;
+            end loop;
+         end if;
 
          --  3. Run whatever is ready ------------------------------------
          Resumed := 0;

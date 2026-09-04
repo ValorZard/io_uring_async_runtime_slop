@@ -22,12 +22,17 @@
 --  A fiber slot that has finished keeps its mapping for the next occupant,
 --  so accepting a connection after the first costs no system call.
 --
---  All mutable state here is protected-object state, and there is one
---  object per shard rather than one for the runtime, so the locks a shard
---  takes on its own path are always uncontended.  Machine contexts are not
---  this package's state: they live in Iour.Ffi.Fiber and are named by slot
---  index, which is what leaves this package with nothing to race over and
---  no address to hand out.
+--  Mutable state here is of two kinds.  What two shards can contend for --
+--  the fiber table, a ready queue, an inbox -- is protected-object state,
+--  one object per shard where the design allows it so the lock a shard takes
+--  on its own path is uncontended.  What only a shard itself ever touches --
+--  which fiber is on its core, why the last one gave the core back -- is an
+--  atomic cell per shard (Iour.Per_Shard), with no lock at all: an
+--  uncontended protected action still costs a mutex round trip each way,
+--  and the hot path was taking a dozen of them per I/O operation.  Machine
+--  contexts are not this package's state: they live in Iour.Ffi.Fiber and
+--  are named by slot index, which is what leaves this package with nothing
+--  to race over and no address to hand out.
 ------------------------------------------------------------------------------
 
 package Iour.Fibers with
@@ -35,13 +40,6 @@ package Iour.Fibers with
   Abstract_State => (Registry with Synchronous, External),
   Initializes    => Registry
 is
-
-   type Fiber_State is
-     (Slot_Free,   --  unused table entry
-      Runnable,    --  ready to be resumed
-      Running,     --  currently on a core
-      Suspended,   --  waiting for a future
-      Completed);  --  body returned; slot is about to be recycled
 
    ---------------------------------------------------------------------------
    --  Identity
@@ -114,6 +112,19 @@ is
    --  computation does not starve its shard.
    procedure Yield;
 
+   --  Await for the fiber that registered itself as the waiter when it
+   --  acquired the future, and has just submitted the operation behind it
+   --  to this shard's ring.  Such a future cannot resolve before this
+   --  shard's scheduler runs again -- only this shard reaps this ring -- so
+   --  the fiber goes straight to sleep, with no trip through the future's
+   --  lock on the way in.  Iour.Async is the caller; anything else should
+   --  use Await, which makes no such assumption.
+   procedure Await_Submitted
+     (Shard  : Active_Shard;
+      Me     : Fiber_Id;
+      Handle : Future_Id;
+      Result : out Io_Result);
+
    ---------------------------------------------------------------------------
    --  Scheduler-facing operations
    ---------------------------------------------------------------------------
@@ -155,6 +166,13 @@ is
    --  the shard converts it to a local Wake on its next pass -- within the
    --  idle backoff if it was asleep.
    procedure Post_Wake (Fiber : Fiber_Id; Home : Shard_Id);
+
+   --  Whether anything may have been posted since the last drain, cleared
+   --  by the asking.  The shard loop asks this every pass; the answer is an
+   --  atomic read, so an empty inbox costs no lock.  Cleared before the
+   --  drain rather than after, so a post that lands during the drain is
+   --  seen on the next pass rather than lost.
+   procedure Inbox_Pending (Shard : Shard_Id; Pending : out Boolean);
 
    --  Drain one posted wakeup, or No_Fiber.  Called by the owning shard.
    procedure Take_Posted (Shard : Shard_Id; Fiber : out Fiber_Ref);

@@ -11,6 +11,8 @@ package body Iour.Promises with SPARK_Mode => On is
       Futures.Acquire (Near   => Fibers.Self,
                        Worker => No_Fiber,
                        State  => Futures.Pending,
+                       Waiter => No_Fiber,
+                       Home   => No_Shard,
                        Handle => Handle);
    end Create;
 

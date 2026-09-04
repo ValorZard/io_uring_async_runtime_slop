@@ -4,13 +4,16 @@ with Iour.Ffi;
 with Iour.Ffi.Fiber;
 with Iour.Ffi.Sys;
 with Iour.Futures;
+with Iour.Per_Shard;
 with Iour.Reactor;
 with Iour.Run_Queue;
 with Iour.Trace;
 
 package body Iour.Fibers with
   SPARK_Mode    => On,
-  Refined_State => (Registry => (Pool, Shard_Cells))
+  Refined_State =>
+    (Registry => (Pool, Shard_Cells,
+                  Currents.Cells, Exits.Cells, Inbox_Flags.Cells))
 is
 
    package Fib renames Iour.Ffi.Fiber;
@@ -49,12 +52,12 @@ is
    ---------------------------------------------------------------------------
 
    type Fiber_Record is record
-      State : Fiber_State    := Slot_Free;
-      Home  : Shard_Ref      := No_Shard;
-      Work  : Fiber_Body     := null;
-      Arg   : Fiber_Argument := 0;
-      Done  : Future_Ref     := No_Future;
-      Stack : System.Address := System.Null_Address;
+      In_Use : Boolean        := False;
+      Home   : Shard_Ref      := No_Shard;
+      Work   : Fiber_Body     := null;
+      Arg    : Fiber_Argument := 0;
+      Done   : Future_Ref     := No_Future;
+      Stack  : System.Address := System.Null_Address;
    end record;
 
    type Fiber_Table is array (Fiber_Id) of Fiber_Record;
@@ -75,8 +78,6 @@ is
          Work  : out Fiber_Body;
          Arg   : out Fiber_Argument;
          Done  : out Future_Ref);
-      procedure Mark (Fiber : Fiber_Id; State : Fiber_State);
-      procedure State_Of (Fiber : Fiber_Id; State : out Fiber_State);
       procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref);
       procedure Stack_Of (Fiber : Fiber_Id; Base : out System.Address);
       procedure Set_Stack (Fiber : Fiber_Id; Base : System.Address);
@@ -97,12 +98,30 @@ is
    --  Per-shard scheduling state
    ---------------------------------------------------------------------------
 
-   --  One protected object per shard, holding everything that shard's loop
-   --  touches: its ready queue, which fiber is on its core, and whether it
-   --  is asleep.  One lock per shard rather than one for the runtime, so
-   --  the path a shard takes through its own state never contends; a
-   --  sibling only reaches in to hand over a fiber or to see if it is
-   --  sleeping.
+   --  Two layers.  Below, one protected object per shard holds what a
+   --  sibling may reach into: the ready queue a wakeup lands on, the inbox,
+   --  the idle flag.  Here, three atomic cells per shard hold what nobody
+   --  but the shard's own thread ever touches, and which therefore need no
+   --  lock: it is the same thread that writes and reads them, and an atomic
+   --  store is how SPARK lets that be said without one.
+
+   --  Which fiber is on the core.  No_Fiber while the scheduler itself is.
+   package Currents is new Iour.Per_Shard (Fiber_Ref, No_Fiber);
+
+   --  Why the fiber that last held the core gave it back.  The fiber writes
+   --  it just before switching out; After_Resume reads it just after.
+   type Exit_Reason is
+     (Suspended,   --  waiting on a future; whoever resolves it will Wake
+      Yielded,     --  voluntarily; goes to the back of the ready queue
+      Completed);  --  body returned; the slot is recycled
+
+   package Exits is new Iour.Per_Shard (Exit_Reason, Suspended);
+
+   --  Whether Post_Wake has left anything in the inbox since the shard last
+   --  looked.  Set by the poster after its protected push; cleared by the
+   --  shard before it drains.
+   package Inbox_Flags is new Iour.Per_Shard (Boolean, False);
+
    type Ready_Index is mod Max_Fibers;
    type Ready_Array is array (Ready_Index) of Fiber_Id;
 
@@ -118,8 +137,6 @@ is
       procedure Enqueue (Fiber : Fiber_Id);
       procedure Pop (Fiber : out Fiber_Ref);
       procedure Depth (Count : out Natural);
-      procedure Put_Running (Fiber : Fiber_Ref);
-      procedure Take_Running (Fiber : out Fiber_Ref);
       procedure Put_Idle (Idle : Boolean);
       procedure Take_Idle (Idle : out Boolean);
       --  The inbox: wakeups posted from threads that own no ring.
@@ -130,7 +147,6 @@ is
       Head    : Ready_Index := 0;
       Tail    : Ready_Index := 0;
       Held    : Natural range 0 .. Max_Fibers := 0;
-      Current : Fiber_Ref := No_Fiber;
       Asleep  : Boolean := False;
 
       Inbox   : Ready_Array := [others => 0];
@@ -161,8 +177,8 @@ is
 
          --  Deliberately preserve Stack: a recycled slot keeps the mapping
          --  it already owns, so only the first use of a slot costs an mmap.
-         Slots (Fiber).State := Runnable;
-         Slots (Fiber).Home  := No_Shard;
+         Slots (Fiber).In_Use := True;
+         Slots (Fiber).Home   := No_Shard;
          Slots (Fiber).Work  := Work;
          Slots (Fiber).Arg   := Arg;
          Slots (Fiber).Done  := No_Future;
@@ -192,16 +208,6 @@ is
          Done  := Slots (Fiber).Done;
       end Launch_Info;
 
-      procedure Mark (Fiber : Fiber_Id; State : Fiber_State) is
-      begin
-         Slots (Fiber).State := State;
-      end Mark;
-
-      procedure State_Of (Fiber : Fiber_Id; State : out Fiber_State) is
-      begin
-         State := Slots (Fiber).State;
-      end State_Of;
-
       procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref) is
       begin
          Shard := Slots (Fiber).Home;
@@ -219,11 +225,11 @@ is
 
       procedure Recycle (Fiber : Fiber_Id) is
       begin
-         if Slots (Fiber).State = Slot_Free then
+         if not Slots (Fiber).In_Use then
             return;
          end if;
-         Slots (Fiber).State := Slot_Free;
-         Slots (Fiber).Home  := No_Shard;
+         Slots (Fiber).In_Use := False;
+         Slots (Fiber).Home   := No_Shard;
          Slots (Fiber).Work  := null;
          Slots (Fiber).Arg   := 0;
          Slots (Fiber).Done  := No_Future;
@@ -299,16 +305,6 @@ is
       begin
          Count := Held;
       end Depth;
-
-      procedure Put_Running (Fiber : Fiber_Ref) is
-      begin
-         Current := Fiber;
-      end Put_Running;
-
-      procedure Take_Running (Fiber : out Fiber_Ref) is
-      begin
-         Fiber := Current;
-      end Take_Running;
 
       procedure Put_Idle (Idle : Boolean) is
       begin
@@ -389,7 +385,7 @@ is
 
    procedure Running_Fiber (Shard : Shard_Id; Fiber : out Fiber_Ref) is
    begin
-      Shard_Cells (Shard).Take_Running (Fiber);
+      Currents.Get (Shard, Fiber);
    end Running_Fiber;
 
    procedure Set_Idle (Shard : Shard_Id; Idle : Boolean) is
@@ -399,8 +395,20 @@ is
 
    procedure Post_Wake (Fiber : Fiber_Id; Home : Shard_Id) is
    begin
+      --  Flag after the push, never before: the protected action orders
+      --  the push ahead of the store, so a shard that sees the flag will
+      --  find the fiber.
       Shard_Cells (Home).Post (Fiber);
+      Inbox_Flags.Set (Home, True);
    end Post_Wake;
+
+   procedure Inbox_Pending (Shard : Shard_Id; Pending : out Boolean) is
+   begin
+      Inbox_Flags.Get (Shard, Pending);
+      if Pending then
+         Inbox_Flags.Set (Shard, False);
+      end if;
+   end Inbox_Pending;
 
    procedure Take_Posted (Shard : Shard_Id; Fiber : out Fiber_Ref) is
    begin
@@ -456,8 +464,6 @@ is
 
    procedure Wake (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id) is
    begin
-      Pool.Mark (Fiber, Runnable);
-
       if Home = From then
          Shard_Cells (From).Enqueue (Fiber);
          return;
@@ -548,6 +554,8 @@ is
       Futures.Acquire (Near   => Me,
                        Worker => Fiber,
                        State  => Futures.Queued,
+                       Waiter => No_Fiber,
+                       Home   => No_Shard,
                        Handle => Handle);
       if Handle = No_Future then
          Pool.Recycle (Fiber);
@@ -617,7 +625,6 @@ is
                  Size => Ffi.C_Size (Fiber_Stack_Bytes),
                  Arg  => Ffi.C_Long (Fiber));
 
-      Pool.Mark (Fiber, Runnable);
       Push_Ready (Shard, Fiber, Started);
       Trace.Event (Shard, "adopted fiber", Integer (Fiber));
    end Adopt;
@@ -628,30 +635,34 @@ is
 
    procedure Resume (Shard : Shard_Id; Fiber : Fiber_Id) is
    begin
-      Pool.Mark (Fiber, Running);
-      Shard_Cells (Shard).Put_Running (Fiber);
+      Currents.Set (Shard, Fiber);
+
+      --  The conservative default, in case a path out of the fiber ever
+      --  fails to say why it left: a fiber nobody wakes is a leak, and a
+      --  fiber resumed twice is a corruption.
+      Exits.Set (Shard, Suspended);
 
       --  Hand the core to the fiber.  This returns once the fiber suspends,
       --  yields or finishes -- on this same stack, with the scheduler's
       --  registers restored exactly as they were.
       Fib.Switch (From => Shard_Slot (Shard), To => Fiber_Slot (Fiber));
 
-      Shard_Cells (Shard).Put_Running (No_Fiber);
+      Currents.Set (Shard, No_Fiber);
    end Resume;
 
    procedure After_Resume (Shard : Shard_Id; Fiber : Fiber_Id) is
-      State : Fiber_State;
+      Why : Exit_Reason;
    begin
-      Pool.State_Of (Fiber, State);
-      case State is
+      Exits.Get (Shard, Why);
+      case Why is
          when Completed =>
             --  The slot goes back to the pool but keeps its stack.
             Pool.Recycle (Fiber);
-         when Runnable =>
-            --  Yielded voluntarily: back of the queue.
+         when Yielded =>
+            --  Back of the queue.
             Shard_Cells (Shard).Enqueue (Fiber);
-         when others =>
-            --  Suspended on a future; whoever resolves it will call Wake.
+         when Suspended =>
+            --  Whoever resolves the future will call Wake.
             null;
       end case;
    end After_Resume;
@@ -682,21 +693,45 @@ is
       end if;
 
       loop
-         --  Registering as the waiter and testing for a result happen in
-         --  one protected action, so a resolution racing in from another
-         --  core cannot slip between the test and the sleep.
-         Futures.Subscribe (Handle, Me, Shard, Resolved, Result);
+         --  Registering as the waiter, testing for a result and, if there
+         --  is one, freeing the slot all happen in one protected action, so
+         --  a resolution racing in from another core cannot slip between
+         --  the test and the sleep.  When it returns Resolved the handle
+         --  is already dead.
+         Futures.Claim (Handle, Me, Shard, Resolved, Result);
          exit when Resolved;
 
-         Pool.Mark (Me, Suspended);
+         Exits.Set (Shard, Suspended);
 
          --  Give the core back.  Other fibers run, completions are reaped,
          --  and control returns here once this future has been resolved.
          Switch_To_Scheduler (Me, Shard);
       end loop;
-
-      Futures.Release (Handle);
    end Await;
+
+   procedure Await_Submitted
+     (Shard  : Active_Shard;
+      Me     : Fiber_Id;
+      Handle : Future_Id;
+      Result : out Io_Result)
+   is
+      Resolved : Boolean;
+   begin
+      Result := -E_Again;
+      loop
+         --  Sleep first, ask afterwards.  The waiter was registered when
+         --  the future was acquired, and the operation behind it sits in
+         --  this shard's ring, whose completions only this shard's loop
+         --  reaps -- so it cannot resolve before the switch below gives
+         --  that loop the core.  The loop is defence: if the wakeup was
+         --  not for a resolution, sleep again rather than return nothing.
+         Exits.Set (Shard, Suspended);
+         Switch_To_Scheduler (Me, Shard);
+
+         Futures.Claim (Handle, Me, Shard, Resolved, Result);
+         exit when Resolved;
+      end loop;
+   end Await_Submitted;
 
    procedure Yield is
       Shard : constant Shard_Ref := Self;
@@ -710,9 +745,9 @@ is
          return;
       end if;
 
-      --  Runnable, not Suspended: After_Resume puts it straight back on
-      --  the ready queue.
-      Pool.Mark (Me, Runnable);
+      --  Yielded, not Suspended: After_Resume puts it straight back on the
+      --  ready queue.
+      Exits.Set (Shard, Yielded);
       Switch_To_Scheduler (Me, Shard);
    end Yield;
 
@@ -777,10 +812,10 @@ is
             end if;
          end if;
 
-         Pool.Mark (Me, Completed);
          Trace.Event (Shard, "fiber finished", Integer (Me));
 
          if Shard in Active_Shard then
+            Exits.Set (Shard, Completed);
             Switch_To_Scheduler (Me, Shard);
          end if;
 
