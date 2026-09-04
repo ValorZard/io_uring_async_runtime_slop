@@ -56,7 +56,16 @@ package Iour with SPARK_Mode => On is
 
    --  Concurrent fibers.  Each live fiber costs one stack (allocated lazily,
    --  then recycled), so this bounds memory rather than reserving it.
-   Max_Fibers : constant := 4096;
+   --
+   --  A connection holds one for its whole life, so this is the real cap on
+   --  simultaneous connections -- and it has to be read together with how
+   --  fast the runtime accepts.  At 5000 offered connections the older,
+   --  slower accept path kept fewer than 4096 alive at any instant and so
+   --  fitted under half this; accepting straight into a registered file
+   --  slot is quick enough that all 5000 are now live together, and a
+   --  table of 4096 would turn the surplus away.  Raising the bound costs
+   --  address space, not memory: stacks are mapped on first use.
+   Max_Fibers : constant := 8192;
 
    --  Concurrent unresolved futures.  A fiber in the middle of a read holds
    --  one; budget for a few per fiber.
@@ -132,6 +141,40 @@ package Iour with SPARK_Mode => On is
    type Descriptor is range -1 .. 2 ** 31 - 1;
    Invalid_Descriptor : constant Descriptor := -1;
 
+   --  A descriptor is either a process-wide file descriptor or a slot in
+   --  one shard's registered file table.  The kernel keeps a registered
+   --  file pinned for the life of the slot, so an operation on it skips the
+   --  descriptor-table lookup and reference count that an ordinary fd
+   --  costs on every submission.  The slot only means something on the
+   --  ring that registered it, so the shard is part of the name: a fixed
+   --  file is Fixed_File_Base + Shard * Fixed_File_Span + Slot, a range no
+   --  real fd reaches.
+   Fixed_File_Base : constant := 2 ** 30;
+   Fixed_File_Span : constant := 2 ** 20;
+   subtype File_Slot is Natural range 0 .. Fixed_File_Span - 1;
+
+   function Is_Fixed_File (D : Descriptor) return Boolean is
+     (D >= Fixed_File_Base);
+
+   function Fixed_File (Shard : Shard_Id; Slot : File_Slot) return Descriptor
+   is (Descriptor (Fixed_File_Base
+                   + Integer (Shard) * Fixed_File_Span + Slot))
+     with Post => Is_Fixed_File (Fixed_File'Result);
+
+   function Fixed_File_Shard (D : Descriptor) return Shard_Id is
+     (Shard_Id ((Integer (D) - Fixed_File_Base) / Fixed_File_Span))
+     with Pre => Is_Fixed_File (D)
+                 and then Integer (D) - Fixed_File_Base
+                          < Max_Shards * Fixed_File_Span;
+
+   function Fixed_File_Slot (D : Descriptor) return File_Slot is
+     ((Integer (D) - Fixed_File_Base) mod Fixed_File_Span)
+     with Pre => Is_Fixed_File (D);
+
+   pragma Compile_Time_Error
+     (Fixed_File_Base + Max_Shards * Fixed_File_Span > Descriptor'Last,
+      "fixed-file descriptors must fit below Descriptor'Last");
+
    --  Largest buffer one operation accepts.  io_uring carries a 32-bit
    --  length; this stays comfortably inside it and inside Natural, so the
    --  conversions along the way are provable rather than checked.
@@ -154,6 +197,12 @@ package Iour with SPARK_Mode => On is
 
    function Failed (R : Io_Result) return Boolean is (R < 0);
    function Succeeded (R : Io_Result) return Boolean is (R >= 0);
+
+   --  "No completion result": the one value the kernel never reports (see
+   --  Errno below), used where a resumption carries no result of its own --
+   --  a wakeup for a future, a yield -- so a fiber that was waiting for a
+   --  completion can tell the two apart.
+   No_Result : constant Io_Result := Io_Result'First;
 
    --  The guard on Io_Result'First is not hypothetical bookkeeping: negating
    --  it would overflow.  The kernel never reports it, so the branch is

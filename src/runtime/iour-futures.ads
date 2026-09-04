@@ -31,6 +31,12 @@
 --  A future has at most one waiter.  That is not a simplification for its
 --  own sake: a fiber awaits one thing at a time, and forbidding fan-out
 --  keeps wakeup a single assignment rather than a list walk.
+--
+--  Ordinary I/O does not come through here at all any more: a fiber that
+--  submits and sleeps is woken with its result by the shard that reaped
+--  it (Iour.Reactor.Tag_Fiber_Io).  What is left for the table is what
+--  genuinely needs a rendezvous between two parties -- a spawned fiber and
+--  whoever joins it, a promise and whoever awaits it.
 ------------------------------------------------------------------------------
 
 package Iour.Futures with

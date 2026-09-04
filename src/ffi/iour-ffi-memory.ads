@@ -76,6 +76,16 @@ package Iour.Ffi.Memory with SPARK_Mode => On is
      with Global => null,
           Post   => Of_Params'Result /= System.Null_Address;
 
+   function Of_Fd_Table (Table : Uring.Fd_Table) return System.Address
+     with Global => null,
+          Pre    => Table'Length > 0,
+          Post   => Of_Fd_Table'Result /= System.Null_Address;
+
+   function Of_Files_Update
+     (Update : aliased Uring.Files_Update) return System.Address
+     with Global => null,
+          Post   => Of_Files_Update'Result /= System.Null_Address;
+
    ---------------------------------------------------------------------------
    --  The memory-mapped rings
    ---------------------------------------------------------------------------

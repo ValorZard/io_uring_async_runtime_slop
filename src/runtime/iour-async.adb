@@ -1,13 +1,11 @@
 with Interfaces; use Interfaces;
 with Iour.Fibers;
-with Iour.Futures;
 
 package body Iour.Async with SPARK_Mode => On is
 
    procedure Perform (Spec : Reactor.Op_Spec; Result : out Io_Result) is
       Shard   : constant Shard_Ref := Fibers.Self;
       Me      : Fiber_Ref;
-      Handle  : Future_Ref;
       Request : Reactor.Op_Spec := Spec;
       Queued  : Boolean;
    begin
@@ -24,26 +22,24 @@ package body Iour.Async with SPARK_Mode => On is
          return;
       end if;
 
-      --  This core's own bank: the completion will be reaped here too, and
-      --  the fiber resumed here, so the whole life of this future stays on
-      --  one lock.  Registering as the waiter now, rather than when the
-      --  await begins, is what lets Await_Submitted below go to sleep
-      --  without touching that lock first.
-      Futures.Acquire (Near   => Shard,
-                       Worker => No_Fiber,
-                       State  => Futures.Pending,
-                       Waiter => Me,
-                       Home   => Shard,
-                       Handle => Handle);
-      if Handle = No_Future then
-         --  The future table is full.  Report it rather than wait: the core
-         --  that would free a slot is this one.
-         Result := -E_Again;
+      --  A registered file is a slot in one ring's table.  Submitting it
+      --  elsewhere would operate on whatever that ring's slot holds.
+      if Request.Ring in Active_Shard and then Request.Ring /= Shard then
+         Result := -E_Invalid;
          return;
       end if;
 
+      --  The token names this fiber, not a future.  The completion is
+      --  reaped by this shard, which puts the fiber straight back on its
+      --  ready queue with the result beside it: nothing is allocated, no
+      --  lock is taken, and the future table never hears about it.  That
+      --  is safe because a fiber submits one operation and then sleeps
+      --  until it completes, so there is never a second result to confuse
+      --  it with -- and because the fiber cannot be resumed by anything
+      --  else while it is in there: it holds no future for anyone to
+      --  resolve.
       Request.Token :=
-        Reactor.Encode (Reactor.Tag_Future, Unsigned_32 (Handle));
+        Reactor.Encode (Reactor.Tag_Fiber_Io, Unsigned_32 (Me));
 
       loop
          Reactor.Push (Shard, Request, Queued);
@@ -59,7 +55,7 @@ package body Iour.Async with SPARK_Mode => On is
 
       --  The fiber stops here.  Its core moves on to other work and comes
       --  back to this exact point once the completion lands.
-      Fibers.Await_Submitted (Shard, Me, Handle, Result);
+      Fibers.Await_Direct (Shard, Me, Result);
    end Perform;
 
 end Iour.Async;

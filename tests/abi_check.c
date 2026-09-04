@@ -35,6 +35,15 @@ CHECK(offsetof(struct io_uring_sqe, user_data) == 32, "Sqe.User_Data at 32");
 CHECK(offsetof(struct io_uring_sqe, buf_index) == 40, "Sqe.Buf_Index at 40");
 CHECK(offsetof(struct io_uring_sqe, personality) == 42,
       "Sqe.Personality at 42");
+CHECK(offsetof(struct io_uring_sqe, file_index) == 44,
+      "Sqe.Splice_Fd_In doubles as file_index at 44");
+
+/* ---- registered files --------------------------------------------------- */
+CHECK(sizeof(struct io_uring_files_update) == 16, "Files_Update size");
+CHECK(offsetof(struct io_uring_files_update, offset) == 0,
+      "Files_Update.Offset at 0");
+CHECK(offsetof(struct io_uring_files_update, fds) == 8,
+      "Files_Update.Fds at 8");
 
 /* ---- struct io_uring_cqe, as mirrored by Iour.Ffi.Uring.Cqe ------------- */
 CHECK(sizeof(struct io_uring_cqe) == 16,              "Cqe size");
@@ -79,6 +88,10 @@ CHECK(IORING_ENTER_GETEVENTS == 1,  "Enter_Getevents");
 CHECK(IORING_SQ_NEED_WAKEUP == 1,   "Sq_Need_Wakeup");
 CHECK(IORING_CQE_F_MORE == 2,       "Cqe_F_More");
 CHECK(IOSQE_CQE_SKIP_SUCCESS == 64, "Sqe_Cqe_Skip_Success");
+CHECK(IOSQE_FIXED_FILE == 1,        "Sqe_Fixed_File");
+CHECK(IORING_FILE_INDEX_ALLOC == (__u32) -1, "File_Index_Alloc");
+CHECK(IORING_REGISTER_FILES == 2,          "Register_Files");
+CHECK(IORING_REGISTER_FILES_UPDATE == 6,   "Register_Files_Update");
 
 /* ---- socket constants named in Iour.Ffi.Net ---------------------------- */
 CHECK(AF_INET == 2,        "Af_Inet");

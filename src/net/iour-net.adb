@@ -9,6 +9,7 @@ package body Iour.Net with SPARK_Mode => On is
 
    package Raw renames Iour.Ffi.Net;
 
+
    ---------------------------------------------------------------------------
    --  Setup
    ---------------------------------------------------------------------------
@@ -44,6 +45,18 @@ package body Iour.Net with SPARK_Mode => On is
    function Close_Now (S : Socket) return Io_Result is
       Result : Io_Result;
    begin
+      if Is_Fixed_File (S) then
+         --  A slot in some ring's table, which only that ring's issuing
+         --  thread may edit.
+         if Integer (S) - Fixed_File_Base >= Max_Shards * Fixed_File_Span
+           or else Fibers.Self /= Fixed_File_Shard (S)
+         then
+            return -E_Invalid;
+         end if;
+         Reactor.Unregister_File
+           (Fixed_File_Shard (S), Fixed_File_Slot (S), Result);
+         return Result;
+      end if;
       Result := Raw.Close (S);
       return Result;
    end Close_Now;
@@ -65,8 +78,24 @@ package body Iour.Net with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Accept_Connection (Listener : Socket; Result : out Io_Result) is
+      Shard  : constant Shard_Ref := Fibers.Self;
+      Direct : Boolean := False;
    begin
-      Async.Perform (Reactor.Op_Accept (Listener, 0), Result);
+      if Shard in Active_Shard then
+         Reactor.Has_Fixed_Files (Shard, Direct);
+      end if;
+
+      Async.Perform (Reactor.Op_Accept (Listener, 0, Direct), Result);
+
+      --  Accepted directly: the result is the slot the kernel chose, which
+      --  is only a descriptor once it says which ring's table it is in.
+      if Direct and then Result >= 0 and then Shard in Active_Shard then
+         if Result < Fixed_File_Span then
+            Result := Io_Result (Fixed_File (Shard, File_Slot (Result)));
+         else
+            Result := -E_Invalid;
+         end if;
+      end if;
    end Accept_Connection;
 
    procedure Receive

@@ -143,17 +143,21 @@ is
    --  computation does not starve its shard.
    procedure Yield;
 
-   --  Await for the fiber that registered itself as the waiter when it
-   --  acquired the future, and has just submitted the operation behind it
-   --  to this shard's ring.  Such a future cannot resolve before this
-   --  shard's scheduler runs again -- only this shard reaps this ring -- so
-   --  the fiber goes straight to sleep, with no trip through the future's
-   --  lock on the way in.  Iour.Async is the caller; anything else should
-   --  use Await, which makes no such assumption.
-   procedure Await_Submitted
+   --  Sleep until an operation this fiber has just submitted to this
+   --  shard's ring, under a Tag_Fiber_Io token naming Me, completes.  No
+   --  future is involved: the scheduler that reaps the completion puts the
+   --  fiber back on the ready queue with the result beside it, and Resume
+   --  hands it over through a per-shard cell before switching in.  That is
+   --  what takes every lock off the I/O path.
+   --
+   --  Sound because only this shard reaps this ring, and it does so only
+   --  once this fiber has switched out; and because a fiber has at most
+   --  one such operation in flight, so the result cannot be anyone else's.
+   --  A resumption that carries No_Result was not the completion -- the
+   --  fiber simply sleeps again.  Iour.Async is the caller.
+   procedure Await_Direct
      (Shard  : Active_Shard;
       Me     : Fiber_Id;
-      Handle : Future_Id;
       Result : out Io_Result);
 
    ---------------------------------------------------------------------------
@@ -169,16 +173,41 @@ is
       Started : out Boolean);
 
    --  Switch the core into a runnable fiber.  Returns when that fiber
-   --  suspends, yields or finishes.
-   procedure Resume (Shard : Shard_Id; Fiber : Fiber_Id);
+   --  suspends, yields or finishes.  Result is what the fiber's ready-queue
+   --  entry carried: a completion for a fiber asleep in Await_Direct, or
+   --  No_Result for any other resumption.
+   procedure Resume (Shard : Shard_Id; Fiber : Fiber_Id; Result : Io_Result);
 
    --  Tidy up after Resume: recycle the slot if the fiber finished.
    procedure After_Resume (Shard : Shard_Id; Fiber : Fiber_Id);
 
    procedure Push_Ready
      (Shard : Shard_Id; Fiber : Fiber_Id; Accepted : out Boolean);
-   procedure Pop_Ready (Shard : Shard_Id; Fiber : out Fiber_Ref);
    procedure Ready_Depth (Shard : Shard_Id; Count : out Natural);
+
+   --  A resumption and what it carries.  Result is No_Result unless the
+   --  entry is the completion of a Tag_Fiber_Io operation.
+   type Wake_Entry is record
+      Fiber  : Fiber_Id  := 0;
+      Result : Io_Result := No_Result;
+   end record;
+
+   --  Sized to a harvest: one entry per completion is the most a harvest
+   --  can produce, and one batch per pass is as many as a shard resumes
+   --  before it goes back to the ring.
+   Wake_Batch_Size : constant := Reap_Batch;
+   subtype Wake_Count is Natural range 0 .. Wake_Batch_Size;
+   type Wake_Batch is array (0 .. Wake_Batch_Size - 1) of Wake_Entry;
+
+   --  Make a whole harvest's worth of fibers runnable in one protected
+   --  action, and take a whole pass's worth off in one.  Only the owning
+   --  shard calls either: the queue is the shard's own, and the point of
+   --  batching is that the one lock it does take is taken once per pass,
+   --  not once per operation.
+   procedure Enqueue_Batch
+     (Shard : Shard_Id; Batch : Wake_Batch; Count : Wake_Count);
+   procedure Pop_Batch
+     (Shard : Shard_Id; Batch : out Wake_Batch; Count : out Wake_Count);
 
    --  Where a fiber must be resumed.
    procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref);

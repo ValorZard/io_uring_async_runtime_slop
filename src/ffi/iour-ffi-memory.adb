@@ -43,6 +43,13 @@ package body Iour.Ffi.Memory with SPARK_Mode => Off is
    function Of_Params (P : aliased Uring.Params) return System.Address is
      (P'Address);
 
+   function Of_Fd_Table (Table : Uring.Fd_Table) return System.Address is
+     (Table'Address);
+
+   function Of_Files_Update
+     (Update : aliased Uring.Files_Update) return System.Address
+   is (Update'Address);
+
    ---------------------------------------------------------------------------
    --  Ring words
    ---------------------------------------------------------------------------

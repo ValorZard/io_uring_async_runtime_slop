@@ -47,6 +47,10 @@ is
    --  timer expiries without a side table.
    type Token_Tag is
      (Tag_Future,     --  payload is a Future_Id: an awaited operation
+      Tag_Fiber_Io,   --  payload is the Fiber_Id that submitted the
+                      --  operation and is asleep on this shard until it
+                      --  completes.  No future in between: the result
+                      --  rides the ready queue straight to the fiber.
       Tag_Wake,       --  payload is a Fiber_Id biased by one, so that a
                       --  payload of zero means "nothing specific, just
                       --  look around"
@@ -71,14 +75,24 @@ is
    --  calling a prep function keeps every field the kernel reads in one
    --  place, next to the constructor that sets it.
    type Op_Spec is record
-      Opcode    : Unsigned_8  := Ffi.Uring.Op_Nop;
-      Sqe_Flags : Unsigned_8  := 0;
-      Fd        : Integer_32  := -1;
-      Off       : Unsigned_64 := 0;
-      Addr      : Unsigned_64 := 0;
-      Length    : Unsigned_32 := 0;
-      Op_Flags  : Unsigned_32 := 0;
-      Token     : Unsigned_64 := 0;
+      Opcode     : Unsigned_8  := Ffi.Uring.Op_Nop;
+      Sqe_Flags  : Unsigned_8  := 0;
+      Ioprio     : Unsigned_16 := 0;
+      Fd         : Integer_32  := -1;
+      Off        : Unsigned_64 := 0;
+      Addr       : Unsigned_64 := 0;
+      Length     : Unsigned_32 := 0;
+      Op_Flags   : Unsigned_32 := 0;
+      Token      : Unsigned_64 := 0;
+      Buf_Group  : Unsigned_16 := 0;
+      File_Index : Integer_32  := 0;
+
+      --  The ring an operation on a fixed file belongs to: a registered
+      --  slot means nothing on any other ring.  No_Shard for an ordinary
+      --  descriptor.  Iour.Async refuses to submit an operation whose
+      --  Ring is not the calling shard, which is what keeps a slot number
+      --  from ever being taken to another core's table.
+      Ring       : Shard_Ref   := No_Shard;
    end record;
 
    --  Do nothing, but complete.  Useful for exercising the full submission
@@ -89,7 +103,16 @@ is
    --  Accept one connection.  The peer address is not collected: nothing in
    --  the runtime needs it, and asking for it would mean per-operation
    --  storage that has to outlive the submission.
-   function Op_Accept (Fd : Descriptor; Token : Unsigned_64) return Op_Spec
+   --
+   --  Direct asks the kernel to install the accepted socket straight into
+   --  a free slot of this ring's registered file table and report the slot
+   --  as the result.  The caller turns that into a descriptor with
+   --  Fixed_File; only rings that registered a table (Has_Fixed_Files)
+   --  can honour it.
+   function Op_Accept
+     (Fd     : Descriptor;
+      Token  : Unsigned_64;
+      Direct : Boolean := False) return Op_Spec
      with Global => null;
 
    function Op_Connect
@@ -113,6 +136,8 @@ is
       Token  : Unsigned_64) return Op_Spec
      with Global => null;
 
+   --  Close a descriptor.  For a fixed file this empties the slot; the
+   --  kernel closes the socket once no operation refers to it any more.
    function Op_Close (Fd : Descriptor; Token : Unsigned_64) return Op_Spec
      with Global => null;
 
@@ -206,6 +231,27 @@ is
    --  This ring's descriptor, which a sibling needs in order to message it.
    procedure Ring_Descriptor (Shard : Shard_Id; Fd : out Descriptor)
      with Global => (In_Out => Rings), Always_Terminates;
+
+   ---------------------------------------------------------------------------
+   --  Registered files
+   ---------------------------------------------------------------------------
+
+   --  Every ring registers a sparse file table of Max_Fibers slots when
+   --  it opens, so that a socket accepted on a core can live in that
+   --  core's table for its whole life: the kernel then pins the file once,
+   --  and each operation on it skips the descriptor-table lookup and the
+   --  reference count that a plain fd pays every time.  A kernel that
+   --  refuses the registration leaves the ring on ordinary descriptors;
+   --  this reports which.
+   procedure Has_Fixed_Files (Shard : Shard_Id; Yes : out Boolean)
+     with Global => (In_Out => Rings), Always_Terminates;
+
+   --  Empty one slot of this shard's table synchronously, closing the
+   --  socket if nothing else holds it.  For contexts that cannot suspend
+   --  on an Op_Close; must be called on the owning shard's own thread.
+   procedure Unregister_File
+     (Shard : Shard_Id; Slot : File_Slot; Status : out Io_Result)
+     with Global => (In_Out => (Rings, Ffi.Kernel)), Always_Terminates;
 
    --  Deepest backoff level Arm_Idle_Timer accepts.
    Max_Backoff : constant := 7;

@@ -13,7 +13,8 @@ package body Iour.Fibers with
   SPARK_Mode    => On,
   Refined_State =>
     (Registry => (Banks, Shard_Cells,
-                  Currents.Cells, Exits.Cells, Inbox_Flags.Cells))
+                  Currents.Cells, Exits.Cells, Results.Cells,
+                  Inbox_Flags.Cells))
 is
 
    package Fib renames Iour.Ffi.Fiber;
@@ -166,13 +167,20 @@ is
 
    package Exits is new Iour.Per_Shard (Exit_Reason, Suspended);
 
+   --  What the resumption in progress carries.  Resume writes it from the
+   --  ready-queue entry just before switching in; a fiber asleep in
+   --  Await_Direct reads it just after the switch returns.  Same thread
+   --  both sides, which is why a cell is enough.
+   package Results is new Iour.Per_Shard (Io_Result, No_Result);
+
    --  Whether Post_Wake has left anything in the inbox since the shard last
    --  looked.  Set by the poster after its protected push; cleared by the
    --  shard before it drains.
    package Inbox_Flags is new Iour.Per_Shard (Boolean, False);
 
    type Ready_Index is mod Max_Fibers;
-   type Ready_Array is array (Ready_Index) of Fiber_Id;
+   type Ready_Array is array (Ready_Index) of Wake_Entry;
+   type Inbox_Array is array (Ready_Index) of Fiber_Id;
 
    protected type Shard_Cell
      with Priority => Runtime_Priority
@@ -184,7 +192,8 @@ is
       --  stays because SPARK proves the arithmetic from it; the branch it
       --  guards is unreachable.
       procedure Enqueue (Fiber : Fiber_Id);
-      procedure Pop (Fiber : out Fiber_Ref);
+      procedure Enqueue_Many (Batch : Wake_Batch; Count : Wake_Count);
+      procedure Pop_Many (Batch : out Wake_Batch; Count : out Wake_Count);
       procedure Depth (Count : out Natural);
       procedure Put_Idle (Idle : Boolean);
       procedure Take_Idle (Idle : out Boolean);
@@ -192,13 +201,13 @@ is
       procedure Post (Fiber : Fiber_Id);
       procedure Take_Post (Fiber : out Fiber_Ref);
    private
-      Items   : Ready_Array := [others => 0];
+      Items   : Ready_Array := [others => (others => <>)];
       Head    : Ready_Index := 0;
       Tail    : Ready_Index := 0;
       Held    : Natural range 0 .. Max_Fibers := 0;
       Asleep  : Boolean := False;
 
-      Inbox   : Ready_Array := [others => 0];
+      Inbox   : Inbox_Array := [others => 0];
       In_Head : Ready_Index := 0;
       In_Tail : Ready_Index := 0;
       In_Held : Natural range 0 .. Max_Fibers := 0;
@@ -422,7 +431,7 @@ is
             Accepted := False;
             return;
          end if;
-         Items (Tail) := Fiber;
+         Items (Tail) := (Fiber => Fiber, Result => No_Result);
          Tail := Tail + 1;
          Held := Held + 1;
          Accepted := True;
@@ -433,21 +442,34 @@ is
          if Held = Max_Fibers then
             return;
          end if;
-         Items (Tail) := Fiber;
+         Items (Tail) := (Fiber => Fiber, Result => No_Result);
          Tail := Tail + 1;
          Held := Held + 1;
       end Enqueue;
 
-      procedure Pop (Fiber : out Fiber_Ref) is
+      procedure Enqueue_Many (Batch : Wake_Batch; Count : Wake_Count) is
       begin
-         if Held = 0 then
-            Fiber := No_Fiber;
-            return;
-         end if;
-         Fiber := Items (Head);
-         Head := Head + 1;
-         Held := Held - 1;
-      end Pop;
+         for I in 0 .. Count - 1 loop
+            pragma Loop_Invariant (Held <= Max_Fibers);
+            exit when Held = Max_Fibers;   --  unreachable, see Enqueue
+            Items (Tail) := Batch (I);
+            Tail := Tail + 1;
+            Held := Held + 1;
+         end loop;
+      end Enqueue_Many;
+
+      procedure Pop_Many (Batch : out Wake_Batch; Count : out Wake_Count) is
+      begin
+         Batch := [others => (others => <>)];
+         Count := 0;
+         while Count < Wake_Batch_Size and then Held > 0 loop
+            pragma Loop_Invariant (Count < Wake_Batch_Size);
+            Batch (Count) := Items (Head);
+            Head := Head + 1;
+            Held := Held - 1;
+            Count := Count + 1;
+         end loop;
+      end Pop_Many;
 
       procedure Depth (Count : out Natural) is
       begin
@@ -569,10 +591,19 @@ is
       Shard_Cells (Shard).Push (Fiber, Accepted);
    end Push_Ready;
 
-   procedure Pop_Ready (Shard : Shard_Id; Fiber : out Fiber_Ref) is
+   procedure Enqueue_Batch
+     (Shard : Shard_Id; Batch : Wake_Batch; Count : Wake_Count) is
    begin
-      Shard_Cells (Shard).Pop (Fiber);
-   end Pop_Ready;
+      if Count > 0 then
+         Shard_Cells (Shard).Enqueue_Many (Batch, Count);
+      end if;
+   end Enqueue_Batch;
+
+   procedure Pop_Batch
+     (Shard : Shard_Id; Batch : out Wake_Batch; Count : out Wake_Count) is
+   begin
+      Shard_Cells (Shard).Pop_Many (Batch, Count);
+   end Pop_Batch;
 
    procedure Ready_Depth (Shard : Shard_Id; Count : out Natural) is
    begin
@@ -881,9 +912,11 @@ is
    --  Resume / After_Resume
    ---------------------------------------------------------------------------
 
-   procedure Resume (Shard : Shard_Id; Fiber : Fiber_Id) is
+   procedure Resume (Shard : Shard_Id; Fiber : Fiber_Id; Result : Io_Result)
+   is
    begin
       Currents.Set (Shard, Fiber);
+      Results.Set (Shard, Result);
 
       --  The conservative default, in case a path out of the fiber ever
       --  fails to say why it left: a fiber nobody wakes is a leak, and a
@@ -957,28 +990,26 @@ is
       end loop;
    end Await;
 
-   procedure Await_Submitted
+   procedure Await_Direct
      (Shard  : Active_Shard;
       Me     : Fiber_Id;
-      Handle : Future_Id;
       Result : out Io_Result)
    is
-      Resolved : Boolean;
    begin
       loop
-         --  Sleep first, ask afterwards.  The waiter was registered when
-         --  the future was acquired, and the operation behind it sits in
-         --  this shard's ring, whose completions only this shard's loop
-         --  reaps -- so it cannot resolve before the switch below gives
-         --  that loop the core.  The loop is defence: if the wakeup was
-         --  not for a resolution, sleep again rather than return nothing.
+         --  Sleep first, ask afterwards.  The operation sits in this
+         --  shard's ring, whose completions only this shard's loop reaps
+         --  -- so it cannot complete before the switch below gives that
+         --  loop the core, and when the loop resumes this fiber it has
+         --  already put the result in the cell.  The loop is defence: a
+         --  resumption that carries no result was not the completion.
          Exits.Set (Shard, Suspended);
          Switch_To_Scheduler (Me, Shard);
 
-         Futures.Claim (Handle, Me, Shard, Resolved, Result);
-         exit when Resolved;
+         Results.Get (Shard, Result);
+         exit when Result /= No_Result;
       end loop;
-   end Await_Submitted;
+   end Await_Direct;
 
    procedure Yield is
       Shard : constant Shard_Ref := Self;

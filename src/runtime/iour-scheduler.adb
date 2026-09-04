@@ -7,11 +7,6 @@ with Iour.Trace;
 
 package body Iour.Scheduler with SPARK_Mode => On is
 
-   --  How many fibers a shard resumes before going back to check the ring.
-   --  Without a bound, a stream of always-runnable fibers would starve
-   --  completion harvesting and the shard would stop doing I/O.
-   Resume_Budget : constant := 256;
-
    --  Idle passes a shard will spend waiting for in-flight operations to
    --  come back after shutdown is requested.  Draining is the normal path;
    --  this bound is what stops one operation that never completes -- a
@@ -165,8 +160,30 @@ package body Iour.Scheduler with SPARK_Mode => On is
    --  A timer expiry or our own message completing did not, and must not
    --  reset the idle backoff -- otherwise a shard waiting on its own poll
    --  timer would keep re-arming it at the shortest interval for ever.
+   --
+   --  A fiber this shard has to resume is not enqueued here.  It goes into
+   --  Wakes, and the whole harvest's worth is enqueued in one protected
+   --  action once the batch has been walked: that turns a lock per
+   --  completion into a lock per harvest.  Only a fiber that belongs to
+   --  another core is handled on the spot, over MSG_RING.
    procedure Dispatch
-     (Shard : Shard_Id; Item : Reactor.Completion; Useful : out Boolean)
+     (Shard  : Shard_Id;
+      Item   : Reactor.Completion;
+      Wakes  : in out Fibers.Wake_Batch;
+      Pending : in out Fibers.Wake_Count;
+      Useful : out Boolean)
+     with Pre  => Pending < Fibers.Wake_Batch_Size,
+          --  At most one fiber becomes runnable per completion, which is
+          --  what lets the harvest loop below bound Pending by its index
+          --  and so keep this precondition true to the last completion.
+          Post => Pending <= Pending'Old + 1;
+
+   procedure Dispatch
+     (Shard  : Shard_Id;
+      Item   : Reactor.Completion;
+      Wakes  : in out Fibers.Wake_Batch;
+      Pending : in out Fibers.Wake_Count;
+      Useful : out Boolean)
    is
       Tag     : Reactor.Token_Tag;
       Payload : Unsigned_32;
@@ -179,6 +196,17 @@ package body Iour.Scheduler with SPARK_Mode => On is
 
       case Tag is
 
+         when Reactor.Tag_Fiber_Io =>
+            --  The common case: a fiber on this core submitted an operation
+            --  and went to sleep on it.  The result rides the ready queue
+            --  with the fiber; no future was ever involved.
+            if Payload <= Unsigned_32 (Fiber_Id'Last) then
+               Wakes (Pending) :=
+                 (Fiber => Fiber_Id (Payload), Result => Item.Res);
+               Pending := Pending + 1;
+               Useful := True;
+            end if;
+
          when Reactor.Tag_Future =>
             --  An awaited operation finished.  Publishing the result may
             --  hand back a fiber to resume, possibly on another core.
@@ -187,7 +215,13 @@ package body Iour.Scheduler with SPARK_Mode => On is
                  (Future_Id (Payload), Item.Res, Waiter, Home);
                Useful := True;
                if Waiter /= No_Fiber and then Home in Active_Shard then
-                  Fibers.Wake (Shard, Waiter, Home);
+                  if Home = Shard then
+                     Wakes (Pending) :=
+                       (Fiber => Fiber_Id (Waiter), Result => No_Result);
+                     Pending := Pending + 1;
+                  else
+                     Fibers.Wake (Shard, Waiter, Home);
+                  end if;
                end if;
             end if;
 
@@ -198,7 +232,9 @@ package body Iour.Scheduler with SPARK_Mode => On is
               and then Payload - 1 <= Unsigned_32 (Fiber_Id'Last)
             then
                Fiber := Fiber_Ref (Payload - 1);
-               Fibers.Wake (Shard, Fiber, Shard);
+               Wakes (Pending) :=
+                 (Fiber => Fiber_Id (Fiber), Result => No_Result);
+               Pending := Pending + 1;
                Useful := True;
             end if;
 
@@ -229,6 +265,13 @@ package body Iour.Scheduler with SPARK_Mode => On is
       Item     : Future_Ref;
       Fiber    : Fiber_Ref;
       Started  : Boolean;
+
+      --  Fibers a harvest makes runnable, enqueued together afterwards;
+      --  and the pass's worth of runnable fibers, popped together.
+      Wakes    : Fibers.Wake_Batch;
+      Pending  : Fibers.Wake_Count;
+      Ready_Set : Fibers.Wake_Batch;
+      Ready_N   : Fibers.Wake_Count;
       Ready    : Natural;
       Queued   : Natural;
       Outstanding    : Natural;
@@ -238,7 +281,6 @@ package body Iour.Scheduler with SPARK_Mode => On is
       --  on them.  Counting it is what makes a broken ring visible instead
       --  of a silent hot loop.
       N_Flush_Errors : Natural := 0;
-      Resumed  : Natural;
 
       N_Completions : Natural := 0;
       N_Fibers      : Natural := 0;
@@ -306,10 +348,17 @@ package body Iour.Scheduler with SPARK_Mode => On is
             Reactor.Harvest (Shard, Batch, Count);
             exit when Count = 0;
             Bump (N_Completions, Count);
+            Pending := 0;
             for I in 0 .. Count - 1 loop
-               Dispatch (Shard, Batch (I), Useful);
+               --  One completion adds at most one wake, and a harvest
+               --  holds at most Reap_Batch completions, which is what the
+               --  batch was sized to.
+               pragma Loop_Invariant (Count <= Reap_Batch);
+               pragma Loop_Invariant (Pending <= I);
+               Dispatch (Shard, Batch (I), Wakes, Pending, Useful);
                Progress := Progress or Useful;
             end loop;
+            Fibers.Enqueue_Batch (Shard, Wakes, Pending);
          end loop;
 
          --  2. Adopt new work from the global queue ---------------------
@@ -330,17 +379,17 @@ package body Iour.Scheduler with SPARK_Mode => On is
          end if;
 
          --  3. Run whatever is ready ------------------------------------
-         Resumed := 0;
-         loop
-            exit when Resumed = Resume_Budget;
-            Fibers.Pop_Ready (Shard, Fiber);
-            exit when Fiber = No_Fiber;
-
-            Fibers.Resume (Shard, Fiber);
-            Fibers.After_Resume (Shard, Fiber);
+         --  One batch off the queue, then every fiber in it.  The batch is
+         --  the budget: a stream of always-runnable fibers cannot keep the
+         --  shard from going back to the ring, because what a yield puts
+         --  back is not popped until the next pass.
+         Fibers.Pop_Batch (Shard, Ready_Set, Ready_N);
+         for I in 0 .. Ready_N - 1 loop
+            Fibers.Resume
+              (Shard, Ready_Set (I).Fiber, Ready_Set (I).Result);
+            Fibers.After_Resume (Shard, Ready_Set (I).Fiber);
 
             Progress := True;
-            Bump (Resumed);
             Bump (N_Fibers);
          end loop;
 

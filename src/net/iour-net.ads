@@ -35,12 +35,14 @@
 
 with Iour.Ffi;
 with Iour.Fibers;
-with Iour.Futures;
 with Iour.Reactor;
 
---  A suspending operation touches the ring (Reactor.Rings), the future it
---  waits on (Futures.Table), the fiber table it suspends through
---  (Fibers.Registry), and the kernel.  None of them carries
+--  A suspending operation touches the ring (Reactor.Rings), the fiber
+--  table it suspends through (Fibers.Registry), and the kernel.  It does
+--  not touch the future table: an ordinary operation is awaited by the
+--  fiber that submitted it, and the shard that reaps the completion hands
+--  the result straight back (Iour.Reactor.Tag_Fiber_Io).  Only the stream
+--  operations at the end need a future.  None of these carries
 --  Always_Terminates, and that is deliberate: a Receive on a socket whose
 --  peer never sends does not return, and a contract that said otherwise
 --  would be false.
@@ -70,9 +72,11 @@ package Iour.Net with SPARK_Mode => On is
    function Port_Of (S : Socket) return Io_Result
      with Global => null;
 
-   --  Close outside a fiber, for sockets created before the runtime starts.
+   --  Close without suspending: for sockets created before the runtime
+   --  starts, and for a fixed file whose owning shard needs it gone at
+   --  once -- which only that shard's own thread can do.
    function Close_Now (S : Socket) return Io_Result
-     with Side_Effects, Global => (In_Out => Ffi.Kernel);
+     with Side_Effects, Global => (In_Out => (Ffi.Kernel, Reactor.Rings));
 
    Shut_Read  : constant := 0;
    Shut_Write : constant := 1;
@@ -93,23 +97,27 @@ package Iour.Net with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    --  Accept one connection, yielding the new descriptor as the result.
+   --  On a shard whose ring registered a file table the socket goes
+   --  straight into that table and the result is a fixed-file descriptor
+   --  (Iour.Fixed_File): usable by this shard's fibers exactly like an fd,
+   --  but cheaper per operation, and meaningless on any other core.
    procedure Accept_Connection (Listener : Socket; Result : out Io_Result)
-     with Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+     with Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    --  Read once.  A result of zero means the peer closed cleanly.
    procedure Receive
      (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    --  Write once; may transfer fewer bytes than offered.
    procedure Send
      (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    --  Read until Buffer is full, resubmitting for short reads.  Result is
    --  Buffer'Length, zero if the peer closed before sending it all, or the
@@ -118,35 +126,35 @@ package Iour.Net with SPARK_Mode => On is
    procedure Receive_Exact
      (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    --  Write everything, resubmitting until it is all gone.  Result is the
    --  number of bytes written, or the first error.
    procedure Send_All
      (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    --  Write everything to a non-socket descriptor: stdout, stderr, a file.
    --  Iour.Text is built on this.
    procedure Write_All
      (Fd : Descriptor; Buffer : Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    procedure Connect
      (S      : Socket;
       Host   : String;
       Port   : Natural;
       Result : out Io_Result)
-     with Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+     with Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
    procedure Close (S : Socket; Result : out Io_Result)
-     with Global => (In_Out => (Reactor.Rings, Futures.Table,
-                                Fibers.Registry, Ffi.Kernel));
+     with Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+                                Ffi.Kernel));
 
 end Iour.Net;

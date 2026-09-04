@@ -12,7 +12,8 @@ package body Iour.Reactor with
                Fds.Cells, Sq_Heads.Cells, Sq_Tails.Cells, Sqe_Arrays.Cells,
                Sq_Sizes.Cells, Cq_Heads.Cells, Cq_Tails.Cells,
                Cqe_Arrays.Cells, Cq_Sizes.Cells, Local_Tails.Cells,
-               Unsents.Cells, Live_Ops.Cells, Defers.Cells))
+               Unsents.Cells, Live_Ops.Cells, Defers.Cells,
+               Fixed_Tables.Cells))
 is
 
    package Uring renames Iour.Ffi.Uring;
@@ -117,6 +118,19 @@ is
    --  changes when completions become visible.  See Flush.
    package Defers      is new Iour.Per_Shard (Boolean, False);
 
+   --  Whether this shard's ring accepted a registered file table.
+   package Fixed_Tables is new Iour.Per_Shard (Boolean, False);
+
+   --  The table every ring registers: one sparse slot per possible fiber,
+   --  holding nothing until an accept-direct fills it.  A constant, since
+   --  the kernel copies it and never looks again.
+   Sparse_Table : constant Uring.Fd_Table (0 .. Max_Fibers - 1) :=
+     [others => -1];
+
+   pragma Compile_Time_Error
+     (Max_Fibers > Fixed_File_Span,
+      "a ring's file table must fit inside Fixed_File_Span");
+
    ---------------------------------------------------------------------------
    --  Address arithmetic helpers
    ---------------------------------------------------------------------------
@@ -168,12 +182,44 @@ is
    function Op_Nop (Token : Unsigned_64) return Op_Spec is
      (Opcode => Uring.Op_Nop, Token => Token, others => <>);
 
-   function Op_Accept (Fd : Descriptor; Token : Unsigned_64) return Op_Spec is
-     --  addr = sockaddr (none), off = addrlen pointer (none), len unused.
-     (Opcode => Uring.Op_Accept,
-      Fd     => Integer_32 (Fd),
-      Token  => Token,
-      others => <>);
+   --  The one place a descriptor is taken apart.  An ordinary fd goes into
+   --  the Fd field as it is.  A fixed file becomes its slot number plus
+   --  IOSQE_FIXED_FILE, and the operation remembers which ring the slot
+   --  belongs to.
+   procedure Aim (Fd : Descriptor; Spec : in out Op_Spec)
+     with Global => null;
+
+   procedure Aim (Fd : Descriptor; Spec : in out Op_Spec) is
+   begin
+      if Is_Fixed_File (Fd)
+        and then Integer (Fd) - Fixed_File_Base
+                 < Max_Shards * Fixed_File_Span
+      then
+         Spec.Fd        := Integer_32 (Fixed_File_Slot (Fd));
+         Spec.Sqe_Flags := Spec.Sqe_Flags or Uring.Sqe_Fixed_File;
+         Spec.Ring      := Fixed_File_Shard (Fd);
+      else
+         Spec.Fd := Integer_32 (Fd);
+      end if;
+   end Aim;
+
+   function Op_Accept
+     (Fd     : Descriptor;
+      Token  : Unsigned_64;
+      Direct : Boolean := False) return Op_Spec
+   is
+      --  addr = sockaddr (none), off = addrlen pointer (none), len unused;
+      --  file_index = "allocate me a slot" when the socket is to be
+      --  installed directly.
+      Spec : Op_Spec :=
+        (Opcode     => Uring.Op_Accept,
+         Token      => Token,
+         File_Index => (if Direct then Uring.File_Index_Alloc else 0),
+         others     => <>);
+   begin
+      Aim (Fd, Spec);
+      return Spec;
+   end Op_Accept;
 
    function Op_Connect
      (Fd      : Descriptor;
@@ -181,13 +227,17 @@ is
       Length  : Natural;
       Token   : Unsigned_64) return Op_Spec
    is
-     --  addr = sockaddr, off = the address length BY VALUE, not a pointer.
-     (Opcode => Uring.Op_Connect,
-      Fd     => Integer_32 (Fd),
-      Addr   => As_U64 (Address),
-      Off    => Unsigned_64 (Length),
-      Token  => Token,
-      others => <>);
+      --  addr = sockaddr, off = the address length BY VALUE, not a pointer.
+      Spec : Op_Spec :=
+        (Opcode => Uring.Op_Connect,
+         Addr   => As_U64 (Address),
+         Off    => Unsigned_64 (Length),
+         Token  => Token,
+         others => <>);
+   begin
+      Aim (Fd, Spec);
+      return Spec;
+   end Op_Connect;
 
    function Op_Recv
      (Fd     : Descriptor;
@@ -195,12 +245,16 @@ is
       Length : Natural;
       Token  : Unsigned_64) return Op_Spec
    is
-     (Opcode => Uring.Op_Recv,
-      Fd     => Integer_32 (Fd),
-      Addr   => As_U64 (Buffer),
-      Length => Unsigned_32 (Length),
-      Token  => Token,
-      others => <>);
+      Spec : Op_Spec :=
+        (Opcode => Uring.Op_Recv,
+         Addr   => As_U64 (Buffer),
+         Length => Unsigned_32 (Length),
+         Token  => Token,
+         others => <>);
+   begin
+      Aim (Fd, Spec);
+      return Spec;
+   end Op_Recv;
 
    function Op_Send
      (Fd     : Descriptor;
@@ -208,15 +262,19 @@ is
       Length : Natural;
       Token  : Unsigned_64) return Op_Spec
    is
-     --  MSG_NOSIGNAL so a vanished peer is reported as EPIPE on the
-     --  completion rather than raised as a signal.
-     (Opcode   => Uring.Op_Send,
-      Fd       => Integer_32 (Fd),
-      Addr     => As_U64 (Buffer),
-      Length   => Unsigned_32 (Length),
-      Op_Flags => Uring.Msg_Nosignal,
-      Token    => Token,
-      others   => <>);
+      --  MSG_NOSIGNAL so a vanished peer is reported as EPIPE on the
+      --  completion rather than raised as a signal.
+      Spec : Op_Spec :=
+        (Opcode   => Uring.Op_Send,
+         Addr     => As_U64 (Buffer),
+         Length   => Unsigned_32 (Length),
+         Op_Flags => Uring.Msg_Nosignal,
+         Token    => Token,
+         others   => <>);
+   begin
+      Aim (Fd, Spec);
+      return Spec;
+   end Op_Send;
 
    function Op_Write
      (Fd     : Descriptor;
@@ -224,21 +282,39 @@ is
       Length : Natural;
       Token  : Unsigned_64) return Op_Spec
    is
-     --  off = -1 means "the file's current position", which is also what a
-     --  pipe or terminal wants.
-     (Opcode => Uring.Op_Write,
-      Fd     => Integer_32 (Fd),
-      Addr   => As_U64 (Buffer),
-      Off    => Unsigned_64'Last,
-      Length => Unsigned_32 (Length),
-      Token  => Token,
-      others => <>);
+      --  off = -1 means "the file's current position", which is also what a
+      --  pipe or terminal wants.
+      Spec : Op_Spec :=
+        (Opcode => Uring.Op_Write,
+         Addr   => As_U64 (Buffer),
+         Off    => Unsigned_64'Last,
+         Length => Unsigned_32 (Length),
+         Token  => Token,
+         others => <>);
+   begin
+      Aim (Fd, Spec);
+      return Spec;
+   end Op_Write;
 
    function Op_Close (Fd : Descriptor; Token : Unsigned_64) return Op_Spec is
-     (Opcode => Uring.Op_Close,
-      Fd     => Integer_32 (Fd),
-      Token  => Token,
-      others => <>);
+      Spec : Op_Spec := (Opcode => Uring.Op_Close, Token => Token,
+                         others => <>);
+   begin
+      --  Closing a fixed file is asked for by slot, through file_index,
+      --  and the kernel refuses IOSQE_FIXED_FILE on a close: so this does
+      --  not go through Aim.
+      if Is_Fixed_File (Fd)
+        and then Integer (Fd) - Fixed_File_Base
+                 < Max_Shards * Fixed_File_Span
+      then
+         Spec.Fd         := -1;
+         Spec.File_Index := Integer_32 (Fixed_File_Slot (Fd)) + 1;
+         Spec.Ring       := Fixed_File_Shard (Fd);
+      else
+         Spec.Fd := Integer_32 (Fd);
+      end if;
+      return Spec;
+   end Op_Close;
 
    function Op_Timeout
      (Timespec : System.Address; Token : Unsigned_64) return Op_Spec
@@ -516,6 +592,21 @@ is
          Cells (Shard).Install (H);
          Defers.Set (Shard, Defer);
 
+         --  A sparse table for accept-direct to fill.  Refusal is not
+         --  fatal: the ring simply stays on ordinary descriptors, and
+         --  Has_Fixed_Files says so.
+         declare
+            --  A Side_Effects function may only be called as an assignment.
+            Registered : Ffi.C_Int;
+         begin
+            Registered := Uring.Register
+              (Fd     => Ffi.C_Unsigned (H.Fd),
+               Opcode => Uring.Register_Files,
+               Arg    => Mem.Of_Fd_Table (Sparse_Table),
+               Nr     => Ffi.C_Unsigned (Sparse_Table'Length));
+            Fixed_Tables.Set (Shard, Registered = 0);
+         end;
+
          --  Publish what the hot path reads.  The fd goes last: it is the
          --  one field a sibling looks at, and a ring with an fd is a ring
          --  that is ready.
@@ -547,6 +638,7 @@ is
       --  stale mapping.
       Fds.Set        (Shard, -1);
       Defers.Set     (Shard, False);
+      Fixed_Tables.Set (Shard, False);
       Sqe_Arrays.Set (Shard, 0);
       Cqe_Arrays.Set (Shard, 0);
       Sq_Heads.Set   (Shard, 0);
@@ -632,16 +724,16 @@ is
          Index => Index,
          Item  => (Opcode       => Spec.Opcode,
                    Flags        => Spec.Sqe_Flags,
-                   Ioprio       => 0,
+                   Ioprio       => Spec.Ioprio,
                    Fd           => Spec.Fd,
                    Off          => Spec.Off,
                    Addr         => Spec.Addr,
                    Len          => Spec.Length,
                    Op_Flags     => Spec.Op_Flags,
                    User_Data    => Spec.Token,
-                   Buf_Index    => 0,
+                   Buf_Index    => Spec.Buf_Group,
                    Personality  => 0,
-                   Splice_Fd_In => 0,
+                   Splice_Fd_In => Spec.File_Index,
                    Addr3        => 0,
                    Pad2         => 0));
 
@@ -828,6 +920,40 @@ is
       Fds.Get (Shard, Raw);
       Fd := (if Raw < 0 then Invalid_Descriptor else Descriptor (Raw));
    end Ring_Descriptor;
+
+   ---------------------------------------------------------------------------
+   --  Registered files
+   ---------------------------------------------------------------------------
+
+   procedure Has_Fixed_Files (Shard : Shard_Id; Yes : out Boolean) is
+   begin
+      Fixed_Tables.Get (Shard, Yes);
+   end Has_Fixed_Files;
+
+   procedure Unregister_File
+     (Shard : Shard_Id; Slot : File_Slot; Status : out Io_Result)
+   is
+      Fd      : Ffi.C_Int;
+      Empty   : constant Uring.Fd_Table (0 .. 0) := [0 => -1];
+      Update  : aliased Uring.Files_Update;
+      Result  : Ffi.C_Int;
+   begin
+      Fds.Get (Shard, Fd);
+      if Fd < 0 or else Slot >= Sparse_Table'Length then
+         Status := -E_Invalid;
+         return;
+      end if;
+
+      Update := (Offset => Unsigned_32 (Slot),
+                 Resv   => 0,
+                 Fds    => As_U64 (Mem.Of_Fd_Table (Empty)));
+      Result := Uring.Register
+        (Fd     => Ffi.C_Unsigned (Fd),
+         Opcode => Uring.Register_Files_Update,
+         Arg    => Mem.Of_Files_Update (Update),
+         Nr     => 1);
+      Status := (if Result < 0 then Io_Result (Result) else 0);
+   end Unregister_File;
 
    ---------------------------------------------------------------------------
    --  Arm_Idle_Timer

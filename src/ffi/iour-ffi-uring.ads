@@ -148,9 +148,9 @@ package Iour.Ffi.Uring with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    --  Opcodes
-   Op_Nop      : constant := 0;
-   Op_Timeout  : constant := 11;
-   Op_Accept   : constant := 13;
+   Op_Nop          : constant := 0;
+   Op_Timeout      : constant := 11;
+   Op_Accept       : constant := 13;
    Op_Connect  : constant := 16;
    Op_Close    : constant := 19;
    Op_Write    : constant := 23;
@@ -181,10 +181,20 @@ package Iour.Ffi.Uring with SPARK_Mode => On is
    Sq_Need_Wakeup : constant := 1;
 
    --  Per-Sqe flags
+   Sqe_Fixed_File       : constant := 1;
    Sqe_Cqe_Skip_Success : constant := 64;
+
+   --  Sqe.Splice_Fd_In doubles as file_index.  Zero means "not a fixed
+   --  slot"; N + 1 names slot N; all ones asks the kernel to pick a free
+   --  slot and report it as the result.
+   File_Index_Alloc : constant Integer_32 := -1;
 
    --  Completion flags
    Cqe_F_More : constant := 2;
+
+   --  io_uring_register opcodes
+   Register_Files        : constant := 2;
+   Register_Files_Update : constant := 6;
 
    --  Socket-level flag for send: report a dead peer as EPIPE, never SIGPIPE
    Msg_Nosignal : constant := 16#4000#;
@@ -210,6 +220,42 @@ package Iour.Ffi.Uring with SPARK_Mode => On is
      with Import, Convention => C, External_Name => "io_uring_enter",
           Global => null;
 
+   --  Register a resource -- a file table, a buffer ring -- with a ring.
+   --  Must be called from the ring's issuing thread once SINGLE_ISSUER is
+   --  in force, which for this runtime means from the owning shard.
+   --
+   --  Unlike Setup and Enter above, this one declares its effect on
+   --  Kernel.  It has to: a registration is a change to what the kernel
+   --  holds on this ring's behalf that outlives the call, and the callers
+   --  below are contracted as making it.  Side_Effects is the price --
+   --  such a function may only be called as the right-hand side of an
+   --  assignment.
+   function Register
+     (Fd     : C_Unsigned;
+      Opcode : C_Unsigned;
+      Arg    : System.Address;
+      Nr     : C_Unsigned) return C_Int
+     with Import, Convention => C, External_Name => "io_uring_register",
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
+
+   ---------------------------------------------------------------------------
+   --  Registered files
+   ---------------------------------------------------------------------------
+
+   --  The table handed to IORING_REGISTER_FILES.  An entry of -1 is a
+   --  sparse slot: reserved in the kernel's table, holding nothing yet,
+   --  which is what accept-direct fills in.
+   type Fd_Table is array (Natural range <>) of Integer_32
+     with Convention => C;
+
+   --  struct io_uring_files_update, for IORING_REGISTER_FILES_UPDATE.
+   type Files_Update is record
+      Offset : Unsigned_32 := 0;   --  first slot to replace
+      Resv   : Unsigned_32 := 0;
+      Fds    : Unsigned_64 := 0;   --  pointer to the replacement fds
+   end record
+     with Convention => C, Size => 16 * 8;
+
    ---------------------------------------------------------------------------
    --  Kernel timespec, for relative timeouts
    ---------------------------------------------------------------------------
@@ -230,5 +276,8 @@ package Iour.Ffi.Uring with SPARK_Mode => On is
      (Cqe'Size /= 16 * 8, "struct io_uring_cqe must be 16 bytes");
    pragma Compile_Time_Error
      (Params'Size /= 120 * 8, "struct io_uring_params must be 120 bytes");
+   pragma Compile_Time_Error
+     (Files_Update'Size /= 16 * 8,
+      "struct io_uring_files_update must be 16 bytes");
 
 end Iour.Ffi.Uring;
