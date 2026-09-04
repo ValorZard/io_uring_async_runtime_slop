@@ -8,7 +8,7 @@
 SHELL := /bin/bash
 ENV   := source ./env.sh &&
 
-.PHONY: all lib examples tests abi-check smoke demo bench prove prove-boundary clean help
+.PHONY: all lib examples tests abi-check smoke multi-await demo bench prove prove-boundary clean help
 
 all: examples abi-check
 
@@ -33,6 +33,11 @@ bin obj:
 smoke: tests abi-check
 	./bin/smoke
 
+# Many futures and many awaits inside one procedure, and proof that the core
+# changes hands at every one of those await points.
+multi-await: tests
+	./bin/multi_await
+
 # Two phases: a small traced run showing what the scheduler is doing, then
 # 2000 simultaneous connections for the throughput figure.
 demo: examples
@@ -56,6 +61,7 @@ clean:
 help:
 	@echo "make examples        build the library, server and client"
 	@echo "make smoke           build and run the runtime self-test"
+	@echo "make multi-await     many awaits in one procedure; check the handover"
 	@echo "make demo            traced walkthrough, then 2000 connections"
 	@echo "make bench           benchmark the demo against bench/tokio_echo"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
