@@ -10,7 +10,9 @@ is
    type Slot_Index is mod Capacity;
    type Slot_Array is array (Slot_Index) of Future_Id;
 
-   protected Shared is
+   protected Shared
+     with Priority => Runtime_Priority
+   is
       procedure Push (Handle : Future_Id; Accepted : out Boolean);
       procedure Pop (Handle : out Future_Ref);
       procedure Depth (Count : out Natural);

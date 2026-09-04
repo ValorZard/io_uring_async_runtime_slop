@@ -5,7 +5,11 @@ package body Iour.Promises with SPARK_Mode => On is
 
    procedure Create (Handle : out Future_Ref) is
    begin
-      Futures.Acquire (Worker => No_Fiber,
+      --  Whoever creates the promise is usually the one that awaits it, so
+      --  bank it here; the environment task, which has no shard, falls back
+      --  to bank zero.
+      Futures.Acquire (Near   => Fibers.Self,
+                       Worker => No_Fiber,
                        State  => Futures.Pending,
                        Handle => Handle);
    end Create;

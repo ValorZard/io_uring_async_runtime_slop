@@ -63,7 +63,9 @@ is
    Initial_Free : constant Free_Stack :=
      [for I in 0 .. Max_Fibers - 1 => Fiber_Id (Max_Fibers - 1 - I)];
 
-   protected Pool is
+   protected Pool
+     with Priority => Runtime_Priority
+   is
       procedure Allocate
         (Work : Fiber_Body; Arg : Fiber_Argument; Fiber : out Fiber_Ref);
       procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id; Done : Future_Id);
@@ -104,7 +106,9 @@ is
    type Ready_Index is mod Max_Fibers;
    type Ready_Array is array (Ready_Index) of Fiber_Id;
 
-   protected type Shard_Cell is
+   protected type Shard_Cell
+     with Priority => Runtime_Priority
+   is
       procedure Push (Fiber : Fiber_Id; Accepted : out Boolean);
       --  Push for the paths where a full queue is impossible: the queue
       --  holds Max_Fibers entries, a fiber sits in at most one queue at a
@@ -524,6 +528,9 @@ is
       Arg    : Fiber_Argument;
       Handle : out Future_Ref)
    is
+      --  Read once: Self is a sched_getcpu, and both the bank choice below
+      --  and the wakeup at the end want the same answer anyway.
+      Me       : constant Shard_Ref := Self;
       Fiber    : Fiber_Ref;
       Accepted : Boolean;
    begin
@@ -534,7 +541,12 @@ is
          return;  --  fiber table full
       end if;
 
-      Futures.Acquire (Worker => Fiber,
+      --  Banked on the spawning core.  Which core ends up *running* the
+      --  fiber is still decided by the run queue; this only says where the
+      --  handle lives, and the spawner is the one that resolves it if the
+      --  push below fails.
+      Futures.Acquire (Near   => Me,
+                       Worker => Fiber,
                        State  => Futures.Queued,
                        Handle => Handle);
       if Handle = No_Future then
@@ -552,7 +564,7 @@ is
          return;
       end if;
 
-      Nudge_Idle (Self);
+      Nudge_Idle (Me);
    end Spawn;
 
    ---------------------------------------------------------------------------

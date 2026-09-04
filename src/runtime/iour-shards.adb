@@ -16,7 +16,9 @@ package body Iour.Shards with SPARK_Mode => On is
    --  task must not run off the end of its body, so a shard that is surplus
    --  to Shard_Count, or that has finished draining, waits here instead.
    --  It costs no CPU: the task is blocked in the runtime, not spinning.
-   protected Parking is
+   protected Parking
+     with Priority => Runtime_Priority
+   is
       entry Wait_Forever;
    private
       Released : Boolean := False;
@@ -64,7 +66,10 @@ package body Iour.Shards with SPARK_Mode => On is
    --  how many cores the runtime uses, adjust Shard_Count in Iour; to raise
    --  the ceiling, add a declaration here and bump Max_Shards.
 
-   Shard_Priority : constant System.Priority := System.Default_Priority;
+   --  The same priority every protected object in the runtime declares as
+   --  its ceiling, so entering one never changes the calling thread's
+   --  scheduling parameters.  See Iour.Runtime_Priority.
+   Shard_Priority : constant System.Priority := Runtime_Priority;
 
    task Shard_0 with CPU => First_Shard_Cpu + 0, Priority => Shard_Priority;
    task Shard_1 with CPU => First_Shard_Cpu + 1, Priority => Shard_Priority;

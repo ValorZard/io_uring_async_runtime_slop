@@ -36,7 +36,9 @@ package body Iour.Scheduler with SPARK_Mode => On is
    --  Control -- startup barrier, shutdown flag and tallies
    ---------------------------------------------------------------------------
 
-   protected Control is
+   protected Control
+     with Priority => Runtime_Priority
+   is
 
       procedure Ring_Up;
       entry Await_Ready;

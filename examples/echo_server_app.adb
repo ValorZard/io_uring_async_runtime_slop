@@ -13,7 +13,9 @@ package body Echo_Server_App with SPARK_Mode => On is
    Listen_Fd : Descriptor := Invalid_Descriptor with Atomic;
    Goal      : Natural := 0 with Atomic;
 
-   protected Stats is
+   protected Stats
+     with Priority => Runtime_Priority
+   is
       procedure Accepted_One;
       procedure Rejected_One;
       --  Reports whether this was the connection the server was waiting

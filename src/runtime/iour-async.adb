@@ -24,7 +24,11 @@ package body Iour.Async with SPARK_Mode => On is
          return;
       end if;
 
-      Futures.Acquire (Worker => No_Fiber,
+      --  This core's own bank: the completion will be reaped here too, and
+      --  the fiber resumed here, so the whole life of this future stays on
+      --  one lock.
+      Futures.Acquire (Near   => Shard,
+                       Worker => No_Fiber,
                        State  => Futures.Pending,
                        Handle => Handle);
       if Handle = No_Future then

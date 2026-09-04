@@ -1,10 +1,25 @@
 ------------------------------------------------------------------------------
---  Iour.Futures -- the global, shard-agnostic future table.
+--  Iour.Futures -- the shard-agnostic future table, banked per core.
 --
 --  A future is a slot in one statically sized table that every shard can
 --  reach.  Handing out an index rather than a pointer is what lets the whole
 --  runtime avoid access types and dynamic allocation, and it means a future
 --  resolved on one core is trivially visible from another.
+--
+--  The table is split into one bank per shard, each its own protected
+--  object.  Which bank a handle belongs to is fixed by the handle itself,
+--  so "any shard can resolve any future" still holds exactly as before --
+--  what changes is that the common case does not have to.  An I/O future is
+--  acquired, subscribed to, resolved and released by the same core in the
+--  overwhelming majority of cases, and all four of those now take a lock no
+--  other core is contending for.  Before, every operation on every core
+--  serialised through one lock: four cores bought 1.6x the throughput of
+--  one, and eight bought less than four did.
+--
+--  Acquire therefore takes the caller's shard.  It is a preference, not a
+--  constraint: a caller whose own bank is full falls through to the others,
+--  so a lopsided workload still gets the whole table rather than a quarter
+--  of it.
 --
 --  Two kinds of future share the table:
 --
@@ -34,10 +49,13 @@ is
    --  Allocation
    ---------------------------------------------------------------------------
 
-   --  Take a slot.  Yields No_Future when the table is exhausted, which the
-   --  caller must handle: this runtime never blocks waiting for a handle.
+   --  Take a slot, preferring the bank belonging to Near -- pass the
+   --  caller's own shard, or No_Shard from a thread that has none.  Yields
+   --  No_Future only when every bank is exhausted, which the caller must
+   --  handle: this runtime never blocks waiting for a handle.
    procedure Acquire
-     (Worker : Fiber_Ref;
+     (Near   : Shard_Ref;
+      Worker : Fiber_Ref;
       State  : Future_State;
       Handle : out Future_Ref)
      with Pre  => State in Queued | Pending,
@@ -97,7 +115,11 @@ is
    --  Introspection
    ---------------------------------------------------------------------------
 
+   --  Summed across the banks.  Live is exact; High_Water is the sum of the
+   --  banks' own high-water marks, so it is an upper bound on the number
+   --  ever live at one instant rather than a reading of it.
    procedure Stats (Live : out Natural; High_Water : out Natural)
-     with Global => (In_Out => Table);
+     with Global => (In_Out => Table),
+          Post   => Live <= Max_Futures and then High_Water <= Max_Futures;
 
 end Iour.Futures;

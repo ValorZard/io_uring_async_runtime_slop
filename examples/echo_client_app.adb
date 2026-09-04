@@ -23,7 +23,9 @@ package body Echo_Client_App with SPARK_Mode => On is
    Session_Count : Natural := 0 with Atomic;
    Round_Count : Natural := 0 with Atomic;
 
-   protected Stats is
+   protected Stats
+     with Priority => Runtime_Priority
+   is
       procedure Started_One;
       procedure Finished_One
         (Frames : Natural; Ok : Boolean; Mismatch : Boolean);

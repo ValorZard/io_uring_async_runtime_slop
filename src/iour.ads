@@ -32,6 +32,8 @@
 --  concurrent system like this tractable.
 ------------------------------------------------------------------------------
 
+with System;
+
 package Iour with SPARK_Mode => On is
 
    ---------------------------------------------------------------------------
@@ -81,6 +83,25 @@ package Iour with SPARK_Mode => On is
    --  bound only covers work published by a thread that owns no ring, such
    --  as the environment task during startup.
    Idle_Poll_Nanos : constant := 1_000_000;  --  1 ms
+
+   --  The one priority in the partition.  Every shard task runs at it, and
+   --  every protected object in the runtime declares it as its ceiling.
+   --
+   --  That equality is not cosmetic.  Jorvik mandates Ceiling_Locking, so a
+   --  protected action must run at the object's ceiling priority; GNAT
+   --  implements the change with sched_setscheduler, and a protected object
+   --  left to its default ceiling of System.Priority'Last therefore costs
+   --  two system calls per protected action -- around seventy per network
+   --  round trip once the future, the ring cell, the ready queue and the
+   --  fiber pool have each been entered and left.  When the ceiling already
+   --  equals the caller's active priority there is nothing to change and
+   --  the calls disappear.
+   --
+   --  The constraint this buys the speed with: any task that calls into the
+   --  runtime must run at this priority.  A higher-priority caller is a
+   --  ceiling violation, which is Program_Error at the call, not a subtle
+   --  corruption -- and gnatprove rejects it ahead of that.
+   Runtime_Priority : constant System.Priority := System.Default_Priority;
 
    ---------------------------------------------------------------------------
    --  Handles

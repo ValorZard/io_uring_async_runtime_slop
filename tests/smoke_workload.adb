@@ -15,7 +15,9 @@ package body Smoke_Workload with SPARK_Mode => On is
 
    type Run_Counts is array (Shard_Id) of Natural;
 
-   protected Tally is
+   protected Tally
+     with Priority => Runtime_Priority
+   is
       procedure Record_Run (Shard : Shard_Ref);
       procedure Finished;
       procedure Read (Done : out Natural; Runs_Out : out Run_Counts);
@@ -80,7 +82,7 @@ package body Smoke_Workload with SPARK_Mode => On is
          --  A NOP is trivial as an operation but drives the entire path:
          --  submission slot, io_uring_enter, completion harvest, future
          --  resolution, and the switch back into this fiber.
-         Futures.Acquire (No_Fiber, Futures.Pending, Handle);
+         Futures.Acquire (Shard, No_Fiber, Futures.Pending, Handle);
          if Handle /= No_Future then
             Reactor.Push
               (Active_Shard (Shard),

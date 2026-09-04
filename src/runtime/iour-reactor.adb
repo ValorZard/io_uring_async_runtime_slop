@@ -67,7 +67,9 @@ is
    --
    --  Nothing in here blocks.  io_uring_enter, the one call that can sleep,
    --  is issued by Flush from outside the protected action.
-   protected type Ring_Cell is
+   protected type Ring_Cell
+     with Priority => Runtime_Priority
+   is
 
       procedure Install (Handle : Ring_Handle);
       procedure Take (Handle : out Ring_Handle);
