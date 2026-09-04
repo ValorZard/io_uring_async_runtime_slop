@@ -107,14 +107,16 @@ package body Echo_Server_App with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Drop (S : Net.Socket) is
-      Ignored : constant Io_Result := Net.Close_Now (S);
+      Ignored : Io_Result;
    begin
+      Ignored := Net.Close_Now (S);
       pragma Unreferenced (Ignored);
    end Drop;
 
    procedure Stop_Listening (S : Descriptor) is
-      Ignored : constant Io_Result := Net.Shutdown_Now (S, Net.Shut_Both);
+      Ignored : Io_Result;
    begin
+      Ignored := Net.Shutdown_Now (S, Net.Shut_Both);
       pragma Unreferenced (Ignored);
    end Stop_Listening;
 

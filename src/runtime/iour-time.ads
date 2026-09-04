@@ -11,12 +11,23 @@
 --  Sleep, or with Await on a future, and the core stays busy.
 ------------------------------------------------------------------------------
 
+with Iour.Ffi;
+with Iour.Fibers;
+with Iour.Futures;
+with Iour.Reactor;
+
 package Iour.Time with SPARK_Mode => On is
 
    --  Suspend the calling fiber for at least this long.  Must be called
    --  from a fiber.
-   procedure Sleep (Nanoseconds : Natural);
+   procedure Sleep (Nanoseconds : Natural)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
-   procedure Sleep_Milliseconds (Milliseconds : Natural);
+   procedure Sleep_Milliseconds (Milliseconds : Natural)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
 end Iour.Time;

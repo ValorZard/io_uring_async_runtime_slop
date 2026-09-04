@@ -147,6 +147,18 @@ is
    --  it out of io_uring_enter without any shared lock.
    procedure Wake (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id);
 
+   --  Hand a fiber back to its home shard from a thread that owns no ring,
+   --  which means the environment task.  The fiber is not put on the ready
+   --  queue directly: only a shard may enqueue onto its own ready queue, or
+   --  a fiber caught between registering as a waiter and switching out
+   --  could be queued twice.  It goes into the shard's inbox instead, and
+   --  the shard converts it to a local Wake on its next pass -- within the
+   --  idle backoff if it was asleep.
+   procedure Post_Wake (Fiber : Fiber_Id; Home : Shard_Id);
+
+   --  Drain one posted wakeup, or No_Fiber.  Called by the owning shard.
+   procedure Take_Posted (Shard : Shard_Id; Fiber : out Fiber_Ref);
+
    --  Record that a shard is about to sleep, or has woken.  Spawn consults
    --  this to decide whom to nudge.
    procedure Set_Idle (Shard : Shard_Id; Idle : Boolean);

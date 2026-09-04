@@ -1,7 +1,6 @@
 with Interfaces;
 with Iour.Async;
 with Iour.Ffi.Uring;
-with Iour.Reactor;
 
 package body Iour.Time with SPARK_Mode => On is
 

@@ -18,6 +18,8 @@ with Iour.Fibers;
 with Iour.Net;
 with Iour.Scheduler;
 with Iour.Shards;
+with Iour.Trace;
+with Ada.Environment_Variables;
 with Echo_Server_App;
 
 procedure Echo_Server with SPARK_Mode => On, CPU => 1 is
@@ -50,6 +52,9 @@ procedure Echo_Server with SPARK_Mode => On, CPU => 1 is
    Accepted, Completed, Rejected, Frames, Errors, Concurrent : Natural;
    Live, Peak : Natural;
 begin
+   if Ada.Environment_Variables.Exists ("IOUR_TRACE") then
+      Trace.Enable;
+   end if;
    Net.Ignore_Broken_Pipes;
    Fd_Limit := Ffi.Sys.Raise_Descriptor_Limit;
 

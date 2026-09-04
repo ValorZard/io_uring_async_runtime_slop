@@ -101,6 +101,23 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
    function Raise_Descriptor_Limit return Natural;
 
    ---------------------------------------------------------------------------
+   --  Blocking write
+   ---------------------------------------------------------------------------
+
+   Stdout : constant := 1;
+   Stderr : constant := 2;
+
+   --  write(2), for the contexts where suspending is not an option: the
+   --  scheduler loop itself, the environment task, and tracing.  For C
+   --  convention GNAT passes an array as a pointer to its first element, so
+   --  no address is taken on the Ada side.  Imported as a procedure: a
+   --  short or failed write of a trace line is not something anyone acts on.
+   procedure Write_Blocking
+     (Fd : C_Int; Buffer : Byte_Array; Count : C_Size)
+     with Import, Convention => C, External_Name => "write",
+          Global => (In_Out => Kernel), Always_Terminates;
+
+   ---------------------------------------------------------------------------
    --  Signals
    ---------------------------------------------------------------------------
 

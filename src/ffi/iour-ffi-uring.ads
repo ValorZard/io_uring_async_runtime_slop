@@ -153,6 +153,7 @@ package Iour.Ffi.Uring with SPARK_Mode => On is
    Op_Accept   : constant := 13;
    Op_Connect  : constant := 16;
    Op_Close    : constant := 19;
+   Op_Write    : constant := 23;
    Op_Send     : constant := 26;
    Op_Recv     : constant := 27;
    Op_Msg_Ring : constant := 40;

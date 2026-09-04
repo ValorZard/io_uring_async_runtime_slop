@@ -220,6 +220,22 @@ is
       Token    => Token,
       others   => <>);
 
+   function Op_Write
+     (Fd     : Descriptor;
+      Buffer : System.Address;
+      Length : Natural;
+      Token  : Unsigned_64) return Op_Spec
+   is
+     --  off = -1 means "the file's current position", which is also what a
+     --  pipe or terminal wants.
+     (Opcode => Uring.Op_Write,
+      Fd     => Integer_32 (Fd),
+      Addr   => As_U64 (Buffer),
+      Off    => Unsigned_64'Last,
+      Length => Unsigned_32 (Length),
+      Token  => Token,
+      others => <>);
+
    function Op_Close (Fd : Descriptor; Token : Unsigned_64) return Op_Spec is
      (Opcode => Uring.Op_Close,
       Fd     => Integer_32 (Fd),

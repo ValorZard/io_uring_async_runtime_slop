@@ -37,7 +37,9 @@ Measured on this machine, 4 shards, loopback:
 | Frames exchanged | 20000 |
 | Errors | 0 |
 
-Run it yourself with `make demo`.
+Run it yourself with `make demo`, which shows a small traced run first so you
+can watch the scheduler work, then the full 2000-connection run for the
+figure.
 
 ## Architecture
 
@@ -186,21 +188,23 @@ there are two honest answers.
 mode. Expected to come back clean, and does:
 
 ```
-Success: all checks proved (383 checks).
+Success: all checks proved (450 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Unproved
-Data Dependencies             17         17          .          .
-Flow Dependencies              4          4          .          .
-Initialization               155        155          .          .
-Run-time Checks              176          .        176          .
-Functional Contracts          12          .         12          .
-Termination                   19         19          .          .
+Data Dependencies             21         21          .          .
+Flow Dependencies              5          5          .          .
+Initialization               167        167          .          .
+Run-time Checks              211          .        211          .
+Assertions                     8          .          8          .
+Functional Contracts          20          .         20          .
+Termination                   18         18          .          .
 ```
 
 Zero unproved checks, zero warnings, zero data races. That covers the fiber
 scheduler, the per-shard event loop, the future table, the run queue, the
-shard tasks, the submit-and-await primitive, both libc binding packages, and
-the demo protocol. Everything the runtime *decides* is in there.
+shard tasks, the submit-and-await primitive, promises, tracing, the
+fiber-aware `Put_Line`, both libc binding packages, and the demo protocol.
+Everything the runtime *decides* is in there.
 
 Getting there meant fixing defects gnatprove found and the compiler did not:
 an overflow when negating `Io_Result'First`; statistics counters that would
@@ -269,9 +273,15 @@ will write into whatever now occupies that memory.
 
 **Never wait on a protected entry from a fiber.** An entry call blocks the
 task, and the task is the whole shard: every other fiber on that core stops
-with it. Wait with `Iour.Time.Sleep` or with `Await` on a future, and the core
+with it. Wait on a promise instead (below), or `Iour.Time.Sleep`, and the core
 stays busy. (The environment task is not a shard, so `Wait_For_Shutdown` there
 is fine.)
+
+**Use `Iour.Text.Put_Line`, not `Ada.Text_IO`, inside a fiber.**
+`Ada.Text_IO` writes through C stdio and blocks the shard. `Iour.Text` builds
+the line on the fiber's stack, hands it to the ring, and suspends only that
+fiber. Off a fiber it falls back to a plain blocking write, so it is safe to
+call from anywhere.
 
 **Fiber bodies and shared state live at library level.** Jorvik's
 `No_Local_Protected_Objects` puts protected objects at library level, and a
@@ -285,6 +295,74 @@ One more, for main programs: a Jorvik partition never ends on its own. The
 environment task would block forever waiting on tasks that are not allowed to
 terminate, so shutdown is an explicit `Iour.Ffi.Sys.Exit_Process` once the
 runtime has drained.
+
+## Promises
+
+A promise is a future with the kernel taken out of the loop: one side awaits
+it, any other side fulfils it, and the waiter wakes. It is the synchronisation
+primitive for fibers, and the reason a fiber never has to queue on a protected
+entry.
+
+```ada
+Done : Future_Ref;
+Iour.Promises.Create (Done);
+Iour.Fibers.Spawn (Worker'Access, Fiber_Argument (Done), Handle);
+Iour.Promises.Await (Done, Result);           --  this fiber sleeps alone
+
+--  in Worker, when finished:
+Iour.Promises.Fulfil (Future_Id (Arg), 0);    --  the awaiter resumes
+```
+
+`Fulfil` works from any fiber on any shard, and from the environment task. A
+wake sent from a shard reaches its target immediately over `MSG_RING`. The
+environment task owns no ring, so its wakes go into the target shard's inbox
+and are picked up on that shard's next pass, within its idle backoff if it was
+asleep. The inbox exists rather than a direct enqueue because only a shard may
+touch its own ready queue: a fiber caught between registering as a waiter and
+switching out could otherwise be queued twice.
+
+A promise resolves once. A second `Fulfil` is ignored, and fulfilling before
+anyone awaits is fine: the value waits in the table.
+
+## Watching it run
+
+`make demo` runs in two phases. The first is small and traced, so the
+scheduler's decisions are readable:
+
+```
+server  shard 2: up, ring ready
+server  shard 2: adopted fiber 0
+server  shard 2: fiber starts 0
+server  shard 1: going idle, in flight 0
+server  shard 2: going idle, in flight 1
+server  shard 2: woke with work
+server  shard 0: adopted fiber 2
+server  shard 0: adopted fiber 3
+server  shard 2: fiber finished 0
+```
+
+Read down that and you can see the whole design working: four shards come up,
+one adopts the acceptor, the rest go idle rather than spin, connections land
+on whichever core is free, and shards wake exactly when there is something to
+do.
+
+The second phase is the full 2000-connection run, untraced. Tracing is a
+blocking write per decision, so tracing thousands of connections would measure
+the tracing.
+
+Any program can be traced directly:
+
+```
+IOUR_TRACE=1 ./bin/smoke
+IOUR_TRACE=1 ./bin/echo_server 9099 100
+```
+
+Tracing is off by default and costs one atomic load per event when off. When
+on, each event is one blocking `write(2)` from whatever context raised it.
+That is deliberate: a trace that suspended the fiber it was reporting on would
+change what it was reporting. Idle is reported on entering an idle spell
+rather than on every re-arm of the backoff timer, so a quiet shard does not
+bury the trace in repeats of its own polling.
 
 ## Layout
 
@@ -300,6 +378,9 @@ src/runtime/
   iour-shards.adb            the pinned tasks
   iour-async.adb             submit-and-await, the primitive everything uses
   iour-time.adb              Sleep that suspends a fiber, not a core
+  iour-promises.adb          futures you fulfil by hand
+  iour-text.adb              Put_Line that suspends a fiber, not a core
+  iour-trace.adb             IOUR_TRACE: watch the scheduler decide
 src/net/iour-net.adb         asynchronous sockets
 src/c/iour_fiber.c           the context switch (the only C)
 examples/                    echo server and client

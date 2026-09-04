@@ -3,7 +3,8 @@ with Iour.Fibers;
 with Iour.Futures;
 with Iour.Reactor;
 with Iour.Scheduler;
-with Iour.Time;
+with Iour.Promises;
+with Iour.Text;
 
 package body Smoke_Workload with SPARK_Mode => On is
 
@@ -19,7 +20,10 @@ package body Smoke_Workload with SPARK_Mode => On is
       procedure Finished;
       procedure Read (Done : out Natural; Runs_Out : out Run_Counts);
       function All_Done return Boolean;
+      procedure Set_Handshake (H : Future_Ref);
+      procedure Get_Handshake (H : out Future_Ref);
    private
+      Shake     : Future_Ref := No_Future;
       Runs      : Run_Counts := [others => 0];
       Completed : Natural := 0;
    end Tally;
@@ -40,6 +44,16 @@ package body Smoke_Workload with SPARK_Mode => On is
 
       function All_Done return Boolean is (Completed = Worker_Count);
 
+      procedure Set_Handshake (H : Future_Ref) is
+      begin
+         Shake := H;
+      end Set_Handshake;
+
+      procedure Get_Handshake (H : out Future_Ref) is
+      begin
+         H := Shake;
+      end Get_Handshake;
+
       procedure Read (Done : out Natural; Runs_Out : out Run_Counts) is
       begin
          Done := Completed;
@@ -50,13 +64,16 @@ package body Smoke_Workload with SPARK_Mode => On is
 
    ---------------------------------------------------------------------------
 
+   --  Arg is the promise the workers collectively fulfil when the last one
+   --  finishes.
    procedure Worker (Arg : Fiber_Argument) is
-      Handle : Future_Ref;
-      Queued : Boolean;
+      Handle  : Future_Ref;
+      Queued  : Boolean;
       Outcome : Io_Result;
-      Shard  : constant Shard_Ref := Fibers.Self;
+      Shard   : constant Shard_Ref := Fibers.Self;
+      Done    : Natural;
+      Runs    : Run_Counts;
    begin
-      pragma Unreferenced (Arg);
       Tally.Record_Run (Shard);
 
       if Shard in Active_Shard then
@@ -82,29 +99,56 @@ package body Smoke_Workload with SPARK_Mode => On is
       end if;
 
       Tally.Finished;
+      Tally.Read (Done, Runs);
+      if Done = Worker_Count and then Arg >= 0 then
+         --  Last one out wakes the root, wherever its shard is.
+         Iour.Text.Put_Line ("  worker on shard" & Shard'Image
+                             & " is last; fulfilling the promise");
+         Iour.Promises.Fulfil (Future_Id (Arg), Io_Result (Done));
+      end if;
    end Worker;
 
    ---------------------------------------------------------------------------
 
    procedure Root (Arg : Fiber_Argument) is
-      Handle : Future_Ref;
+      Handle    : Future_Ref;
+      All_Done  : Future_Ref;
+      From_Main : Future_Ref;
+      Value     : Io_Result;
    begin
       pragma Unreferenced (Arg);
 
+      --  A promise the last worker fulfils.  Awaiting it suspends this
+      --  fiber alone -- no polling, no protected entry, no parked shard.
+      Iour.Promises.Create (All_Done);
+      if All_Done = No_Future then
+         Scheduler.Request_Shutdown;
+         return;
+      end if;
+
       for I in 1 .. Worker_Count loop
-         Fibers.Spawn (Worker'Access, Fiber_Argument (I), Handle);
+         Fibers.Spawn (Worker'Access, Fiber_Argument (All_Done), Handle);
       end loop;
 
-      --  Wait by sleeping, not by queueing on a protected entry.  An entry
-      --  call from a fiber blocks the underlying task, and the task is the
-      --  whole shard: every other fiber on that core would stop with it.
-      --  Iour.Time.Sleep suspends this fiber alone.
-      while not Tally.All_Done loop
-         Iour.Time.Sleep_Milliseconds (1);
-      end loop;
+      Iour.Promises.Await (All_Done, Value);
+      Iour.Text.Put_Line ("  root woke: workers finished" & Value'Image);
+
+      --  Now a promise the ENVIRONMENT TASK fulfils, which has no ring and
+      --  so has to reach this shard through its inbox.
+      Iour.Promises.Create (From_Main);
+      if From_Main /= No_Future then
+         Tally.Set_Handshake (From_Main);
+         Iour.Promises.Await (From_Main, Value);
+         Iour.Text.Put_Line ("  root woke again: main said" & Value'Image);
+      end if;
 
       Scheduler.Request_Shutdown;
    end Root;
+
+   procedure Handshake (Handle : out Future_Ref) is
+   begin
+      Tally.Get_Handshake (Handle);
+   end Handshake;
 
    ---------------------------------------------------------------------------
 

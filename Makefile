@@ -30,7 +30,8 @@ bin obj:
 smoke: tests abi-check
 	./bin/smoke
 
-# Server and client, 2000 simultaneous connections, 10 round trips each.
+# Two phases: a small traced run showing what the scheduler is doing, then
+# 2000 simultaneous connections for the throughput figure.
 demo: examples
 	./scripts/run_demo.sh
 
@@ -62,7 +63,7 @@ clean:
 help:
 	@echo "make examples        build the library, server and client"
 	@echo "make smoke           build and run the runtime self-test"
-	@echo "make demo            run server and client, 2000 connections"
+	@echo "make demo            traced walkthrough, then 2000 connections"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
 	@echo "make prove           SPARK proof of everything analysable (expected clean)"
 	@echo "make prove-boundary  list the sites outside SPARK's subset (expected to error)"

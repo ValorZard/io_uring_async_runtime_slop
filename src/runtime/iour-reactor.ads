@@ -116,6 +116,15 @@ is
    function Op_Close (Fd : Descriptor; Token : Unsigned_64) return Op_Spec
      with Global => null;
 
+   --  write(2) through the ring, for descriptors that are not sockets:
+   --  stdout, stderr, files.  Writes at the current file position.
+   function Op_Write
+     (Fd     : Descriptor;
+      Buffer : System.Address;
+      Length : Natural;
+      Token  : Unsigned_64) return Op_Spec
+     with Global => null;
+
    --  Relative timeout.  Completes with -ETIME when it runs out.  The
    --  timespec must stay put until the completion arrives, so callers pass
    --  the address of something that outlives the operation, never a local.

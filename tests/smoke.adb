@@ -20,6 +20,9 @@ with Iour.Net;
 with Iour.Scheduler;
 with Iour.Shards;
 with Smoke_Workload;
+with Ada.Environment_Variables;
+with Iour.Promises;
+with Iour.Trace;
 
 procedure Smoke with SPARK_Mode => On, CPU => 1 is
 
@@ -31,6 +34,9 @@ procedure Smoke with SPARK_Mode => On, CPU => 1 is
    Slots      : Natural;
    Ok         : Boolean;
 begin
+   if Ada.Environment_Variables.Exists ("IOUR_TRACE") then
+      Trace.Enable;
+   end if;
    Shards.Activate;
    Net.Ignore_Broken_Pipes;
 
@@ -44,6 +50,24 @@ begin
       Put_Line ("smoke: FAIL -- could not spawn the root fiber");
       Ffi.Sys.Exit_Process (1);
    end if;
+
+   --  Fulfil the root's second promise from here, the environment task.
+   --  It has to be created first, so wait for the root to publish it.
+   declare
+      Shake : Future_Ref := No_Future;
+   begin
+      for Attempt in 1 .. 2_000 loop
+         Smoke_Workload.Handshake (Shake);
+         exit when Shake /= No_Future;
+         delay 0.001;
+      end loop;
+      if Shake /= No_Future then
+         Put_Line ("smoke: main fulfilling the root's promise");
+         Promises.Fulfil (Shake, 42);
+      else
+         Put_Line ("smoke: FAIL -- root never published its promise");
+      end if;
+   end;
 
    Scheduler.Wait_For_Shutdown;
 

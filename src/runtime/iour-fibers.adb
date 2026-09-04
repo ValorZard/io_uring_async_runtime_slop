@@ -6,6 +6,7 @@ with Iour.Ffi.Sys;
 with Iour.Futures;
 with Iour.Reactor;
 with Iour.Run_Queue;
+with Iour.Trace;
 
 package body Iour.Fibers with
   SPARK_Mode    => On,
@@ -117,6 +118,9 @@ is
       procedure Take_Running (Fiber : out Fiber_Ref);
       procedure Put_Idle (Idle : Boolean);
       procedure Take_Idle (Idle : out Boolean);
+      --  The inbox: wakeups posted from threads that own no ring.
+      procedure Post (Fiber : Fiber_Id);
+      procedure Take_Post (Fiber : out Fiber_Ref);
    private
       Items   : Ready_Array := [others => 0];
       Head    : Ready_Index := 0;
@@ -124,6 +128,11 @@ is
       Held    : Natural range 0 .. Max_Fibers := 0;
       Current : Fiber_Ref := No_Fiber;
       Asleep  : Boolean := False;
+
+      Inbox   : Ready_Array := [others => 0];
+      In_Head : Ready_Index := 0;
+      In_Tail : Ready_Index := 0;
+      In_Held : Natural range 0 .. Max_Fibers := 0;
    end Shard_Cell;
 
    Shard_Cells : array (Shard_Id) of Shard_Cell;
@@ -307,6 +316,27 @@ is
          Idle := Asleep;
       end Take_Idle;
 
+      procedure Post (Fiber : Fiber_Id) is
+      begin
+         if In_Held = Max_Fibers then
+            return;  --  unreachable: a fiber is posted at most once
+         end if;
+         Inbox (In_Tail) := Fiber;
+         In_Tail := In_Tail + 1;
+         In_Held := In_Held + 1;
+      end Post;
+
+      procedure Take_Post (Fiber : out Fiber_Ref) is
+      begin
+         if In_Held = 0 then
+            Fiber := No_Fiber;
+            return;
+         end if;
+         Fiber := Inbox (In_Head);
+         In_Head := In_Head + 1;
+         In_Held := In_Held - 1;
+      end Take_Post;
+
    end Shard_Cell;
 
    ---------------------------------------------------------------------------
@@ -362,6 +392,16 @@ is
    begin
       Shard_Cells (Shard).Put_Idle (Idle);
    end Set_Idle;
+
+   procedure Post_Wake (Fiber : Fiber_Id; Home : Shard_Id) is
+   begin
+      Shard_Cells (Home).Post (Fiber);
+   end Post_Wake;
+
+   procedure Take_Posted (Shard : Shard_Id; Fiber : out Fiber_Ref) is
+   begin
+      Shard_Cells (Shard).Take_Post (Fiber);
+   end Take_Posted;
 
    procedure Push_Ready
      (Shard : Shard_Id; Fiber : Fiber_Id; Accepted : out Boolean) is
@@ -567,6 +607,7 @@ is
 
       Pool.Mark (Fiber, Runnable);
       Push_Ready (Shard, Fiber, Started);
+      Trace.Event (Shard, "adopted fiber", Integer (Fiber));
    end Adopt;
 
    ---------------------------------------------------------------------------
@@ -688,6 +729,7 @@ is
       loop
          Pool.Launch_Info (Me, Shard, Work, Param, Done);
          Status := 0;
+         Trace.Event (Shard, "fiber starts", Integer (Me));
 
          if Work /= null then
             pragma Warnings
@@ -724,6 +766,7 @@ is
          end if;
 
          Pool.Mark (Me, Completed);
+         Trace.Event (Shard, "fiber finished", Integer (Me));
 
          if Shard in Active_Shard then
             Switch_To_Scheduler (Me, Shard);

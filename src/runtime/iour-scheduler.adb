@@ -3,6 +3,7 @@ with Iour.Fibers;
 with Iour.Futures;
 with Iour.Reactor;
 with Iour.Run_Queue;
+with Iour.Trace;
 
 package body Iour.Scheduler with SPARK_Mode => On is
 
@@ -275,9 +276,21 @@ package body Iour.Scheduler with SPARK_Mode => On is
 
       Control.Ring_Up;
       Control.Await_Ready;
+      Trace.Event (Shard, "up, ring ready");
 
       loop
          Progress := False;
+
+         --  0. Wakeups posted by threads that own no ring -------------
+         --  The environment task fulfilling a promise lands here.  They are
+         --  converted to ordinary local wakeups on this shard, which is the
+         --  only place it is safe to touch this shard's ready queue.
+         loop
+            Fibers.Take_Posted (Shard, Fiber);
+            exit when Fiber = No_Fiber;
+            Fibers.Wake (Shard, Fiber, Shard);
+            Progress := True;
+         end loop;
 
          --  1. Harvest completions -------------------------------------
          loop
@@ -320,6 +333,9 @@ package body Iour.Scheduler with SPARK_Mode => On is
          if Progress then
             --  Fibers queued submissions while they ran; hand them over
             --  without waiting, then go round again.
+            if Idle_Streak > 0 then
+               Trace.Event (Shard, "woke with work");
+            end if;
             Idle_Streak := 0;
             Reactor.Flush (Shard, 0, Status);
             if Failed (Status) then
@@ -338,6 +354,14 @@ package body Iour.Scheduler with SPARK_Mode => On is
 
             if Queued = 0 and then Ready = 0 then
                Reactor.In_Flight (Shard, Outstanding);
+
+               --  Only on entering an idle spell, not on every re-arm of
+               --  the backoff timer.  Otherwise a quiet shard buries the
+               --  trace in repeats of its own polling.
+               if Idle_Streak = 0 then
+                  Trace.Event (Shard, "going idle, in flight", Outstanding);
+               end if;
+
                if Outstanding = 0 then
                   --  Nothing in flight means no completion could ever wake
                   --  us.  Arm a timer so work published by a thread that
@@ -390,6 +414,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          end if;
       end loop;
 
+      Trace.Event (Shard, "stopping, fibers run", N_Fibers);
       Control.Tally (Shard, N_Completions, N_Fibers, N_Adopted, N_Sleeps,
                      Abandoned, N_Flush_Errors);
       Reactor.Shut (Shard);

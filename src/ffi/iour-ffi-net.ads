@@ -112,8 +112,12 @@ package Iour.Ffi.Net with SPARK_Mode => On is
      with Import, Convention => C, External_Name => "getsockname",
           Global => null;
 
+   --  close(2) and shutdown(2) change kernel state and return a status, so
+   --  they are Side_Effects functions: callable only as the right-hand side
+   --  of an assignment.
    function C_Close (Fd : C_Int) return C_Int
-     with Import, Convention => C, External_Name => "close", Global => null;
+     with Import, Convention => C, External_Name => "close",
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
 
    --  The same two calls imported as procedures, for the places that want
    --  the effect and not the result.  Declaring the effect on Kernel is
@@ -137,7 +141,7 @@ package Iour.Ffi.Net with SPARK_Mode => On is
 
    function C_Shutdown (Fd : C_Int; How : C_Int) return C_Int
      with Import, Convention => C, External_Name => "shutdown",
-          Global => null;
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
 
    ---------------------------------------------------------------------------
    --  Ada-facing wrappers
@@ -171,11 +175,13 @@ package Iour.Ffi.Net with SPARK_Mode => On is
    --  port 0 and letting the kernel choose.
    function Local_Port (Fd : Descriptor) return Io_Result;
 
-   function Close (Fd : Descriptor) return Io_Result;
+   function Close (Fd : Descriptor) return Io_Result
+     with Side_Effects, Global => (In_Out => Kernel);
 
    --  Half-close a socket.  On a listening socket this is what makes a
    --  pending accept give up, which is how a server stops accepting without
    --  waiting for one more client to arrive.
-   function Shutdown (Fd : Descriptor; How : Natural) return Io_Result;
+   function Shutdown (Fd : Descriptor; How : Natural) return Io_Result
+     with Side_Effects, Global => (In_Out => Kernel);
 
 end Iour.Ffi.Net;

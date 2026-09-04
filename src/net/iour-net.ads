@@ -34,7 +34,15 @@
 ------------------------------------------------------------------------------
 
 with Iour.Ffi;
+with Iour.Fibers;
+with Iour.Futures;
+with Iour.Reactor;
 
+--  The body of this package is outside SPARK's analysable subset: it hands
+--  buffer addresses to the kernel.  The contracts below are therefore what
+--  every caller is checked against.  A suspending operation touches the
+--  ring (Reactor.Rings), the future it waits on (Futures.Table), the fiber
+--  table it suspends through (Fibers.Registry), and the kernel.
 package Iour.Net with SPARK_Mode => On is
 
    subtype Socket is Descriptor;
@@ -58,10 +66,12 @@ package Iour.Net with SPARK_Mode => On is
    function New_Socket return Io_Result
      with Side_Effects, Global => (In_Out => Ffi.Kernel);
 
-   function Port_Of (S : Socket) return Io_Result;
+   function Port_Of (S : Socket) return Io_Result
+     with Global => null;
 
    --  Close outside a fiber, for sockets created before the runtime starts.
-   function Close_Now (S : Socket) return Io_Result;
+   function Close_Now (S : Socket) return Io_Result
+     with Side_Effects, Global => (In_Out => Ffi.Kernel);
 
    Shut_Read  : constant := 0;
    Shut_Write : constant := 1;
@@ -70,44 +80,75 @@ package Iour.Net with SPARK_Mode => On is
    --  Half-close.  Applied to a listening socket this makes a pending
    --  Accept_Connection complete with an error, which is how a server stops
    --  accepting without waiting for one more client to turn up.
-   function Shutdown_Now (S : Socket; How : Natural) return Io_Result;
+   function Shutdown_Now (S : Socket; How : Natural) return Io_Result
+     with Side_Effects, Global => (In_Out => Ffi.Kernel);
 
    --  Keep a vanished peer from raising SIGPIPE; call once at startup.
-   procedure Ignore_Broken_Pipes;
+   procedure Ignore_Broken_Pipes
+     with Global => (In_Out => Ffi.Kernel);
 
    ---------------------------------------------------------------------------
    --  Suspending operations (must be called from a fiber)
    ---------------------------------------------------------------------------
 
    --  Accept one connection, yielding the new descriptor as the result.
-   procedure Accept_Connection (Listener : Socket; Result : out Io_Result);
+   procedure Accept_Connection (Listener : Socket; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
    --  Read once.  A result of zero means the peer closed cleanly.
    procedure Receive
-     (S : Socket; Buffer : out Byte_Array; Result : out Io_Result);
+     (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
    --  Write once; may transfer fewer bytes than offered.
    procedure Send
-     (S : Socket; Buffer : Byte_Array; Result : out Io_Result);
+     (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
    --  Read until Buffer is full, resubmitting for short reads.  Result is
    --  Buffer'Length, zero if the peer closed before sending it all, or the
    --  first error.  This is the framing primitive for a fixed-size
    --  protocol: a stream socket splits messages wherever it likes.
    procedure Receive_Exact
-     (S : Socket; Buffer : out Byte_Array; Result : out Io_Result);
+     (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
    --  Write everything, resubmitting until it is all gone.  Result is the
    --  number of bytes written, or the first error.
    procedure Send_All
-     (S : Socket; Buffer : Byte_Array; Result : out Io_Result);
+     (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
+
+   --  Write everything to a non-socket descriptor: stdout, stderr, a file.
+   --  Iour.Text is built on this.
+   procedure Write_All
+     (Fd : Descriptor; Buffer : Byte_Array; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
    procedure Connect
      (S      : Socket;
       Host   : String;
       Port   : Natural;
-      Result : out Io_Result);
+      Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
-   procedure Close (S : Socket; Result : out Io_Result);
+   procedure Close (S : Socket; Result : out Io_Result)
+     with Global => (In_Out => (Reactor.Rings, Futures.Table,
+                                Fibers.Registry, Ffi.Kernel)),
+          Always_Terminates;
 
 end Iour.Net;

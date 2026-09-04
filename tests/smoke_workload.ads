@@ -26,6 +26,10 @@ package Smoke_Workload with SPARK_Mode => On is
    --  Fans out the workers, waits for them, then stops the runtime.
    procedure Root (Arg : Fiber_Argument);
 
+   --  A promise the environment task fulfils, to prove a wake posted from a
+   --  thread with no ring reaches its fiber.  Set by Root before it awaits.
+   procedure Handshake (Handle : out Future_Ref);
+
    --  How many workers finished, and how they were spread over the shards.
    procedure Result
      (Finished : out Natural;

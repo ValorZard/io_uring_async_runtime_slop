@@ -2,7 +2,6 @@ with Interfaces; use Interfaces;
 with Iour.Async;
 with Iour.Ffi.Net;
 with Iour.Ffi.Sys;
-with Iour.Reactor;
 
 package body Iour.Net with SPARK_Mode => On is
 
@@ -40,10 +39,19 @@ package body Iour.Net with SPARK_Mode => On is
 
    function Port_Of (S : Socket) return Io_Result is (Raw.Local_Port (S));
 
-   function Close_Now (S : Socket) return Io_Result is (Raw.Close (S));
+   function Close_Now (S : Socket) return Io_Result is
+      Result : Io_Result;
+   begin
+      Result := Raw.Close (S);
+      return Result;
+   end Close_Now;
 
    function Shutdown_Now (S : Socket; How : Natural) return Io_Result is
-     (Raw.Shutdown (S, How));
+      Result : Io_Result;
+   begin
+      Result := Raw.Shutdown (S, How);
+      return Result;
+   end Shutdown_Now;
 
    procedure Ignore_Broken_Pipes is
    begin
@@ -156,6 +164,40 @@ package body Iour.Net with SPARK_Mode => On is
 
       Result := Io_Result (Sent);
    end Send_All;
+
+   procedure Write_All
+     (Fd : Descriptor; Buffer : Byte_Array; Result : out Io_Result)
+   is
+      Sent : Natural := 0;
+      Step : Io_Result;
+   begin
+      if Buffer'Length = 0 then
+         Result := 0;
+         return;
+      end if;
+
+      while Sent < Buffer'Length loop
+         declare
+            Chunk : Byte_Array renames
+              Buffer (Buffer'First + Sent .. Buffer'Last);
+         begin
+            Async.Perform
+              (Reactor.Op_Write (Fd, Chunk'Address, Chunk'Length, 0), Step);
+         end;
+
+         if Step < 0 then
+            Result := Step;
+            return;
+         elsif Step = 0 then
+            Result := -E_Pipe;
+            return;
+         end if;
+
+         Sent := Sent + Natural (Step);
+      end loop;
+
+      Result := Io_Result (Sent);
+   end Write_All;
 
    procedure Connect
      (S      : Socket;

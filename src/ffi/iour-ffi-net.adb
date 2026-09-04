@@ -245,19 +245,23 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    function Close (Fd : Descriptor) return Io_Result is
+      Status : C_Int;
    begin
       if Fd < 0 then
          return 0;
       end if;
-      return Adapt (C_Close (C_Int (Fd)));
+      Status := C_Close (C_Int (Fd));
+      return Adapt (Status);
    end Close;
 
    function Shutdown (Fd : Descriptor; How : Natural) return Io_Result is
+      Status : C_Int;
    begin
       if Fd < 0 then
          return -Io_Result (E_Invalid);
       end if;
-      return Adapt (C_Shutdown (C_Int (Fd), C_Int (How)));
+      Status := C_Shutdown (C_Int (Fd), C_Int (How));
+      return Adapt (Status);
    end Shutdown;
 
 end Iour.Ffi.Net;
