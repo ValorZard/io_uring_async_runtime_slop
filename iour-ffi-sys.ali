@@ -1,0 +1,115 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+
+U iour.ffi.sys%b	iour-ffi-sys.adb	7fa982a9 OO PK
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W system%s		system.ads		system.ali
+W system.storage_elements%s  s-stoele.ads	s-stoele.ali
+
+U iour.ffi.sys%s	iour-ffi-sys.ads	897385be EE OO PK
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W system%s		system.ads		system.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
+D iour.ads		20260904005252 aa97d699 iour%s
+D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
+D iour-ffi-sys.ads	20260904005831 0c981861 iour.ffi.sys%s
+D iour-ffi-sys.adb	20260904005837 bfef4e20 iour.ffi.sys%b
+D system.ads		20260430083320 e2b7c99d system%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D s-stoele.ads		20260430083320 ccded4e8 system.storage_elements%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s s [errno_location iour__ffi__sys 17 13 none]
+G c Z s b [last_error iour__ffi__sys 22 13 none]
+G c Z s b [map_failed iour__ffi__sys 34 13 none]
+G c Z s s [mmap iour__ffi__sys 36 13 none]
+G c Z s s [munmap iour__ffi__sys 45 13 none]
+G c Z s s [sched_getcpu iour__ffi__sys 55 13 none]
+G c Z s s [exit_process iour__ffi__sys 63 14 none]
+G c Z s s [signal iour__ffi__sys 73 13 none]
+G c Z s b [ignore_sigpipe iour__ffi__sys 78 14 none]
+X 1 interfac.ads
+68I9*Integer_64<long_long_integer>
+X 2 i-c.ads
+62I9*int<integer>
+92M9*size_t
+X 3 iour.ads
+35K9*Iour 159e9 5|9r9 80r5 6|3r14 39r5
+X 4 iour-ffi.ads
+23K14*Ffi 3|35k9 4|33e13 5|9r14 80r10 6|3r19 39r10
+25I12*C_Int{2|62I9} 5|22r31 39r16 40r16 41r16 45r68 55r33 63r37 73r27 6|11r31
+. 14r22
+28M12*C_Size{2|92M9} 5|38r16 45r53
+31I12*C_Int64{1|68I9} 5|42r16
+X 5 iour-ffi-sys.ads
+9K18*Sys 4|23k14 5|80l14 80e17 6|3b23 39l14 39t17
+17V13*Errno_Location{7|67M9} 6|15s43
+22V13*Last_Error{4|25I12} 6|11b13 18l8 18t18
+28N4*Prot_Read
+29N4*Prot_Write
+30N4*Map_Shared
+31N4*Map_Populate
+34V13*Map_Failed{7|67M9} 6|24b13
+36V13*Mmap{7|67M9} 37>7 38>7 39>7 40>7 41>7 42>7
+37m7 Addr{7|67M9}
+38m7 Length{4|28M12}
+39i7 Prot{4|25I12}
+40i7 Flags{4|25I12}
+41i7 Fd{4|25I12}
+42i7 Offset{4|31I12}
+45V13*Munmap{4|25I12} 45>21 45>44
+45m21 Addr{7|67M9}
+45m44 Length{4|28M12}
+55V13*Sched_Getcpu{4|25I12}
+63U14*Exit_Process 63>28
+63i28 Status{4|25I12}
+71N4*Sig_Pipe 6|34r17
+73V13*Signal{7|67M9} 73>21 73>34 6|34s9
+73i21 Sig{4|25I12}
+73m34 Handler{7|67M9}
+78U14*Ignore_Sigpipe 6|31b14 37l8 37t22
+X 6 iour-ffi-sys.adb
+14i7 Cell{4|25I12} 17r14
+33m7 Ignored{7|67M9} 36r28
+X 7 system.ads
+37K9*System 5|7w6 17r35 34r31 37r16 42r32 45r28 73r44 73r67 6|1r6 5r8 24r31
+. 33r26 7|155e11
+67M9*Address 5|17r42 34r38 37r23 42r39 45r35 73r51 73r74 6|24r38 33r33
+X 9 s-stoele.ads
+43K16*Storage_Elements 6|1w13 5r15 9|104e28
+92M9*Integer_Address 6|25r19
+96V13*To_Address{7|67M9} 6|25s7 34s27
+

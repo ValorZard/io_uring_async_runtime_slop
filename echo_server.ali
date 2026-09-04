@@ -1,0 +1,210 @@
+V "GNAT Lib v16"
+M P C=1 W=b
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RV NO_EXCEPTION_HANDLERS
+RV NO_EXCEPTIONS
+RV NO_IO
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RV NO_STANDARD_STORAGE_POOLS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV STATIC_PRIORITIES
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+R ada.execution_time.group_budgets
+R ada.execution_time.timers
+R system.multiprocessors.dispatching_domains
+
+U echo_server%b		echo_server.adb		51f967ab OO SU
+W ada%s			ada.ads			ada.ali
+W ada.command_line%s	a-comlin.adb		a-comlin.ali
+Z ada.strings.text_buffers%s  a-sttebu.adb	a-sttebu.ali
+W ada.text_io%s		a-textio.adb		a-textio.ali
+W echo_server_app%s	echo_server_app.adb	echo_server_app.ali
+W iour%s		iour.ads		iour.ali
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W iour.ffi.sys%s	iour-ffi-sys.adb	iour-ffi-sys.ali
+W iour.fibers%s		iour-fibers.adb		iour-fibers.ali
+W iour.net%s		iour-net.adb		iour-net.ali
+W iour.scheduler%s	iour-scheduler.adb	iour-scheduler.ali
+W iour.shards%s		iour-shards.adb		iour-shards.ali
+Z system.multiprocessors%s  s-multip.adb	s-multip.ali
+Z system.tasking.restricted.stages%s  s-tarest.adb  s-tarest.ali
+
+D ada.ads		20260430083320 76789da1 ada%s
+D a-comlin.ads		20260430083320 4aa66568 ada.command_line%s
+D a-except.ads		20260430083320 8699d7ff ada.exceptions%s
+D a-ioexce.ads		20260430083320 40018c65 ada.io_exceptions%s
+D a-stream.ads		20260430083320 cb01a8f8 ada.streams%s
+D a-string.ads		20260430083320 90ac6797 ada.strings%s
+D a-sttebu.ads		20260430083320 f1ad67a2 ada.strings.text_buffers%s
+D a-stuten.ads		20260430083320 c6ced0ae ada.strings.utf_encoding%s
+D a-textio.ads		20260430083320 34ef47de ada.text_io%s
+D a-unccon.ads		20260430083320 0e9b276f ada.unchecked_conversion%s
+D echo_server.adb	20260904012602 182ff101 echo_server%b
+D echo_server_app.ads	20260904012513 bdd63784 echo_server_app%s
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
+D i-cstrea.ads		20260430083320 ffd01b9d interfaces.c_streams%s
+D iour.ads		20260904012037 5f719160 iour%s
+D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
+D iour-ffi-sys.ads	20260904012037 f184f603 iour.ffi.sys%s
+D iour-fibers.ads	20260904011829 9de9485e iour.fibers%s
+D iour-net.ads		20260904012136 dc60664f iour.net%s
+D iour-scheduler.ads	20260904012154 993e78cd iour.scheduler%s
+D iour-shards.ads	20260904011512 fc0bb227 iour.shards%s
+D system.ads		20260430083320 e2b7c99d system%s
+D s-atacco.ads		20260430083320 5868e3ba system.address_to_access_conversions%s
+D s-c_time.ads		20260430083320 e502d0c0 system.c_time%s
+D s-crtl.ads		20260430083320 823b6536 system.crtl%s
+D s-ficobl.ads		20260430083320 dc5161d4 system.file_control_block%s
+D s-linux.ads		20260430083320 96312dab system.linux%s
+D s-multip.ads		20260430083320 38ac9f73 system.multiprocessors%s
+D s-oscons.ads		20260626180101 d0718993 system.os_constants%s
+D s-osinte.ads		20260430083320 bfc41750 system.os_interface%s
+D s-oslock.ads		20260430083320 13fa6b78 system.os_locks%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D s-secsta.ads		20260430083320 578279f5 system.secondary_stack%s
+D s-soflin.ads		20260430083320 5d88fdea system.soft_links%s
+D s-stache.ads		20260430083320 0b81c1fe system.stack_checking%s
+D s-stausa.ads		20260430083320 f470ae2d system.stack_usage%s
+D s-stalib.ads		20260430083320 1c9580f6 system.standard_library%s
+D s-stoele.ads		20260430083320 ccded4e8 system.storage_elements%s
+D s-tasinf.ads		20260430083320 528dde74 system.task_info%s
+D s-taspri.ads		20260430083320 4fd5ef41 system.task_primitives%s
+D s-taskin.ads		20260430083320 e3b5765b system.tasking%s
+D s-tasres.ads		20260430083320 0c8ef6fb system.tasking.restricted%s
+D s-tarest.ads		20260430083320 c88b6d9a system.tasking.restricted.stages%s
+D s-traent.ads		20260430083320 c81cbf8c system.traceback_entries%s
+D s-unstyp.ads		20260430083320 fa2a7f59 system.unsigned_types%s
+D s-wchcon.ads		20260430083320 d9032363 system.wch_con%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z b b [echo_server standard 23 11 none]
+G r c none [echo_server standard 23 11 none] [ignore_broken_pipes iour__net 69 14 none]
+G r c none [echo_server standard 23 11 none] [raise_descriptor_limit iour__ffi__sys 92 13 none]
+G r c none [echo_server standard 23 11 none] [listen iour__net 47 13 none]
+G r c none [echo_server standard 23 11 none] [failed iour 129 13 none]
+G r c none [echo_server standard 23 11 none] [errno iour 132 13 none]
+G r c none [echo_server standard 23 11 none] [exit_process iour__ffi__sys 63 14 none]
+G r c none [echo_server standard 23 11 none] [port_of iour__net 54 13 none]
+G r c none [echo_server standard 23 11 none] [configure echo_server_app 26 14 none]
+G r c none [echo_server standard 23 11 none] [activate iour__shards 25 14 none]
+G r c none [echo_server standard 23 11 none] [wait_until_ready iour__scheduler 44 14 none]
+G r c none [echo_server standard 23 11 none] [spawn iour__fibers 71 14 none]
+G r c none [echo_server standard 23 11 none] [wait_for_shutdown iour__scheduler 31 14 none]
+G r c none [echo_server standard 23 11 none] [snapshot echo_server_app 31 14 none]
+G r c none [echo_server standard 23 11 none] [live_fibers iour__fibers 135 14 none]
+G r c none [echo_server standard 23 11 none] [report iour__scheduler 34 14 none]
+G r c none [echo_server standard 23 11 none] [release_all_stacks iour__fibers 146 14 none]
+X 1 ada.ads
+18K9*Ada 22e8 11|13r6 13r29 14r6 14r29
+X 2 a-comlin.ads
+40K13*Command_Line 148e21 11|13w10 13r33
+43V13*Argument_Count{natural} 11|27s10
+56V13*Argument{string} 11|31s37
+X 9 a-textio.ads
+58K13*Text_IO 785e16 11|14w10 14r33
+284U14*New_Line 11|98s4
+565U14*Put_Line 11|58s7 70s4 74s7 77s7 88s7 99s4 102s4 104s4 112s10
+X 11 echo_server.adb
+23U11*Echo_Server 23b11 122l5 122t16
+25V13 Argument_Or{natural} 25b13 25>26 25>44 40l8 40t19 42s35 43s35
+25i26 Index{positive} 27r27 31r47
+25i44 Default{natural} 28r17 35r36 38r20
+31a10 Text{string} 34r34
+32i10 Value{integer} 34m10 35r21 35r49
+42i4 Port{natural} 56r28 58r56
+43i4 Target{natural} 65r54 73r7 74r45
+45i4 Listener{16|127I12} 56m4 57r15 59r38 63r38 65r43 84r23
+46i4 Bound{16|127I12} 63m4 70r49
+47i4 Handle{16|103I9} 85m7 87r7
+48i4 Fd_Limit{natural} 54m4 72r39
+50i4 Accepted{natural} 95m7 99r40
+50i14 Completed{natural} 95m17 100r32
+50i25 Rejected{natural} 95m28 101r31
+50i35 Frames{natural} 95m38 102r45
+50i43 Errors{natural} 95m46 103r38 121r29
+50i51 Concurrent{natural} 95m54 104r59
+51i4 Live{natural} 96m24
+51i10 Peak{natural} 96m30 105r34
+107i8 S{16|96I12} 111r28 112r32
+109i10 Completions{natural} 111m31 113r40
+109i23 Resumes{natural} 111m44 114r36
+109i32 Adopted{natural} 111m53 115r48
+109i41 Sleeps{natural} 111m62 116r42
+109i49 Left{natural} 111m70
+X 12 echo_server_app.ads
+22K9*Echo_Server_App 11|21w6 65r4 83r7 94r4 12|39e20
+26U14*Configure 11|65s20
+29U14*Acceptor 11|83r23
+31U14*Snapshot 11|94s20
+X 16 iour.ads
+35K9*Iour 11|15w6 15r29 16r6 17r6 18r6 19r6 20r6 16|166e9
+47N4*Shard_Count 11|71r26
+94I9*Shard_Ref<short_short_integer>
+95I12*Shard_Id{94I9}
+96I12*Active_Shard{95I12} 11|107r13
+103I9*Future_Ref<short_integer> 11|47r15
+105i4*No_Future{103I9} 11|87r16
+111I9*Descriptor<integer> 11|63r26 65r31
+127I12*Io_Result{integer} 11|45r15 46r15
+129V13*Failed{boolean} 11|57s7
+132V13*Errno{natural} 11|59s31
+162I9*Fiber_Argument<integer> 11|84r7
+X 17 iour-ffi.ads
+23K14*Ffi 11|16r11 54r16 60r7 89r7 121r4 17|33e13
+X 18 iour-ffi-sys.ads
+9K18*Sys 11|16w15 54r20 60r11 89r11 121r8 18|107e17
+63U14*Exit_Process 11|60s15 89s15 121s12
+92V13*Raise_Descriptor_Limit{natural} 11|54s24
+X 19 iour-fibers.ads
+26K14*Fibers 11|17w11 82r4 96r4 120r4 19|148e16
+71U14*Spawn 11|82s11
+135U14*Live_Fibers 11|96s11
+146U14*Release_All_Stacks 11|120s11
+X 20 iour-net.ads
+36K14*Net 11|18w11 53r4 56r16 63r13 20|106e13
+47V13*Listen{16|127I12} 11|56s20
+54V13*Port_Of{16|127I12} 11|63s17
+69U14*Ignore_Broken_Pipes 11|53s8
+X 21 iour-scheduler.ads
+18K14*Scheduler 11|19w11 68r4 92r4 111r10 21|46e19
+31U14*Wait_For_Shutdown 11|92s14
+34U14*Report 11|111s20
+44U14*Wait_Until_Ready 11|68s14
+X 22 iour-shards.ads
+20K14*Shards 11|20w11 67r4 22|27e16
+25U14*Activate 11|67s11
+X 37 s-stausa.ads
+206U14*Initialize 207i<c,__gnat_stack_usage_initialize>22
+265U14*Output_Results 269i<c,__gnat_stack_usage_output_results>22
+X 44 s-tarest.ads
+231U14*Activate_All_Tasks_Sequential 232i<c,__gnat_activate_all_tasks>22
+

@@ -1,0 +1,14 @@
+--  Partition-wide configuration pragmas.
+--
+--  Jorvik (Ada 2022, RM D.13) is the concurrency profile this runtime is
+--  built against.  Compared with Ravenscar it keeps the hard guarantees
+--  (library-level tasks only, no task termination, ceiling locking,
+--  FIFO_Within_Priorities, static CPU assignment) while allowing the two
+--  things this design needs: protected entry queues longer than one, and
+--  relative delays.
+pragma Profile (Jorvik);
+
+--  SPARK RM 9(2): a partition containing tasking must elaborate
+--  sequentially, so every library unit is elaborated before any task is
+--  activated.  Without this, gnatprove rejects all tasking constructs.
+pragma Partition_Elaboration_Policy (Sequential);

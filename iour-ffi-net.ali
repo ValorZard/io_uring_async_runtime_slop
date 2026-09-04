@@ -1,0 +1,199 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV NO_DYNAMIC_SIZED_OBJECTS
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+
+U iour.ffi.net%b	iour-ffi-net.adb	eeef4b2b OO PK
+W iour%s		iour.ads		iour.ali
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W iour.ffi.sys%s	iour-ffi-sys.adb	iour-ffi-sys.ali
+Z system%s		system.ads		system.ali
+
+U iour.ffi.net%s	iour-ffi-net.ads	da2a337b EE OO PK
+W interfaces%s		interfac.ads		interfac.ali
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W system%s		system.ads		system.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
+D iour.ads		20260904005252 aa97d699 iour%s
+D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
+D iour-ffi-net.ads	20260904010007 ced05765 iour.ffi.net%s
+D iour-ffi-net.adb	20260904010053 2ca7042f iour.ffi.net%b
+D iour-ffi-sys.ads	20260904005831 0c981861 iour.ffi.sys%s
+D system.ads		20260430083320 e2b7c99d system%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s b [host_to_network iour__ffi__net 60 13 none]
+G c Z s b [network_to_host iour__ffi__net 61 13 none]
+G c Z s b [parse_ipv4 iour__ffi__net 71 14 none]
+G c Z s b [make_address iour__ffi__net 76 13 none]
+G c Z s s [c_socket iour__ffi__net 84 13 none]
+G c Z s s [c_bind iour__ffi__net 87 13 none]
+G c Z s s [c_listen iour__ffi__net 91 13 none]
+G c Z s s [c_setsockopt iour__ffi__net 94 13 none]
+G c Z s s [c_getsockname iour__ffi__net 103 13 none]
+G c Z s s [c_close iour__ffi__net 108 13 none]
+G c Z s b [tcp_socket iour__ffi__net 122 13 none]
+G c Z s b [tcp_listener iour__ffi__net 126 13 none]
+G c Z s b [local_port iour__ffi__net 134 13 none]
+G c Z s b [close iour__ffi__net 136 13 none]
+G r c none [tcp_socket iour__ffi__net 122 13 none] [last_error iour__ffi__sys 22 13 none]
+G r c none [tcp_listener iour__ffi__net 126 13 none] [last_error iour__ffi__sys 22 13 none]
+G r c none [local_port iour__ffi__net 134 13 none] [last_error iour__ffi__sys 22 13 none]
+G r c none [close iour__ffi__net 136 13 none] [last_error iour__ffi__sys 22 13 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 5|15w6 15r22
+84M9*Unsigned_16 5|37r16 38r16 60r38 60r58 61r38 61r58 76r54 128r19 6|26r38
+. 26r58 31r38 31r58 115r54 169r19
+92M9*Unsigned_32 5|39r16 67r27 73r21 76r34 127r19 6|40r21 46r16 78r49 95r43
+. 115r34 168r19
+95M9*Unsigned_64 5|40r16
+129V13*Shift_Left{84M9} 6|29s12
+134V13*Shift_Right{84M9} 6|29s50
+154V13*Shift_Left{92M9} 6|78s23 95s17 101s9 102s9
+159V13*Shift_Right{92M9} 6|103s9 104s9
+X 2 i-c.ads
+62I9*int<integer>
+71M9*unsigned
+X 3 iour.ads
+35K9*Iour 159e9 5|18r9 138r5 6|1r6 3r14 235r5
+105I9*Descriptor<integer> 5|134r30 136r25 6|211r30 227r25
+121I12*Io_Result{integer} 5|122r31 130r44 134r49 136r44 6|11r43 15r17 19r32
+. 153r31 160r14 171r44 176r17 204r14 211r49 220r14 227r44
+X 4 iour-ffi.ads
+23K14*Ffi 3|35k9 4|33e13 5|18r14 138r10 6|1r11 3r19 235r10
+25I12*C_Int{2|62I9} 5|84r48 84r62 87r26 88r13 91r28 91r45 91r59 95r15 96r15
+. 97r15 99r34 104r12 104r71 108r27 108r41 6|5r13 11r29 12r13 127r29 127r50
+. 128r34 129r26 130r65 143r34 144r26 154r21 173r25 175r16 197r31 214r25 215r24
+. 232r30
+27M12*C_Unsigned{2|71M9} 5|87r62 99r15 6|130r53 189r43 213r24 213r38
+X 5 iour-ffi-net.ads
+18K18*Net 4|23k14 5|138l14 138e17 6|3b23 235l14 235t17
+24N4*Af_Inet 78r48 6|118r17 154r40 173r44
+25N4*Sock_Stream 6|154r49 173r53
+26N4*Sol_Socket 6|184r21 186r24
+27N4*So_Reuseaddr 6|184r33
+28N4*So_Reuseport 6|186r36
+29N4*Ipproto_Tcp 6|159r21
+30N4*Tcp_Nodelay 6|159r34
+36R9*Sockaddr_In 42e6 44r8 52r7 77r13 6|116r13 174r33 189r55 212r24 213r50
+37m7*Family{1|84M9} 45r7 78r39 6|118m7
+38m7*Port{1|84M9} 46r7 6|119m7 220r47
+39m7*Addr{1|92M9} 47r7 6|120m7
+40m7*Pad{1|95M9} 48r7 6|121m7
+60V13*Host_To_Network{1|84M9} 60>30 6|26b13 32s7 119s17
+60m30 Value{1|84M9} 6|28r12 29r24 29r63
+61V13*Network_To_Host{1|84M9} 61>30 6|31b13 220s25
+61m30 Value{1|84M9} 6|32r24
+67m4*Any_Address{1|92M9} 6|48r18
+71U14*Parse_Ipv4 72>7 73<7 74<7 6|38b14 109l8 109t18
+72a7 Text{string} 6|39b7 53r10 57r16 61r13 66r51 73r16
+73m7 Address{1|92M9} 6|40b7 48m7 100m7 107m10
+74b7 Valid{boolean} 6|41b7 49m7 63m16 69m16 75m16 84m13 91m10
+76V13*Make_Address{36R9} 76>27 76>47 78r19 6|115b13 174s48
+76m27 Host{1|92M9} 6|120r17
+76m47 Port{1|84M9} 6|119r34
+84V13*C_Socket{4|25I12} 84>23 84>31 84>37 6|154s30 173s34
+84i23 Domain{4|25I12}
+84i31 Kind{4|25I12}
+84i37 Protocol{4|25I12}
+87V13*C_Bind{4|25I12} 87>21 87>33 87>56 6|189s17
+87i21 Fd{4|25I12}
+87m33 Addr{8|67M9}
+87m56 Len{4|27M12}
+91V13*C_Listen{4|25I12} 91>23 91>35 6|197s17
+91i23 Fd{4|25I12}
+91i35 Backlog{4|25I12}
+94V13*C_Setsockopt{4|25I12} 95>7 96>7 97>7 98>7 99>7 6|130s9
+95i7 Fd{4|25I12}
+96i7 Level{4|25I12}
+97i7 Name{4|25I12}
+98m7 Value{8|67M9}
+99m7 Len{4|27M12}
+103V13*C_Getsockname{4|25I12} 104>7 104>19 104>42 6|215s9
+104i7 Fd{4|25I12}
+104m19 Addr{8|67M9}
+104m42 Len{8|67M9}
+108V13*C_Close{4|25I12} 108>22 6|144s35 232s21
+108i22 Fd{4|25I12}
+122V13*Tcp_Socket{3|121I12} 6|153b13 161l8 161t18
+126V13*Tcp_Listener{3|121I12} 127>7 128>7 129>7 130>7 6|167b13 205l8 205t20
+127m7 Host{1|92M9} 6|168b7 174r62
+128m7 Port{1|84M9} 6|169b7 174r68
+129i7 Backlog{natural} 6|170b7 197r38
+130b7 Reuseport{boolean} 6|171b7 185r10
+134V13*Local_Port{3|121I12} 134>25 6|211b13 221l8 221t18
+134i25 Fd{3|105I9} 6|211b25 215r31
+136V13*Close{3|121I12} 136>20 6|227b13 233l8 233t13
+136i20 Fd{3|105I9} 6|227b20 229r10 232r37
+X 6 iour-ffi-net.adb
+11V13 Adapt{3|121I12} 11b13 11>20 20l8 20t13 157s17 179s17 192s21 199s21
+. 218s17 232s14
+11i20 Result{4|25I12} 14r10 15r28
+12i7 Err{4|25I12} 17m7 19r18 19r43
+43i7 Octet{natural} 66m13 66r22 68r16 78r62 80m13 95r56
+44i7 Count{natural} 59r20 74r40 79m13 79r22 90r10
+45i7 Digits_Seen{natural} 62r16 67m13 67r28 74r16 81m13 90r29
+46m7 Result{1|92M9} 78m13 78r35 95m7 95r29 101r21 102r21 103r22 104r22 107r21
+57i11 I{integer} 61r19 66r57 73r22
+127U14 Set_Flag 127b14 127>24 127>36 127>43 136l8 136t16 159s7 184s7 186s10
+127i24 Fd{4|25I12} 130r23
+127i36 Level{4|25I12} 130r27
+127i43 Name{4|25I12} 130r34
+128i7 One{4|25I12} 130r40
+129i7 Ignored{4|25I12} 135r28
+143U14 Discard_Close 143b14 143>29 147l8 147t21 193s10 200s10
+143i29 Fd{4|25I12} 144r44
+144i7 Ignored{4|25I12} 146r28
+154i7 Fd{4|25I12} 156r10 157r24 159r17 160r25
+173i7 Fd{4|25I12} 178r10 179r24 184r17 186r20 189r25 193r25 197r27 200r25
+. 204r25
+174r7 Addr{5|36R9} 189r29
+175i7 Status{4|25I12} 189m7 190r10 192r28 197m7 198r10 199r28
+176i7 Failure{3|121I12} 192m10 194r17 199m10 201r17
+212r7 Addr{5|36R9} 215m36 215r36 220r42
+213m7 Len{4|27M12} 215m50 215r50
+214i7 Status{4|25I12} 217r10 218r24
+X 7 iour-ffi-sys.ads
+9K18*Sys 6|1w15 17r14 7|80e17
+22V13*Last_Error{4|25I12} 6|17s18
+X 8 system.ads
+37K9*System 5|16w6 87r40 98r15 104r26 104r48 6|27r10 27r22 27r48 106r10 106r22
+. 106r48 8|155e11
+67M9*Address 5|87r47 98r22 104r33 104r55
+81V14*"="{boolean} 6|27r18 106r18
+91n23*High_Order_First{91E9} 6|27r55 106r55
+92e4*Default_Bit_Order{91E9} 6|27r29 106r29
+

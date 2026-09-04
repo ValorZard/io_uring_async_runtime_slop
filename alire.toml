@@ -1,0 +1,10 @@
+name = "io_uring_async_runtime"
+description = "Thread-per-core io_uring async runtime in Ada 2022/SPARK on Jorvik"
+version = "0.1.0-dev"
+
+authors = ["Srayan Jana"]
+maintainers = ["Srayan Jana <srayan.jana@outlook.com>"]
+maintainers-logins = ["ValorZard"]
+licenses = "MIT OR Apache-2.0 WITH LLVM-exception"
+website = ""
+tags = ["io_uring", "async", "spark", "concurrency", "linux", "networking"]

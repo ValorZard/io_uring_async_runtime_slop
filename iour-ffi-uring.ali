@@ -1,0 +1,163 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+
+U iour.ffi.uring%s	iour-ffi-uring.ads	b1eab9be EE OO PK
+W interfaces%s		interfac.ads		interfac.ali
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W system%s		system.ads		system.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
+D iour.ads		20260904005252 aa97d699 iour%s
+D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
+D iour-ffi-uring.ads	20260904005937 a510dda0 iour.ffi.uring%s
+D system.ads		20260430083320 e2b7c99d system%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s s [setup iour__ffi__uring 196 13 none]
+G c Z s s [enter iour__ffi__uring 202 13 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 5|27w6 27r22
+65I9*Integer_32<integer> 5|94r22 102r22 127r19
+68I9*Integer_64<long_long_integer> 5|216r21 217r21
+81M9*Unsigned_8 5|91r22 92r22
+84M9*Unsigned_16 5|93r22 100r22 101r22
+92M9*Unsigned_32 5|40r22 41r22 42r22 43r22 44r22 45r22 46r22 47r22 53r22
+. 54r22 55r22 56r22 57r22 58r22 59r22 60r22 65r45 69r24 70r24 71r24 72r24
+. 73r24 74r24 75r24 97r22 98r22 128r19 139r29 141r29 143r31 143r56
+95M9*Unsigned_64 5|48r22 61r22 95r22 96r22 99r22 103r22 104r22 126r19
+X 2 i-c.ads
+62I9*int<integer>
+71M9*unsigned
+X 3 iour.ads
+35K9*Iour 159e9 5|30r9 232r5
+X 4 iour-ffi.ads
+23K14*Ffi 3|35k9 4|33e13 5|30r14 232r10
+25I12*C_Int{2|62I9} 5|196r69 207r45
+27M12*C_Unsigned{2|71M9} 5|196r30 203r22 204r22 205r22 206r22
+X 5 iour-ffi-uring.ads
+30K18*Uring 4|23k14 5|232l14 232e19
+39R9*Sqring_Offsets 50e6 77r24
+40m7*Head{1|92M9}
+41m7*Tail{1|92M9}
+42m7*Ring_Mask{1|92M9}
+43m7*Ring_Entries{1|92M9}
+44m7*Flags{1|92M9}
+45m7*Dropped{1|92M9}
+46m7*Array_Offset{1|92M9}
+47m7*Resv1{1|92M9}
+48m7*User_Addr{1|95M9}
+52R9*Cqring_Offsets 63e6 78r24
+53m7*Head{1|92M9}
+54m7*Tail{1|92M9}
+55m7*Ring_Mask{1|92M9}
+56m7*Ring_Entries{1|92M9}
+57m7*Overflow{1|92M9}
+58m7*Cqes{1|92M9}
+59m7*Flags{1|92M9}
+60m7*Resv1{1|92M9}
+61m7*User_Addr{1|95M9}
+65A9*Reserved_Words(1|92M9)<integer> 76r24
+68R9*Params 80e6 230r7
+69m7*Sq_Entries{1|92M9}
+70m7*Cq_Entries{1|92M9}
+71m7*Flags{1|92M9}
+72m7*Sq_Thread_Cpu{1|92M9}
+73m7*Sq_Thread_Idle{1|92M9}
+74m7*Features{1|92M9}
+75m7*Wq_Fd{1|92M9}
+76a7*Resv{65A9}
+77r7*Sq_Off{39R9}
+78r7*Cq_Off{52R9}
+90R9*Sqe 106e6 108r8 139r54 226r7
+91m7*Opcode{1|81M9} 109r7
+92m7*Flags{1|81M9} 110r7
+93m7*Ioprio{1|84M9} 111r7
+94i7*Fd{1|65I9} 112r7
+95m7*Off{1|95M9} 113r7
+96m7*Addr{1|95M9} 114r7
+97m7*Len{1|92M9} 115r7
+98m7*Op_Flags{1|92M9} 116r7
+99m7*User_Data{1|95M9} 117r7
+100m7*Buf_Index{1|84M9} 118r7
+101m7*Personality{1|84M9} 119r7
+102i7*Splice_Fd_In{1|65I9} 120r7
+103m7*Addr3{1|95M9} 121r7
+104m7*Pad2{1|95M9} 122r7
+125R9*Cqe 130e6 132r8 141r54 228r7
+126m7*User_Data{1|95M9} 133r7
+127i7*Res{1|65I9} 134r7
+128m7*Flags{1|92M9} 135r7
+139A9*Sqe_Array(90R9)<1|92M9>
+141A9*Cqe_Array(125R9)<1|92M9>
+143A9*Index_Array(1|92M9)<1|92M9>
+151N4*Op_Nop
+152N4*Op_Timeout
+153N4*Op_Accept
+154N4*Op_Connect
+155N4*Op_Close
+156N4*Op_Send
+157N4*Op_Recv
+158N4*Op_Msg_Ring
+161N4*Off_Sq_Ring
+162N4*Off_Cq_Ring
+163N4*Off_Sqes
+166N4*Setup_Sqpoll
+167N4*Setup_Clamp
+168N4*Setup_Coop_Taskrun
+169N4*Setup_Single_Issuer
+172N4*Feat_Single_Mmap
+173N4*Feat_Nodrop
+176N4*Enter_Getevents
+179N4*Sq_Need_Wakeup
+182N4*Sqe_Cqe_Skip_Success
+185N4*Cqe_F_More
+188N4*Msg_Nosignal
+196V13*Setup{4|25I12} 196>20 196>42
+196m20 Entries{4|27M12}
+196m42 P{6|67M9}
+202V13*Enter{4|25I12} 203>7 204>7 205>7 206>7 207>7
+203m7 Fd{4|27M12}
+204m7 To_Submit{4|27M12}
+205m7 Min_Complete{4|27M12}
+206m7 Flags{4|27M12}
+207m7 Sig{6|67M9}
+215R9*Kernel_Timespec 219e6
+216i7*Seconds{1|68I9}
+217i7*Nanoseconds{1|68I9}
+X 6 system.ads
+37K9*System 5|28w6 196r46 207r22 6|155e11
+67M9*Address 5|196r53 207r29
+

@@ -1,0 +1,167 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RV NO_PROTECTED_TYPES
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RV NO_STANDARD_STORAGE_POOLS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+RV MAX_ENTRY_QUEUE_LENGTH=1+
+
+U echo_server_app%b	echo_server_app.adb	b14de5b0 OO PK
+W echo_protocol%s	echo_protocol.adb	echo_protocol.ali
+W iour%s		iour.ads		iour.ali
+W iour.fibers%s		iour-fibers.adb		iour-fibers.ali
+W iour.net%s		iour-net.adb		iour-net.ali
+W iour.scheduler%s	iour-scheduler.adb	iour-scheduler.ali
+
+U echo_server_app%s	echo_server_app.ads	e2a7a6e4 EE OO PK
+W iour%s		iour.ads		iour.ali
+
+D echo_protocol.ads	20260904012415 ddf5e69b echo_protocol%s
+D echo_server_app.ads	20260904012513 bdd63784 echo_server_app%s
+D echo_server_app.adb	20260904012532 09d96273 echo_server_app%b
+D iour.ads		20260904012037 5f719160 iour%s
+D iour-fibers.ads	20260904011829 9de9485e iour.fibers%s
+D iour-net.ads		20260904012136 dc60664f iour.net%s
+D iour-scheduler.ads	20260904012154 993e78cd iour.scheduler%s
+D system.ads		20260430083320 e2b7c99d system%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s b [configure echo_server_app 26 14 none]
+G c Z s b [acceptor echo_server_app 29 14 none]
+G c Z s b [snapshot echo_server_app 31 14 none]
+G r c none [acceptor echo_server_app 29 14 none] [accept_connection iour__net 76 14 none]
+G r c none [acceptor echo_server_app 29 14 none] [errno iour 132 13 none]
+G r c none [acceptor echo_server_app 29 14 none] [spawn iour__fibers 71 14 none]
+G r c none [acceptor echo_server_app 29 14 none] [close_now iour__net 57 13 none]
+X 1 echo_protocol.ads
+20K9*Echo_Protocol 46e18 3|1w6 1r27
+24A12*Frame{4|115A9}<integer> 3|133r18 134r18
+26E9*Message_Kind 30e17 3|137r18
+27n7*Ping{26E9} 3|150r21
+28n7*Pong{26E9} 3|155r17
+29n7*Farewell{26E9} 3|148r27
+36U14*Build 3|155s10
+40U14*Parse 3|147s10
+X 2 echo_server_app.ads
+22K9*Echo_Server_App 39l5 39e20 3|6b14 228l5 228t20
+26U14*Configure 26>25 26>48 3|99b14 103l8 103t17
+26i25 Listener{4|111I9} 3|99b25 101r20
+26i48 Target{natural} 3|99b48 102r15
+29U14*Acceptor 29>24 3|182b14 213l8 213t16
+29i24 Arg{4|162I9} 3|182b24 183r53
+31U14*Snapshot 32<7 33<7 34<7 35<7 36<7 37<7 3|217b14 226l8 226t16
+32i7 Accepted{natural} 3|218b7 225m19
+33i7 Completed{natural} 3|219b7 225m29
+34i7 Rejected{natural} 3|220b7 225m40
+35i7 Frames{natural} 3|221b7 225m50
+36i7 Errors{natural} 3|222b7 225m58
+37i7 Concurrent{natural} 3|223b7 225m66
+X 3 echo_server_app.adb
+8K12 Fibers=8:32 202r13
+9K12 Net=9:29 109r24 110r39 116r39 116r60 129r23 129r37 144r10 156r10 167r7
+. 183r27 183r41 190r10 209r22
+13i4 Listen_Fd{4|111I9} 101m7 173r26
+14i4 Goal{natural} 71r18 71r54 75r10 75r46 102m7
+16w14 Stats 41b19 93l8 93t13 168r7 188r20 197r13 208r16 225r7
+17U17 Accepted_One 43b17 50l11 50t23 197s19
+18U17 Rejected_One 52b17 58l11 58t23 208s22
+21U17 Completed_One 22>10 22>28 22<46 60b17 72l11 72t24 168s13
+22i10 Frames{natural} 61b10 64r41
+22b28 Failed{boolean} 61b28 65r13
+22b46 Last{boolean} 61b46 71m10
+23U17 Read 24<10 25<10 26<10 27<10 28<10 29<10 77b17 91l11 91t15 225s13
+24i10 N_Accepted{natural} 78b10 85m10
+25i10 N_Completed{natural} 79b10 86m10
+26i10 N_Rejected{natural} 80b10 87m10
+27i10 N_Frames{natural} 81b10 88m10
+28i10 N_Errors{natural} 82b10 89m10
+29i10 N_Concurrent{natural} 83b10 90m10
+30V16 Accept_Limit_Reached{boolean} 74b16 188s26
+32i7 Total_Accepted{natural} 45m10 45r28 75r28 85r26
+33i7 Total_Completed{natural} 63m10 63r29 71r36 86r26
+34i7 Total_Rejected{natural} 54m10 54r28 87r26
+35i7 Total_Frames{natural} 64m10 64r26 88r26
+36i7 Total_Errors{natural} 66m13 66r29 89r26
+37i7 Live{natural} 46m10 46r18 47r13 48r26 55r13 56m13 56r21 68r13 69m13
+. 69r21
+38i7 Peak_Live{natural} 47r20 48m13 90r26
+109U14 Drop 109b14 109>20 113l8 113t12 209s16
+109i20 S{6|38I12} 110r54
+110i7 Ignored{4|127I12} 112r28
+115U14 Stop_Listening 115b14 115>30 119l8 119t22 173s10
+115i30 S{4|111I9} 116r57
+116i7 Ignored{4|127I12} 118r28
+128U14 Serve 128b14 128>21 176l8 176t13 203r16
+128i21 Arg{4|162I9} 129r49
+129i7 Conn{6|38I12} 144r29 156r24 167r18
+133a7 Request{1|24A12} 144m35 147r17
+134a7 Response{1|24A12} 155m33 156r30
+136i7 Status{4|127I12} 144m44 145r20 156m40 157r13 160r38 167m24
+137e7 Kind{1|26E9} 147m26 148r20 150r13
+138i7 Sequence{natural} 147m32 155r23
+139i7 Frames{natural} 164m10 164r20 168r28
+140b7 Failed{boolean} 151m13 160m13 168r36
+141b7 Last{boolean} 168m44 170r10
+183i7 Listener{6|38I12} 190r33
+184i7 Incoming{4|127I12} 190m43 192r13 195r30 203r46 209r34
+185i7 Handle{4|103I9} 203m57 205r16
+X 4 iour.ads
+35K9*Iour 2|20w6 20r16 3|2r6 3r6 4r6 8r27 9r24 174r10 4|166e9
+103I9*Future_Ref<short_integer> 3|185r18
+105i4*No_Future{103I9} 3|205r25
+111I9*Descriptor<integer> 2|26r36 3|13r16 99r36 115r34
+112i4*Invalid_Descriptor{111I9} 3|13r30
+114M9*Byte
+115A9*Byte_Array(114M9)<integer>
+127I12*Io_Result{integer} 3|110r26 116r26 136r18 184r18
+132V13*Errno{natural} 3|195s23
+137N4*E_Intr 3|195r47
+139N4*E_Again 3|195r56
+148V13*Peer_Gone{boolean} 3|160s27
+162I9*Fiber_Argument<integer> 2|29r30 3|128r27 182r30 203r30
+X 5 iour-fibers.ads
+26K14*Fibers 3|2w11 8r32 5|148e16
+71U14*Spawn 3|202s20
+X 6 iour-net.ads
+36K14*Net 3|3w11 9r29 6|106e13
+38I12*Socket{4|111I9} 3|109r28 129r27 129r41 183r31 183r45 209r26
+57V13*Close_Now{4|127I12} 3|110s43
+61N4*Shut_Both 3|116r64
+66V13*Shutdown_Now{4|127I12} 3|116s43
+76U14*Accept_Connection 3|190s14
+90U14*Receive_Exact 3|144s14
+95U14*Send_All 3|156s14
+104U14*Close 3|167s11
+X 7 iour-scheduler.ads
+18K14*Scheduler 3|4w11 174r15 7|46e19
+26U14*Request_Shutdown 3|174s25
+

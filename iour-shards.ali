@@ -1,0 +1,98 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RV NO_PROTECTED_TYPES
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RV NO_TASKING
+RR NO_TERMINATE_ALTERNATIVES
+RV STATIC_PRIORITIES
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_IMPLEMENTATION_PRAGMAS
+RV NO_ELABORATION_CODE
+RV MAX_PROTECTED_ENTRIES=1
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RV MAX_TASKS=8
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+RV MAX_ENTRY_QUEUE_LENGTH=1+
+
+U iour.shards%b		iour-shards.adb		4a22defd OO PK
+W iour%s		iour.ads		iour.ali
+W iour.scheduler%s	iour-scheduler.adb	iour-scheduler.ali
+W system%s		system.ads		system.ali
+W system.multiprocessors%s  s-multip.adb	s-multip.ali
+
+U iour.shards%s		iour-shards.ads		569c64be EE OO PK
+W iour%s		iour.ads		iour.ali
+
+D iour.ads		20260904005252 aa97d699 iour%s
+D iour-scheduler.ads	20260904011423 a0abaf44 iour.scheduler%s
+D iour-shards.ads	20260904011512 fc0bb227 iour.shards%s
+D iour-shards.adb	20260904011524 cc999570 iour.shards%b
+D system.ads		20260430083320 e2b7c99d system%s
+D s-multip.ads		20260430083320 38ac9f73 system.multiprocessors%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s b [activate iour__shards 25 14 none]
+X 1 iour.ads
+35K9*Iour 159e9 3|20r9 27r5 4|3r6 5r14 76r5
+43N4*Max_Shards 4|73r21
+47N4*Shard_Count 4|38r18 73r7
+53N4*First_Shard_Cpu 4|54r29 55r29 56r29 57r29 58r29 59r29 60r29 61r29
+88I9*Shard_Ref<short_short_integer>
+89I12*Shard_Id{88I9}
+90I12*Active_Shard{89I12} 4|39r25
+X 2 iour-scheduler.ads
+18K14*Scheduler 45e19 4|3w11 39r10
+22U14*Run 4|39s20
+X 3 iour-shards.ads
+20K14*Shards 1|35k9 3|27l10 27e16 4|5b19 76l10 76t16
+25U14*Activate
+X 4 iour-shards.adb
+9U14 Activate
+19w14 Parking 25b19 30l8 30t15 41r7
+20Y13 Wait_Forever 26b13 29l11 29t23 41s15
+22b7 Released{boolean} 26r31
+36U14 Serve 36b14 36>21 42l8 42t13 63s31 64s31 65s31 66s31 67s31 68s31 69s31
+. 70s31
+36i21 Index{natural} 38r10 39r39
+52i4 Shard_Priority{5|109I12} 54r62 55r62 56r62 57r62 58r62 59r62 60r62 61r62
+54t9 Shard_0 63b14 63l46 63t53
+55t9 Shard_1 64b14 64l46 64t53
+56t9 Shard_2 65b14 65l46 65t53
+57t9 Shard_3 66b14 66l46 66t53
+58t9 Shard_4 67b14 67l46 67t53
+59t9 Shard_5 68b14 68l46 68t53
+60t9 Shard_6 69b14 69l46 69t53
+61t9 Shard_7 70b14 70l46 70t53
+X 5 system.ads
+37K9*System 4|1w6 2r6 7r13 52r30 52r49 5|155e11
+108I12*Any_Priority{integer}
+109I12*Priority{108I12} 4|52r37
+112i4*Default_Priority{109I12} 4|52r56
+X 6 s-multip.ads
+20K16*Multiprocessors 4|2w13 7r20 6|32e27
+23I9*CPU_Range<integer> 4|7r36
+

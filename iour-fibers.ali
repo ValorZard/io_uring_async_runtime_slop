@@ -1,0 +1,424 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RV NO_EXCEPTION_HANDLERS
+RV NO_EXCEPTIONS
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RV NO_PROTECTED_TYPES
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV NO_DEFAULT_INITIALIZATION
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+RV MAX_ENTRY_QUEUE_LENGTH=1+
+
+U iour.fibers%b		iour-fibers.adb		0988efe4 OO PK
+W interfaces%s		interfac.ads		interfac.ali
+W iour%s		iour.ads		iour.ali
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W iour.ffi.fiber%s	iour-ffi-fiber.ads	iour-ffi-fiber.ali
+W iour.ffi.sys%s	iour-ffi-sys.adb	iour-ffi-sys.ali
+W iour.futures%s	iour-futures.adb	iour-futures.ali
+W iour.reactor%s	iour-reactor.adb	iour-reactor.ali
+W iour.run_queue%s	iour-run_queue.adb	iour-run_queue.ali
+W system%s		system.ads		system.ali
+
+U iour.fibers%s		iour-fibers.ads		c7b0e12e EE OO PK
+W iour%s		iour.ads		iour.ali
+W system%s		system.ads		system.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
+D iour.ads		20260904005252 aa97d699 iour%s
+D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
+D iour-ffi-fiber.ads	20260904005333 b1ffb289 iour.ffi.fiber%s
+D iour-ffi-sys.ads	20260904005831 0c981861 iour.ffi.sys%s
+D iour-ffi-uring.ads	20260904005937 a510dda0 iour.ffi.uring%s
+D iour-fibers.ads	20260904011256 8f90fe2a iour.fibers%s
+D iour-fibers.adb	20260904011256 98468414 iour.fibers%b
+D iour-futures.ads	20260904010712 403c486c iour.futures%s
+D iour-reactor.ads	20260904010951 86f5a203 iour.reactor%s
+D iour-run_queue.ads	20260904010737 710ab143 iour.run_queue%s
+D system.ads		20260430083320 e2b7c99d system%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s b [self iour__fibers 51 13 none]
+G c Z s b [running_fiber iour__fibers 55 13 none]
+G c Z s b [claim_cpu iour__fibers 59 14 none]
+G c Z s b [spawn iour__fibers 73 14 none]
+G c Z s b [await iour__fibers 89 14 none]
+G c Z s b [yield iour__fibers 93 14 none]
+G c Z s b [in_fiber iour__fibers 96 13 none]
+G c Z s b [adopt iour__fibers 105 14 none]
+G c Z s b [resume iour__fibers 112 14 none]
+G c Z s b [after_resume iour__fibers 115 14 none]
+G c Z s b [push_ready iour__fibers 117 14 none]
+G c Z s b [pop_ready iour__fibers 119 14 none]
+G c Z s b [ready_depth iour__fibers 120 14 none]
+G c Z s b [home_of iour__fibers 123 14 none]
+G c Z s b [wake iour__fibers 129 14 none]
+G c Z s b [set_idle iour__fibers 134 14 none]
+G c Z s b [live_fibers iour__fibers 137 14 none]
+G c Z s b [context_layout_matches iour__fibers 145 13 none]
+G c Z s b [release_all_stacks iour__fibers 148 14 none]
+G r c none [self iour__fibers 51 13 none] [sched_getcpu iour__ffi__sys 55 13 none]
+G r c none [claim_cpu iour__fibers 59 14 none] [sched_getcpu iour__ffi__sys 55 13 none]
+G r c none [spawn iour__fibers 73 14 none] [acquire iour__futures 39 14 none]
+G r c none [spawn iour__fibers 73 14 none] [push iour__run_queue 23 14 none]
+G r c none [spawn iour__fibers 73 14 none] [release iour__futures 48 14 none]
+G r c none [spawn iour__fibers 73 14 none] [sched_getcpu iour__ffi__sys 55 13 none]
+G r c none [spawn iour__fibers 73 14 none] [ring_descriptor iour__reactor 159 13 none]
+G r c none [spawn iour__fibers 73 14 none] [encode iour__reactor 45 13 none]
+G r c none [spawn iour__fibers 73 14 none] [op_msg_ring iour__reactor 106 13 none]
+G r c none [spawn iour__fibers 73 14 none] [push iour__reactor 135 14 none]
+G r c none [await iour__fibers 89 14 none] [sched_getcpu iour__ffi__sys 55 13 none]
+G r c none [await iour__fibers 89 14 none] [subscribe iour__futures 70 14 none]
+G r c none [await iour__fibers 89 14 none] [switch iour__ffi__fiber 26 14 none]
+G r c none [await iour__fibers 89 14 none] [release iour__futures 48 14 none]
+G r c none [yield iour__fibers 93 14 none] [sched_getcpu iour__ffi__sys 55 13 none]
+G r c none [yield iour__fibers 93 14 none] [switch iour__ffi__fiber 26 14 none]
+G r c none [in_fiber iour__fibers 96 13 none] [sched_getcpu iour__ffi__sys 55 13 none]
+G r c none [adopt iour__fibers 105 14 none] [adopt iour__futures 93 14 none]
+G r c none [adopt iour__fibers 105 14 none] [stack_alloc iour__ffi__fiber 31 13 none]
+G r c none [adopt iour__fibers 105 14 none] [resolve iour__futures 58 14 none]
+G r c none [adopt iour__fibers 105 14 none] [ring_descriptor iour__reactor 159 13 none]
+G r c none [adopt iour__fibers 105 14 none] [encode iour__reactor 45 13 none]
+G r c none [adopt iour__fibers 105 14 none] [op_msg_ring iour__reactor 106 13 none]
+G r c none [adopt iour__fibers 105 14 none] [push iour__reactor 135 14 none]
+G r c none [adopt iour__fibers 105 14 none] [prime iour__ffi__fiber 43 14 none]
+G r c none [resume iour__fibers 112 14 none] [switch iour__ffi__fiber 26 14 none]
+G r c none [wake iour__fibers 129 14 none] [ring_descriptor iour__reactor 159 13 none]
+G r c none [wake iour__fibers 129 14 none] [encode iour__reactor 45 13 none]
+G r c none [wake iour__fibers 129 14 none] [op_msg_ring iour__reactor 106 13 none]
+G r c none [wake iour__fibers 129 14 none] [push iour__reactor 135 14 none]
+G r c none [context_layout_matches iour__fibers 145 13 none] [context_size iour__ffi__fiber 51 13 none]
+G r c none [release_all_stacks iour__fibers 148 14 none] [stack_free iour__ffi__fiber 35 14 none]
+X 1 interfac.ads
+47K9*Interfaces 247e15 9|1w6 1r30
+92M9*Unsigned_32 9|391r52
+95M9*Unsigned_64
+X 2 i-c.ads
+62I9*int<integer>
+64I9*long<long_integer>
+92M9*size_t
+X 3 iour.ads
+35K9*Iour 159e9 8|28r9 150r5 9|3r6 4r6 5r6 6r6 7r6 8r6 10r14 17r24 694r5
+43N4*Max_Shards 9|31r60
+57N4*Max_Fibers 9|31r47 80r49 83r21 83r49 107r34 120r28 159r18 220r19 228r18
+. 236r23 253r20 285r7
+65N4*Fiber_Stack_Bytes 9|490r47 507r38 690r44
+88I9*Shard_Ref<short_short_integer> 8|51r25 123r53 9|49r41 72r15 92r22 98r56
+. 174r22 195r56 293r25 300r27 355r53 398r33 475r16 561r24 568r27 601r24 627r16
+. 632r16
+89I12*Shard_Id{88I9} 8|55r36 130r53 9|54r31 59r28 284r33 306r36 312r35 333r30
+. 370r53
+90I12*Active_Shard{89I12} 8|59r33 106r17 112r30 115r36 118r15 119r33 120r35
+. 130r14 134r32 9|88r49 134r25 165r49 317r33 328r32 340r15 345r33 350r35
+. 370r14 385r18 404r22 408r21 468r17 495r52 518r30 532r36 554r61 563r23 574r23
+. 604r23 659r32 660r33 668r22
+91i4*No_Shard{88I9} 9|50r38 72r33 154r33 216r33 297r17
+93I9*Fiber_Ref<short_integer> 8|55r53 119r59 9|54r44 87r63 125r34 140r63
+. 263r34 306r53 307r24 312r53 345r59 432r18 472r16 474r16 569r18 602r15 631r16
+94I12*Fiber_Id{93I9} 8|112r52 115r58 118r37 123r31 130r36 9|79r31 80r68 83r39
+. 88r31 91r18 96r31 97r35 98r34 99r35 100r36 101r34 121r47 124r31 165r31
+. 173r18 185r31 190r35 195r34 200r35 205r36 210r34 237r23 238r31 239r23 251r31
+. 281r33 340r37 355r31 370r36 518r52 532r58 554r43 626r25 626r37
+95i4*No_Fiber{93I9} 9|55r40 145r22 266r22 438r18 480r18 495r26 529r27 564r43
+. 579r15 608r15 658r26
+97I9*Future_Ref<short_integer> 8|76r20 9|75r15 95r22 177r22 430r20 630r16
+98I12*Future_Id{97I9} 8|89r30 107r17 9|89r30 166r30 469r17 567r30
+99i4*No_Future{97I9} 9|75r33 157r33 219r33 435r17 445r19 456r20 656r21
+105I9*Descriptor<integer>
+121I12*Io_Result{integer} 8|89r54 9|567r54 633r16
+132N4*E_Again 9|494r39 572r18
+137N4*E_Canceled 9|650r30
+155I9*Fiber_Argument<integer> 8|75r16 9|74r15 87r35 94r22 140r35 176r22 429r16
+. 629r16
+157P9*Fiber_Body 8|74r16 9|73r15 87r17 93r22 140r17 175r22 428r16 628r16
+X 4 iour-ffi.ads
+23K14*Ffi 33e13 9|3w11 4r11 5r11 17r29 19r13 20r13 291r26 294r22 294r35 296r32
+. 318r22 318r35 320r32 490r35 507r26 508r26 622r32 625r32 690r32
+25I12*C_Int{2|62I9} 9|19r17 294r26 296r36 318r26 320r36
+26I12*C_Long{2|64I9} 9|508r30 622r36 625r36
+28M12*C_Size{2|92M9} 9|20r17 291r30 490r39 507r30 690r36
+X 5 iour-ffi-fiber.ads
+16K18*Fiber 59e19 9|4w15 17r33
+26U14*Switch 9|526s11 556s11
+26m22 From{13|67M9} 9|526r19 556r19
+26m45 To{13|67M9} 9|527r19 557r19
+31V13*Stack_Alloc{13|67M9} 9|490s22
+35U14*Stack_Free 9|690s14
+43U14*Prime 9|505s11
+44m7 Ctx{13|67M9} 9|505r18
+45m7 Base{13|67M9} 9|506r18
+46m7 Size{4|28M12} 9|507r18
+47i7 Arg{4|26I12} 9|508r18
+51V13*Context_Size{4|28M12} 9|291s11
+X 6 iour-ffi-sys.ads
+9K18*Sys 80e17 9|5w15 294r39 318r39
+55V13*Sched_Getcpu{4|25I12} 9|294s43 318s43
+X 8 iour-fibers.ads
+28K14*Fibers 3|35k9 8|150l10 150e16 9|10b19 694l10 694t16
+30@23*Registry 32r22 9|13r6
+31@23*Scheduling 32r32 52r50 56r50 60r32 135r32 9|14r6
+35E9*Fiber_State 40e17 9|71r15 96r49 97r57 185r49 190r57 533r18
+36n7*Slot_Free{35E9} 9|71r33 212r35 215r33
+37n7*Runnable{35E9} 9|153r33 374r25 510r25 541r15 614r22
+38n7*Running{35E9} 9|520r25
+39n7*Suspended{35E9} 9|590r25
+40n7*Completed{35E9} 9|538r15 666r25
+51V13*Self{3|88I9} 9|293b13 304l8 304t12 460s19 561s37 568s40 601s37
+55V13*Running_Fiber{3|93I9} 55>28 9|306b13 310l8 310t21 564s18 578s13 607s13
+55i28 Shard{3|89I12} 9|306b28 307r46
+59U14*Claim_Cpu 59>25 59<47 9|317b14 326l8 326t17
+59i25 Shard{3|90I12} 9|317b25 324r38
+59b47 Ok{boolean} 9|317b47 321m10 325m7
+73U14*Spawn 74>7 75>7 76<7 9|427b14 461l8 461t13
+74p7 Work{3|157P9} 77r18 9|428b7 437r22
+75i7 Arg{3|155I9} 9|429b7 437r28
+76i7 Handle{3|97I9} 9|430b7 435m7 444m34 445r10 452r23 454r27 456m10
+89U14*Await 89>21 89<41 9|567b14 598l8 598t13
+89i21 Handle{3|98I12} 9|567b21 587r29 597r24
+89i41 Result{3|121I12} 9|567b41 572m7 587m58
+93U14*Yield 9|600b14 616l8 616t13
+96V13*In_Fiber{boolean} 9|560b13 565l8 565t16
+105U14*Adopt 106>7 107>7 108<7 9|467b14 512l8 512t13
+106i7 Shard{3|90I12} 9|468b7 484r25 496r22 511r19
+107i7 Handle{3|98I12} 9|469b7 479r22 484r32 494r30
+108b7 Started{boolean} 9|470b7 477m7 511m33
+112U14*Resume 112>22 112>44 9|518b14 530l8 530t14
+112i22 Shard{3|90I12} 9|518b22 521r20 526r56 529r20
+112i44 Fiber{3|94I12} 9|518b44 520r18 521r27 527r56
+115U14*After_Resume 115>28 115>50 9|532b14 548l8 548t20
+115i28 Shard{3|90I12} 9|532b28 543r25
+115i50 Fiber{3|94I12} 9|532b50 536r22 540r27 543r32
+117U14*Push_Ready 118>7 118>29 118<47 9|339b14 343l8 343t18 377s10 511s7
+. 543s13
+118i7 Shard{3|90I12} 9|340b7 342r20
+118i29 Fiber{3|94I12} 9|340b29 342r33
+118b47 Accepted{boolean} 9|340b47 342m40
+119U14*Pop_Ready 119>25 119<47 9|345b14 348l8 348t17
+119i25 Shard{3|90I12} 9|345b25 347r20
+119i47 Fiber{3|93I9} 9|345b47 347m32
+120U14*Ready_Depth 120>27 120<49 9|350b14 353l8 353t19
+120i27 Shard{3|90I12} 9|350b27 352r20
+120i49 Count{natural} 9|350b49 352m34
+123U14*Home_Of 123>23 123<41 9|355b14 358l8 358t15
+123i23 Fiber{3|94I12} 9|355b23 357r21
+123i41 Shard{3|88I9} 9|355b41 357m28
+129U14*Wake 130>7 130>28 130>46 9|369b14 395l8 395t12 496s16 662s16
+130i7 From{3|90I12} 9|370b7 376r17 377r22 387r13
+130i28 Fiber{3|94I12} 9|370b28 374r18 377r28 391r65
+130i46 Home{3|89I12} 9|370b46 376r10 385r10 389r57
+134U14*Set_Idle 134>24 134>46 9|328b14 331l8 331t16
+134i24 Shard{3|90I12} 9|328b24 330r15
+134b46 Idle{boolean} 9|328b46 330r25
+137U14*Live_Fibers 137<27 137<48 9|360b14 363l8 363t19
+137i27 Count{natural} 9|360b27 362m19
+137i48 High_Water{natural} 9|360b48 362m26
+145V13*Context_Layout_Matches{boolean} 9|290b13
+148U14*Release_All_Stacks 9|683b14 692l8 692t26
+X 9 iour-fibers.adb
+17K12 Fib=17:33 291r7 490r18 505r7 526r7 556r7 690r10
+31I12 Context_Slot{natural} 33r33 281r50 284r50 287r37
+33A9 Context_Store(13|67M9)<integer> 36r15
+36a4 Contexts{33A9} 14r21 288m7 288r7
+46N4 Max_Cpus 47r44
+47I12 Cpu_Index{natural} 49r27 296r43 300r51 320r43 324r18
+49A9 Cpu_Map(3|88I9)<integer> 50r16
+50a4 Cpu_Owner{49A9} 14r31 300r40 324m7
+54A9 Current_Map(3|93I9)<3|88I9> 55r14
+55a4 Current{54A9} 14r42 307r37 314m7
+59A9 Idle_Map(boolean)<3|88I9> 60r13
+60a4 Asleep{59A9} 14r51 330m7 334r35
+70R9 Fiber_Record 77e14 79r44
+71e7*State{8|35E9} 153m24 187m24 192r33 212r27 215m24
+72i7*Home{3|88I9} 154m24 168m24 179r33 197r33 216m24
+73p7*Work{3|157P9} 155m24 180r33 217m24
+74i7*Arg{3|155I9} 156m24 181r33 218m24
+75i7*Done{3|97I9} 157m24 169m24 182r33 219m24
+76m7*Stack{13|67M9} 202r32 207m24 237r40 238r48 239m40
+79A9 Fiber_Table(70R9)<3|93I9> 105r19
+80A9 Free_Stack(3|94I12)<integer> 82r28 106r19
+82a4 Initial_Free{80A9} 106r34
+83i11 I{integer} 83r66
+85w14 Pool 13r21 137b19 247l8 247t12 357r7 362r7 374r7 437r7 446r10 455r10
+. 484r7 488r7 498r13 501r10 510r7 520r7 536r7 540r13 590r10 614r7 636r10
+. 666r10 688r10
+86U17 Allocate 87>10 87>29 87<51 139b17 163l11 163t19 437s12
+87p10 Work{3|157P9} 140b10 155r33
+87i29 Arg{3|155I9} 140b29 156r33
+87i51 Fiber{3|93I9} 140b51 145m13 149m10 153r17 154r17 155r17 156r17 157r17
+88U17 Bind 88>23 88>41 89>23 165b17 170l11 170t15 484s12
+88i23 Fiber{3|94I12} 165b23 168r17 169r17
+88i41 Shard{3|90I12} 165b41 168r32
+89i23 Done{3|98I12} 166b23 169r32
+90U17 Launch_Info 91>10 92<10 93<10 94<10 95<10 172b17 183l11 183t22 636s15
+91i10 Fiber{3|94I12} 173b10 179r26 180r26 181r26 182r26
+92i10 Shard{3|88I9} 174b10 179m10
+93p10 Work{3|157P9} 175b10 180m10
+94i10 Arg{3|155I9} 176b10 181m10
+95i10 Done{3|97I9} 177b10 182m10
+96U17 Mark 96>23 96>41 185b17 188l11 188t15 374s12 510s12 520s12 590s15 614s12
+. 666s15
+96i23 Fiber{3|94I12} 185b23 187r17
+96e41 State{8|35E9} 185b41 187r33
+97U17 State_Of 97>27 97<45 190b17 193l11 193t19 536s12
+97i27 Fiber{3|94I12} 190b27 192r26
+97e45 State{8|35E9} 190b45 192m10
+98U17 Home_Of 98>26 98<44 195b17 198l11 198t18 357s12
+98i26 Fiber{3|94I12} 195b26 197r26
+98i44 Shard{3|88I9} 195b44 197m10
+99U17 Stack_Of 99>27 99<45 200b17 203l11 203t19 488s12
+99i27 Fiber{3|94I12} 200b27 202r25
+99m45 Base{13|67M9} 200b45 202m10
+100U17 Set_Stack 100>28 100>46 205b17 208l11 208t20 501s15
+100i28 Fiber{3|94I12} 205b28 207r17
+100m46 Base{13|67M9} 205b46 207r33
+101U17 Recycle 101>26 210b17 224l11 224t18 446s15 455s15 498s18 540s18
+101i26 Fiber{3|94I12} 210b26 212r20 215r17 216r17 217r17 218r17 219r17 221r32
+102U17 Stats 102<24 102<44 226b17 230l11 230t16 362s12
+102i24 Live{natural} 226b24 228m10
+102i44 High_Water{natural} 226b44 229m10
+103U17 Next_Stack 103=29 103<52 232b17 245l11 245t21 688s15
+103i29 From{natural} 232b29 236r16 237r33 238r41 239r33 240m16 240r24 243m13
+. 243r21
+103m52 Base{13|67M9} 232b52 235m10 238m16
+105a7 Slots{79A9} 153m10 154m10 155m10 156m10 157m10 168m10 169m10 179r19
+. 180r19 181r19 182r19 187m10 192r19 197r19 202r18 207m10 212r13 215m10 216m10
+. 217m10 218m10 219m10 237r16 238r24 239m16
+106a7 Available{80A9} 149r19 221m13
+107i7 Top{natural} 144r13 148m10 148r17 149r30 159r31 220r13 221r24 222m13
+. 222r20 228r31
+108i7 Peak{natural} 160r20 161m13 229r24
+120M9 Ready_Index 121r31 129r15 130r15
+121A9 Ready_Array(3|94I12)<120M9> 128r15
+123W19 Ready_Cell 128E7 132l8 132e18 134r42 249b19 279l8 279t18
+124U17 Push 124>23 124<41 251b17 261l11 261t15 342s27
+124i23 Fiber{3|94I12} 251b23 257r26
+124b41 Accepted{boolean} 251b41 254m13 260m10
+125U17 Pop 125<22 263b17 272l11 272t14 347s27
+125i22 Fiber{3|93I9} 263b22 266m13 269m10
+126U17 Depth 126<24 274b17 277l11 277t16 352s27
+126i24 Count{natural} 274b24 276m10
+128a7 Items{121A9} 257m10 269r19
+129m7 Head{120M9} 269r26 270m10 270r18
+130m7 Tail{120M9} 257r17 258m10 258r18
+131i7 Held{natural} 253r13 259m10 259r18 265r13 271m10 271r18 276r19
+134a4 Ready_Cells(123W19) 13r27 342r7 347r7 352r7
+142i10 Live{natural} 159m10 160r13 161r21
+281V13 Fiber_Slot{31I12} 281b13 281>25 505s43 527s44 556s44
+281i25 Fiber{3|94I12} 282r16
+284V13 Shard_Slot{31I12} 284b13 284>25 526s44 557s44
+284i25 Shard{3|89I12} 285r29
+287V13 Context_Address{13|67M9} 287b13 287>30 505s26 526s27 527s27 556s27
+. 557s27
+287i30 Slot{31I12} 288r17
+294i7 Cpu{4|25I12} 296r10 296r26 300r62
+300i10 Owner{3|88I9} 302r17
+307i7 Value{3|93I9} 309r14
+312U14 Set_Running 312b14 312>27 312>45 315l8 315t19 521s7 529s7
+312i27 Shard{3|89I12} 314r16
+312i45 Fiber{3|93I9} 314r26
+318i7 Cpu{4|25I12} 320r10 320r26 324r29
+333V13 Is_Idle{boolean} 333b13 333>22 337l8 337t15 409s37
+333i22 Shard{3|89I12} 334r43
+334b7 Value{boolean} 336r14
+372b7 Accepted{boolean} 377m35 393m13
+398U14 Nudge_Idle 398b14 398>26 421l8 421t18 460s7
+398i26 From{3|88I9} 404r10 409r23 411r16
+399b7 Accepted{boolean} 417m16
+408i11 Target{3|90I12} 409r13 409r46 413r60
+432i7 Fiber{3|93I9} 437m33 438r10 442r34 446r24 455r24
+433b7 Accepted{boolean} 452m31 453r14
+472i7 Fiber{3|93I9} 479m30 480r10 484r18 488r22 498r27 501r26 505r55 508r38
+. 510r18 511r26
+473m7 Base{13|67M9} 488m29 489r10 490m10 491r13 501r33 506r26
+474i7 Waiter{3|93I9} 494m48 495r16 496r29
+475i7 Home{3|88I9} 494m56 495r44 496r37
+533e7 State{8|35E9} 536m29 537r12
+534b7 Accepted{boolean} 543m39
+554U14 Switch_To_Scheduler 554b14 554>35 554>53 558l8 558t27 594s10 615s7
+. 669s13
+554i35 Fiber{3|94I12} 556r56
+554i53 Shard{3|90I12} 557r56
+561i7 Shard{3|88I9} 563r14 564r33
+568i7 Shard{3|88I9} 574r10 578r28 587r41 594r35
+569i7 Me{3|93I9} 578m7 579r10 587r37 590r21 594r31
+570b7 Resolved{boolean} 587m48 588r20
+601i7 Shard{3|88I9} 604r10 607r28 615r32
+602i7 Me{3|93I9} 607m7 608r10 614r18 615r28
+622U14 Fiber_Main 622>26 625b14 677l8 677t18
+622i26 Arg{4|26I12} 625b26 626r47
+626i7 Me{3|94I12} 636r28 666r21 669r34
+627i7 Shard{3|88I9} 636m32 660r24 662r22 668r13 669r38
+628p7 Work{3|157P9} 636m39 636r39 639r13 641r16
+629i7 Param{3|155I9} 636m45 641r26
+630i7 Done{3|97I9} 636m52 656r13 657r30
+631i7 Waiter{3|93I9} 657m44 658r16 662r29
+632i7 Home{3|88I9} 657m52 659r24 662r37
+633i7 Status{3|121I12} 637m10 650m19 657r36
+684i7 Cursor{natural} 688m27 688r27
+685m7 Base{13|67M9} 688m35 689r20 690r26
+X 10 iour-futures.ads
+21K14*Futures 9|6w11 442r7 443r34 454r10 479r7 494r13 587r10 597r7 657r13
+. 10|103e17
+29n7*Queued{27E9} 9|443r42
+39U14*Acquire 9|442s15
+40i7 Worker{3|93I9} 9|442r24
+41e7 State{27E9} 9|443r24
+42i7 Handle{3|97I9} 9|444r24
+48U14*Release 9|454s18 597s15
+58U14*Resolve 9|494s21 657s21
+70U14*Subscribe 9|587s18
+93U14*Adopt 9|479s15
+X 11 iour-reactor.ads
+26K14*Reactor 9|7w11 386r10 388r13 389r32 391r18 391r34 392r32 392r48 410r13
+. 412r16 413r35 415r35 415r51 416r35 416r51 11|167e17
+38n7*Tag_Wake{36E9} 9|391r42 415r59
+41n7*Tag_Msg_Send{36E9} 9|392r56 416r59
+45V13*Encode{1|95M9} 9|391s26 392s40 415s43 416s43
+106V13*Op_Msg_Ring{60R9} 9|388s21 412s24
+107i7 Target_Ring{3|105I9} 9|389r16 413r19
+108m7 Target_Token{1|95M9} 9|390r16 415r19
+109m7 Token{1|95M9} 9|392r16 416r19
+135U14*Push 9|386s18 410s21
+159V13*Ring_Descriptor{3|105I9} 9|389s40 413s43
+X 12 iour-run_queue.ads
+15K14*Run_Queue 9|8w11 452r7 12|38e19
+23U14*Push 9|452s17
+X 13 system.ads
+37K9*System 8|26w6 9|2w6 18r13 33r50 36r43 76r15 76r33 99r56 100r53 103r63
+. 200r56 205r53 232r63 235r18 237r49 239r49 287r58 291r38 473r16 489r17 491r20
+. 685r16 689r27 13|155e11
+67M9*Address 9|18r20 33r57 76r22 99r63 100r60 103r70 200r63 205r60 232r70
+. 287r65 291r45 473r23 685r23
+69m4*Null_Address{67M9} 9|36r50 76r40 235r25 237r56 239r56 489r24 491r27
+. 689r34
+81V14*"="{boolean} 9|237r46 489r15 491r18 689r25
+

@@ -1,0 +1,5 @@
+export GNAT_PREFIX="/root/.local/share/alire/toolchains/gnat_native_16.1.0_9f74f58a"
+export GPR_PREFIX="/root/.local/share/alire/toolchains/gprbuild_26.0.1_e3f27f25"
+export GNATPROVE_PREFIX="/root/.local/share/alire/releases/gnatprove_16.1.0_82528bef"
+export PATH="$GPR_PREFIX/bin:$GNAT_PREFIX/bin:$GNATPROVE_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$GNAT_PREFIX/lib64:$LD_LIBRARY_PATH"

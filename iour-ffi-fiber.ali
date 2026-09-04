@@ -1,0 +1,84 @@
+V "GNAT Lib v16"
+A -gnatc
+A -gnat2022
+A -mtune=generic
+A -march=x86-64
+P DB LC TF ES NO
+
+RN
+RR PURE_BARRIERS
+RR NO_ABORT_STATEMENTS
+RR NO_ASYNCHRONOUS_CONTROL
+RR NO_DYNAMIC_ATTACHMENT
+RR NO_DYNAMIC_CPU_ASSIGNMENT
+RR NO_DYNAMIC_PRIORITIES
+RR NO_IMPLICIT_TASK_ALLOCATIONS
+RR NO_IMPLICIT_PROTECTED_OBJECT_ALLOCATIONS
+RR NO_LOCAL_TIMING_EVENTS
+RR NO_LOCAL_PROTECTED_OBJECTS
+RR NO_PROTECTED_TYPE_ALLOCATORS
+RR NO_REQUEUE_STATEMENTS
+RR NO_SELECT_STATEMENTS
+RR NO_SPECIFIC_TERMINATION_HANDLERS
+RR NO_TASK_ALLOCATORS
+RR NO_TASK_ATTRIBUTES_PACKAGE
+RR NO_TASK_HIERARCHY
+RR NO_TASK_TERMINATION
+RR NO_TERMINATE_ALTERNATIVES
+RV NO_IMPLEMENTATION_ASPECT_SPECIFICATIONS
+RV NO_ELABORATION_CODE
+RR MAX_SELECT_ALTERNATIVES=0
+RR MAX_TASK_ENTRIES=0
+RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
+
+U iour.ffi.fiber%s	iour-ffi-fiber.ads	34142f56 EE OO PK
+W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
+W system%s		system.ads		system.ali
+
+D interfac.ads		20260430083320 9111f9c1 interfaces%s
+D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
+D iour.ads		20260904005252 aa97d699 iour%s
+D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
+D iour-ffi-fiber.ads	20260904005333 b1ffb289 iour.ffi.fiber%s
+D system.ads		20260430083320 e2b7c99d system%s
+D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
+D gnat.adc		20260904005252 00000000
+G a e
+G c Z s s [switch iour__ffi__fiber 26 14 none]
+G c Z s s [stack_alloc iour__ffi__fiber 31 13 none]
+G c Z s s [stack_free iour__ffi__fiber 35 14 none]
+G c Z s s [prime iour__ffi__fiber 43 14 none]
+G c Z s s [context_size iour__ffi__fiber 51 13 none]
+G c Z s s [guard_size iour__ffi__fiber 55 13 none]
+X 2 i-c.ads
+64I9*long<long_integer>
+92M9*size_t
+X 3 iour.ads
+35K9*Iour 159e9 5|16r9 59r5
+X 4 iour-ffi.ads
+23K14*Ffi 3|35k9 4|33e13 5|16r14 59r10
+26I12*C_Long{2|64I9} 5|47r14
+28M12*C_Size{2|92M9} 5|31r33 35r56 46r14 51r33 55r31
+X 5 iour-ffi-fiber.ads
+16K18*Fiber 4|23k14 5|59l14 59e19
+19R9*Context 22e6
+20m7*Stack_Pointer{6|67M9}
+26U14*Switch 26>22 26>45
+26m22 From{6|67M9}
+26m45 To{6|67M9}
+31V13*Stack_Alloc{6|67M9} 31>26
+31m26 Size{4|28M12}
+35U14*Stack_Free 35>26 35>49
+35m26 Base{6|67M9}
+35m49 Size{4|28M12}
+43U14*Prime 44>7 45>7 46>7 47>7
+44m7 Ctx{6|67M9}
+45m7 Base{6|67M9}
+46m7 Size{4|28M12}
+47i7 Arg{4|26I12}
+51V13*Context_Size{4|28M12}
+55V13*Guard_Size{4|28M12}
+X 6 system.ads
+37K9*System 5|14w6 20r23 26r29 26r50 31r48 35r33 44r14 45r14 6|155e11
+67M9*Address 5|20r30 26r36 26r57 31r55 35r40 44r21 45r21
+
