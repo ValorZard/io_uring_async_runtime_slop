@@ -13,7 +13,8 @@ package body Iour.Fibers with
   SPARK_Mode    => On,
   Refined_State =>
     (Registry => (Banks, Shard_Cells,
-                  Currents.Cells, Exits.Cells, Inbox_Flags.Cells))
+                  Currents.Cells, Exits.Cells, Inbox_Flags.Cells,
+                  Fresh_Depths.Cells))
 is
 
    package Fib renames Iour.Ffi.Fiber;
@@ -122,6 +123,7 @@ is
          Arg   : out Fiber_Argument;
          Done  : out Future_Ref);
       procedure Home_Of (Local : Fiber_Local; Shard : out Shard_Ref);
+      procedure Rehome (Local : Fiber_Local; Shard : Shard_Id);
       procedure Stack_Of (Local : Fiber_Local; Base : out System.Address);
       procedure Set_Stack (Local : Fiber_Local; Base : System.Address);
       procedure Recycle (Local : Fiber_Local);
@@ -171,21 +173,69 @@ is
    --  shard before it drains.
    package Inbox_Flags is new Iour.Per_Shard (Boolean, False);
 
+   --  How much never-started work a shard is holding.  An idle shard reads
+   --  every sibling's before deciding whom to steal from, and reading an
+   --  atomic costs the owner nothing -- which is the whole point.  It is a
+   --  hint: it is stored just outside the protected action that changed the
+   --  queue, so it can be a beat stale.  Stale high costs one wasted lock,
+   --  stale low costs one missed steal, and the next pass corrects both.
+   package Fresh_Depths is new Iour.Per_Shard (Natural, 0);
+
+   --  Most a single steal moves.  Enough that the lock and the scan amortise
+   --  over a useful batch, small enough that a shard cannot be emptied by
+   --  one greedy sibling.
+   Steal_Batch_Max : constant := 32;
+
+   --  Below this a victim is left alone: one fiber is not worth a lock, a
+   --  rehome and a cold cache on the far side.
+   Steal_Floor : constant := 2;
+
+   type Steal_Batch is array (0 .. Steal_Batch_Max - 1) of Fiber_Id;
+
    type Ready_Index is mod Max_Fibers;
    type Ready_Array is array (Ready_Index) of Fiber_Id;
 
    protected type Shard_Cell
      with Priority => Runtime_Priority
    is
-      procedure Push (Fiber : Fiber_Id; Accepted : out Boolean);
-      --  Push for the paths where a full queue is impossible: the queue
-      --  holds Max_Fibers entries, a fiber sits in at most one queue at a
-      --  time, and there are never more than Max_Fibers fibers.  The guard
-      --  stays because SPARK proves the arithmetic from it; the branch it
-      --  guards is unreachable.
+      --  Work that has never run, and so can still be moved to another
+      --  core: nothing has cached a shard for it and it has nothing in
+      --  flight.  Fresh_Now reports the new depth so the caller can publish
+      --  the hint without a second trip through this lock.
+      procedure Push
+        (Fiber : Fiber_Id; Accepted : out Boolean; Fresh_Now : out Natural);
+
+      --  Work that has run before and is runnable again.  Not stealable:
+      --  a fiber that has started has a saved context and code that has
+      --  already read which shard it is on.
+      --
+      --  Enqueue is for the paths where a full queue is impossible: the
+      --  queue holds Max_Fibers entries, a fiber sits in at most one queue
+      --  at a time, and there are never more than Max_Fibers fibers.  The
+      --  guard stays because SPARK proves the arithmetic from it; the
+      --  branch it guards is unreachable.
       procedure Enqueue (Fiber : Fiber_Id);
-      procedure Pop (Fiber : out Fiber_Ref);
+
+      --  Fresh work first, which keeps a newly accepted connection from
+      --  waiting behind established ones and keeps this the same order the
+      --  scheduler already used: adopt, then run.
+      --  From_Fresh says whether the fresh queue moved, so the caller can
+      --  leave the hint alone on the common path -- popping work that has
+      --  run before, which no thief can take anyway.
+      procedure Pop
+        (Fiber      : out Fiber_Ref;
+         Fresh_Now  : out Natural;
+         From_Fresh : out Boolean);
       procedure Depth (Count : out Natural);
+
+      --  Take up to Want fresh fibers off the far end from Pop, so a thief
+      --  and the owner touch opposite ends of the queue.
+      procedure Steal
+        (Want      : Natural;
+         Batch     : out Steal_Batch;
+         Count     : out Natural;
+         Fresh_Now : out Natural)
+        with Post => Count <= Steal_Batch_Max;
       procedure Put_Idle (Idle : Boolean);
       procedure Take_Idle (Idle : out Boolean);
       --  The inbox: wakeups posted from threads that own no ring.
@@ -197,6 +247,11 @@ is
       Tail    : Ready_Index := 0;
       Held    : Natural range 0 .. Max_Fibers := 0;
       Asleep  : Boolean := False;
+
+      Fresh      : Ready_Array := [others => 0];
+      Fresh_Head : Ready_Index := 0;
+      Fresh_Tail : Ready_Index := 0;
+      Fresh_Held : Natural range 0 .. Max_Fibers := 0;
 
       Inbox   : Ready_Array := [others => 0];
       In_Head : Ready_Index := 0;
@@ -269,6 +324,11 @@ is
       begin
          Shard := Slots (Local).Home;
       end Home_Of;
+
+      procedure Rehome (Local : Fiber_Local; Shard : Shard_Id) is
+      begin
+         Slots (Local).Home := Shard;
+      end Rehome;
 
       procedure Stack_Of (Local : Fiber_Local; Base : out System.Address) is
       begin
@@ -373,6 +433,15 @@ is
       Banks (Bank_Of (Fiber)).Home_Of (Local_Of (Fiber), Shard);
    end Slot_Home_Of;
 
+   --  Move a fiber to another core.  Safe only for a fiber that has never
+   --  run: one that has holds a saved context and has already read which
+   --  shard it is on, in Await and in Perform, and would carry the old
+   --  answer across the move.
+   procedure Slot_Rehome (Fiber : Fiber_Id; Shard : Shard_Id) is
+   begin
+      Banks (Bank_Of (Fiber)).Rehome (Local_Of (Fiber), Shard);
+   end Slot_Rehome;
+
    procedure Slot_Stack_Of (Fiber : Fiber_Id; Base : out System.Address) is
    begin
       Banks (Bank_Of (Fiber)).Stack_Of (Local_Of (Fiber), Base);
@@ -416,16 +485,19 @@ is
 
    protected body Shard_Cell is
 
-      procedure Push (Fiber : Fiber_Id; Accepted : out Boolean) is
+      procedure Push
+        (Fiber : Fiber_Id; Accepted : out Boolean; Fresh_Now : out Natural) is
       begin
-         if Held = Max_Fibers then
+         if Fresh_Held = Max_Fibers then
             Accepted := False;
+            Fresh_Now := Fresh_Held;
             return;
          end if;
-         Items (Tail) := Fiber;
-         Tail := Tail + 1;
-         Held := Held + 1;
+         Fresh (Fresh_Tail) := Fiber;
+         Fresh_Tail := Fresh_Tail + 1;
+         Fresh_Held := Fresh_Held + 1;
          Accepted := True;
+         Fresh_Now := Fresh_Held;
       end Push;
 
       procedure Enqueue (Fiber : Fiber_Id) is
@@ -438,21 +510,59 @@ is
          Held := Held + 1;
       end Enqueue;
 
-      procedure Pop (Fiber : out Fiber_Ref) is
+      procedure Pop
+        (Fiber      : out Fiber_Ref;
+         Fresh_Now  : out Natural;
+         From_Fresh : out Boolean) is
       begin
-         if Held = 0 then
+         From_Fresh := False;
+         if Fresh_Held > 0 then
+            Fiber := Fresh (Fresh_Head);
+            Fresh_Head := Fresh_Head + 1;
+            Fresh_Held := Fresh_Held - 1;
+            From_Fresh := True;
+         elsif Held > 0 then
+            Fiber := Items (Head);
+            Head := Head + 1;
+            Held := Held - 1;
+         else
             Fiber := No_Fiber;
-            return;
          end if;
-         Fiber := Items (Head);
-         Head := Head + 1;
-         Held := Held - 1;
+         Fresh_Now := Fresh_Held;
       end Pop;
 
       procedure Depth (Count : out Natural) is
       begin
-         Count := Held;
+         Count := Held + Fresh_Held;
       end Depth;
+
+      procedure Steal
+        (Want      : Natural;
+         Batch     : out Steal_Batch;
+         Count     : out Natural;
+         Fresh_Now : out Natural)
+      is
+         --  Constants rather than one variable narrowed twice: the loop
+         --  invariant below has to be stated against something the prover
+         --  knows the loop does not touch.  ('Loop_Entry on a protected
+         --  component would say it too, but crashes gnatprove 16.1.)
+         Capped : constant Natural :=
+           (if Want > Steal_Batch_Max then Steal_Batch_Max else Want);
+         Take   : constant Natural :=
+           (if Capped > Fresh_Held then Fresh_Held else Capped);
+      begin
+         Batch := [others => 0];
+
+         for I in 0 .. Take - 1 loop
+            pragma Loop_Invariant (Fresh_Held >= Take - I);
+            Fresh_Tail := Fresh_Tail - 1;
+            Batch (I) := Fresh (Fresh_Tail);
+            Fresh_Held := Fresh_Held - 1;
+         end loop;
+
+         Count := Take;
+         Fresh_Now := Fresh_Held;
+      end Steal;
 
       procedure Put_Idle (Idle : Boolean) is
       begin
@@ -564,14 +674,22 @@ is
    end Take_Posted;
 
    procedure Push_Ready
-     (Shard : Shard_Id; Fiber : Fiber_Id; Accepted : out Boolean) is
+     (Shard : Shard_Id; Fiber : Fiber_Id; Accepted : out Boolean)
+   is
+      Fresh_Now : Natural;
    begin
-      Shard_Cells (Shard).Push (Fiber, Accepted);
+      Shard_Cells (Shard).Push (Fiber, Accepted, Fresh_Now);
+      Fresh_Depths.Set (Shard, Fresh_Now);
    end Push_Ready;
 
    procedure Pop_Ready (Shard : Shard_Id; Fiber : out Fiber_Ref) is
+      Fresh_Now  : Natural;
+      From_Fresh : Boolean;
    begin
-      Shard_Cells (Shard).Pop (Fiber);
+      Shard_Cells (Shard).Pop (Fiber, Fresh_Now, From_Fresh);
+      if From_Fresh then
+         Fresh_Depths.Set (Shard, Fresh_Now);
+      end if;
    end Pop_Ready;
 
    procedure Ready_Depth (Shard : Shard_Id; Count : out Natural) is
@@ -588,6 +706,66 @@ is
    begin
       Slot_Stats (Count, High_Water);
    end Live_Fibers;
+
+   ---------------------------------------------------------------------------
+   --  Work stealing
+   ---------------------------------------------------------------------------
+
+   procedure Steal_Work (Shard : Shard_Id; Taken : out Natural) is
+      Best       : Shard_Ref := No_Shard;
+      Best_Depth : Natural := 0;
+      Depth      : Natural;
+      Batch      : Steal_Batch;
+      Count      : Natural;
+      Fresh_Now  : Natural;
+      Accepted   : Boolean;
+   begin
+      Taken := 0;
+
+      --  Scan the hints, not the queues.  This is an atomic load per
+      --  sibling: a shard that is busy never learns it was considered, and
+      --  nothing here can contend with it.
+      for S in Active_Shard loop
+         if S /= Shard then
+            Fresh_Depths.Get (S, Depth);
+            if Depth > Best_Depth then
+               Best_Depth := Depth;
+               Best := S;
+            end if;
+         end if;
+      end loop;
+
+      if Best not in Active_Shard or else Best_Depth < Steal_Floor then
+         return;
+      end if;
+
+      --  Half of what it looked like it had, so two idle shards cannot
+      --  bounce the same work between them.  The victim clamps to what it
+      --  actually has, since the hint may have moved since we read it.
+      Shard_Cells (Best).Steal (Best_Depth / 2, Batch, Count, Fresh_Now);
+      Fresh_Depths.Set (Best, Fresh_Now);
+      if Count = 0 then
+         return;
+      end if;
+
+      pragma Warnings
+        (GNATprove, Off, "*""Accepted"" is set by ""Push_Ready"" but not used*",
+         Reason => "A fiber sits in one queue at a time and there are never"
+                   & " more than Max_Fibers of them, so taking some out of a"
+                   & " sibling's queue cannot overfill ours.");
+      for I in 0 .. Count - 1 loop
+         --  Rehome before enqueueing: from the moment it is on our queue
+         --  it may run, and Fiber_Main reads its home as it starts.
+         Slot_Rehome (Batch (I), Shard);
+         Push_Ready (Shard, Batch (I), Accepted);
+      end loop;
+      pragma Warnings
+        (GNATprove, On,
+         "*""Accepted"" is set by ""Push_Ready"" but not used*");
+
+      Taken := Count;
+      Trace.Event (Shard, "stole fibers", Integer (Count));
+   end Steal_Work;
 
    ---------------------------------------------------------------------------
    --  Wakeups

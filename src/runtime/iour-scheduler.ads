@@ -37,6 +37,7 @@ package Iour.Scheduler with SPARK_Mode => On is
       Completions  : out Natural;
       Fibers_Run   : out Natural;
       Adopted      : out Natural;
+      Stolen       : out Natural;
       Sleeps       : out Natural;
       Abandoned    : out Natural;
       Flush_Errors : out Natural);

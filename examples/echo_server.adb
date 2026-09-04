@@ -84,18 +84,19 @@ begin
       Ffi.Sys.Exit_Process (1);
    end if;
 
-   for S in Active_Shard loop
-      if S /= Active_Shard'First then
-         Opened := Net.Listen (Port      => Natural (Bound),
-                               Reuseport => True);
-         if Failed (Opened) then
-            Put_Line ("echo_server: cannot add a listener for shard"
-                      & S'Image & " (errno" & Errno (Opened)'Image & ")");
-            Ffi.Sys.Exit_Process (1);
-         end if;
-         Listeners (S) := Opened;
+   --  Indexed over the base type, so a Shard_Count of one leaves an empty
+   --  range rather than a guard the compiler can see is always false.
+   for S in Shard_Ref range 1 .. Shard_Ref (Shard_Count - 1) loop
+      Opened := Net.Listen (Port => Natural (Bound), Reuseport => True);
+      if Failed (Opened) then
+         Put_Line ("echo_server: cannot add a listener for shard"
+                   & S'Image & " (errno" & Errno (Opened)'Image & ")");
+         Ffi.Sys.Exit_Process (1);
       end if;
+      Listeners (S) := Opened;
+   end loop;
 
+   for S in Active_Shard loop
       Echo_Server_App.Configure (S, Descriptor (Listeners (S)), Target);
    end loop;
 
@@ -147,14 +148,15 @@ begin
 
    for S in Active_Shard loop
       declare
-         Completions, Resumes, Adopted, Sleeps, Left, Bad : Natural;
+         Completions, Resumes, Adopted, Stolen, Sleeps, Left, Bad : Natural;
       begin
          Scheduler.Report
-           (S, Completions, Resumes, Adopted, Sleeps, Left, Bad);
+           (S, Completions, Resumes, Adopted, Stolen, Sleeps, Left, Bad);
          Put_Line ("  shard" & S'Image
                    & ": completions" & Completions'Image
                    & ", resumes" & Resumes'Image
                    & ", connections adopted" & Adopted'Image
+                   & ", stolen" & Stolen'Image
                    & ", kernel sleeps" & Sleeps'Image
                    & (if Bad > 0 then ", FLUSH ERRORS" & Bad'Image else ""));
       end;

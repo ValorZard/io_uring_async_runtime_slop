@@ -209,20 +209,34 @@ package body Echo_Client_App with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Driver (Arg : Fiber_Argument) is
-      Total  : constant Natural := Session_Count;
-      Handle : Future_Ref;
+      Total   : constant Natural := Session_Count;
+      Target  : Active_Shard := Active_Shard'First;
+      Started : Boolean;
    begin
       pragma Unreferenced (Arg);
 
+      --  Placed a core at a time rather than published on one queue every
+      --  core pops from.  Two thousand identical sessions spawned at once
+      --  do not need balancing discovered for them, and dealing them round
+      --  spreads the cost over four uncontended locks instead of one
+      --  contended one.  Work stealing is still underneath for the case
+      --  this cannot predict -- sessions that finish at different rates --
+      --  but it should have little to do here.
       for I in 1 .. Total loop
          loop
-            Fibers.Spawn (Session'Access, Fiber_Argument (I), Handle);
-            exit when Handle /= No_Future;
+            Fibers.Spawn_On
+              (Target, Session'Access, Fiber_Argument (I), Started);
+            exit when Started;
 
             --  The runtime is momentarily at capacity.  Sleep this fiber --
             --  not the core -- and try again once sessions have finished.
             Iour.Time.Sleep_Milliseconds (1);
          end loop;
+
+         --  Modular rather than a guarded increment: with Shard_Count of
+         --  one, Target + 1 is out of range even on the branch that never
+         --  runs, and the compiler is right to say so.
+         Target := Active_Shard ((Natural (Target) + 1) mod Shard_Count);
       end loop;
 
       --  Wait by sleeping rather than by queueing on a protected entry: an

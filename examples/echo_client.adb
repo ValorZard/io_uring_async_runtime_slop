@@ -114,14 +114,15 @@ begin
 
    for S in Active_Shard loop
       declare
-         Completions, Resumes, Adopted, Sleeps, Left, Bad : Natural;
+         Completions, Resumes, Adopted, Stolen, Sleeps, Left, Bad : Natural;
       begin
          Scheduler.Report
-           (S, Completions, Resumes, Adopted, Sleeps, Left, Bad);
+           (S, Completions, Resumes, Adopted, Stolen, Sleeps, Left, Bad);
          Put_Line ("  shard" & S'Image
                    & ": completions" & Completions'Image
                    & ", resumes" & Resumes'Image
                    & ", sessions adopted" & Adopted'Image
+                   & ", stolen" & Stolen'Image
                    & ", kernel sleeps" & Sleeps'Image
                    & (if Bad > 0 then ", FLUSH ERRORS" & Bad'Image else ""));
       end;

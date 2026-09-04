@@ -54,6 +54,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Completions : Natural;
          Fibers_Run  : Natural;
          Adopted     : Natural;
+         Stolen      : Natural;
          Slept       : Natural;
          Left_Over   : Natural;
          Flush_Fail  : Natural);
@@ -63,6 +64,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Completions : out Natural;
          Fibers_Run  : out Natural;
          Adopted     : out Natural;
+         Stolen      : out Natural;
          Slept       : out Natural;
          Left_Over   : out Natural;
          Flush_Fail  : out Natural);
@@ -75,6 +77,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
       N_Completions : Counter_Array := [others => 0];
       N_Fibers      : Counter_Array := [others => 0];
       N_Adopted     : Counter_Array := [others => 0];
+      N_Stolen      : Counter_Array := [others => 0];
       N_Sleeps      : Counter_Array := [others => 0];
       N_Abandoned   : Counter_Array := [others => 0];
       N_Flush_Bad   : Counter_Array := [others => 0];
@@ -125,6 +128,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Completions : Natural;
          Fibers_Run  : Natural;
          Adopted     : Natural;
+         Stolen      : Natural;
          Slept       : Natural;
          Left_Over   : Natural;
          Flush_Fail  : Natural) is
@@ -132,6 +136,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          N_Completions (Shard) := Completions;
          N_Fibers (Shard)      := Fibers_Run;
          N_Adopted (Shard)     := Adopted;
+         N_Stolen (Shard)      := Stolen;
          N_Sleeps (Shard)      := Slept;
          N_Abandoned (Shard)   := Left_Over;
          N_Flush_Bad (Shard)   := Flush_Fail;
@@ -142,6 +147,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Completions : out Natural;
          Fibers_Run  : out Natural;
          Adopted     : out Natural;
+         Stolen      : out Natural;
          Slept       : out Natural;
          Left_Over   : out Natural;
          Flush_Fail  : out Natural) is
@@ -149,6 +155,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Completions := N_Completions (Shard);
          Fibers_Run  := N_Fibers (Shard);
          Adopted     := N_Adopted (Shard);
+         Stolen      := N_Stolen (Shard);
          Slept       := N_Sleeps (Shard);
          Left_Over   := N_Abandoned (Shard);
          Flush_Fail  := N_Flush_Bad (Shard);
@@ -243,6 +250,8 @@ package body Iour.Scheduler with SPARK_Mode => On is
       N_Completions : Natural := 0;
       N_Fibers      : Natural := 0;
       N_Adopted     : Natural := 0;
+      N_Stolen      : Natural := 0;
+      Stolen        : Natural;
       N_Sleeps      : Natural := 0;
 
       Draining  : Natural := 0;
@@ -344,7 +353,20 @@ package body Iour.Scheduler with SPARK_Mode => On is
             Bump (N_Fibers);
          end loop;
 
-         --  4. Submit, and sleep if there is nothing else to do ---------
+         --  4. Steal, then submit, and sleep if there is still nothing --
+
+         --  Nothing of our own left.  Before going to sleep, take some of
+         --  a sibling's backlog: this is the one place the runtime looks
+         --  at another core's queue, and a shard with work of its own
+         --  never reaches it.
+         if not Progress then
+            Fibers.Steal_Work (Shard, Stolen);
+            if Stolen > 0 then
+               Bump (N_Stolen, Stolen);
+               Progress := True;
+            end if;
+         end if;
+
          if Progress then
             --  Fibers queued submissions while they ran; hand them over
             --  without waiting, then go round again.
@@ -430,8 +452,8 @@ package body Iour.Scheduler with SPARK_Mode => On is
       end loop;
 
       Trace.Event (Shard, "stopping, fibers run", N_Fibers);
-      Control.Tally (Shard, N_Completions, N_Fibers, N_Adopted, N_Sleeps,
-                     Abandoned, N_Flush_Errors);
+      Control.Tally (Shard, N_Completions, N_Fibers, N_Adopted, N_Stolen,
+                     N_Sleeps, Abandoned, N_Flush_Errors);
       Reactor.Shut (Shard);
       Control.Shard_Finished;
    end Run;
@@ -458,12 +480,13 @@ package body Iour.Scheduler with SPARK_Mode => On is
       Completions  : out Natural;
       Fibers_Run   : out Natural;
       Adopted      : out Natural;
+      Stolen       : out Natural;
       Sleeps       : out Natural;
       Abandoned    : out Natural;
       Flush_Errors : out Natural) is
    begin
       Control.Read
-        (Shard, Completions, Fibers_Run, Adopted, Sleeps, Abandoned,
+        (Shard, Completions, Fibers_Run, Adopted, Stolen, Sleeps, Abandoned,
          Flush_Errors);
    end Report;
 

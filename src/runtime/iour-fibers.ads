@@ -208,6 +208,16 @@ is
    --  Drain one posted wakeup, or No_Fiber.  Called by the owning shard.
    procedure Take_Posted (Shard : Shard_Id; Fiber : out Fiber_Ref);
 
+   --  Take some never-started work off the busiest sibling, if any sibling
+   --  has enough to be worth the trip.  Taken is how many moved.
+   --
+   --  Only a shard with nothing of its own left should call this, which is
+   --  what makes it free: a busy shard never runs it, and the scan it does
+   --  run reads atomics rather than taking anybody's lock.  Only fibers
+   --  that have never started are eligible -- a fiber that has run holds a
+   --  saved context and has already read which shard it is on.
+   procedure Steal_Work (Shard : Shard_Id; Taken : out Natural);
+
    --  Record that a shard is about to sleep, or has woken.  Spawn consults
    --  this to decide whom to nudge.
    procedure Set_Idle (Shard : Shard_Id; Idle : Boolean);
