@@ -1,9 +1,13 @@
 /alire/
-/bin/
+bin
+build
+target
 /config/
 /lib/
 /obj/
 *.ali
 /bench/tokio_echo/target/
+/bench/seastar_echo/build/
 /bench/build/
 /bench/results/
+__pycache__

@@ -43,9 +43,10 @@ multi-await: tests
 demo: examples
 	./scripts/run_demo.sh
 
-# The runtime's echo demo against the tokio equivalent in bench/tokio_echo:
-# every server against every client, then each server alone across core
-# counts, then latency.  Needs cargo.  See the header of scripts/bench.sh
+# The runtime's echo demo against the Tokio and Seastar equivalents: every
+# server against every client, then each server alone across core counts, then
+# latency.  Needs cargo, cmake, and Seastar's CMake prerequisites.  See the
+# header of scripts/bench.sh
 # for the knobs, and for why running it as root and unprivileged gives
 # different answers.
 bench: examples
@@ -63,6 +64,6 @@ help:
 	@echo "make smoke           build and run the runtime self-test"
 	@echo "make multi-await     many awaits in one procedure; check the handover"
 	@echo "make demo            traced walkthrough, then 2000 connections"
-	@echo "make bench           benchmark the demo against bench/tokio_echo"
+	@echo "make bench           benchmark Ada, Tokio, and Seastar echo servers"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
 	@echo "make prove           SPARK proof of everything"
