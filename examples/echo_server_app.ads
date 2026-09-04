@@ -3,10 +3,12 @@
 --
 --  Two kinds of fiber:
 --
---    * one acceptor, which loops on Accept_Connection and spawns a handler
---      per connection.  Spawning publishes the handler on the global run
---      queue, so whichever core is free picks it up -- the acceptor never
---      decides where a connection will be served.
+--    * one acceptor per shard, each with its own SO_REUSEPORT listener on
+--      the same port, so the kernel spreads incoming connections across
+--      the cores' accept queues and no single core is the gate.  Each
+--      acceptor spawns its handlers onto its own core, so a connection is
+--      served by the core that accepted it -- the core whose ring already
+--      carries its socket.
 --
 --    * one handler per connection, which reads a frame, answers it, and
 --      repeats until the client says goodbye.  It is written as ordinary
@@ -22,10 +24,14 @@ with Iour; use Iour;
 package Echo_Server_App with SPARK_Mode => On is
 
    --  Target is how many connections to serve before shutting the runtime
-   --  down; zero means run until killed.
-   procedure Configure (Listener : Descriptor; Target : Natural);
+   --  down; zero means run until killed.  Call once per listener, before
+   --  the acceptors start; the listeners are remembered so that reaching
+   --  the target can shut all of them down at once.
+   procedure Configure
+     (Shard : Active_Shard; Listener : Descriptor; Target : Natural);
 
-   --  Fiber body: accept connections and hand each to the global queue.
+   --  Fiber body: accept connections on the listener passed as Arg and run
+   --  each one on this core.
    procedure Acceptor (Arg : Fiber_Argument);
 
    procedure Snapshot

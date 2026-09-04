@@ -96,6 +96,37 @@ is
       Handle : out Future_Ref)
      with Pre => Work /= null;
 
+   --  Spawn onto the calling shard, without a future and without going
+   --  near the global run queue.
+   --
+   --  This is the path for work that is never awaited, and it is what
+   --  makes accepting a connection a core-local act: the handler runs on
+   --  the core that accepted it, which is the core whose ring will carry
+   --  its I/O, and neither the queue every shard pops from nor a future
+   --  is touched on the way.  Against Spawn it saves two trips through a
+   --  shared lock and three through a future.
+   --
+   --  Started is False if the calling thread is not a shard, or if the
+   --  fiber table is full.  There is no handle: nothing can await a
+   --  detached fiber, so nothing has to release one either.
+   procedure Spawn_Here
+     (Work    : Fiber_Body;
+      Arg     : Fiber_Argument;
+      Started : out Boolean)
+     with Pre => Work /= null;
+
+   --  The same, onto a named shard, and callable from the environment
+   --  task -- which is how a server puts one acceptor on every core
+   --  before the load arrives.  From another shard, or from a thread with
+   --  no shard, the fiber goes through the target's inbox rather than
+   --  straight onto its ready queue.
+   procedure Spawn_On
+     (Shard   : Active_Shard;
+      Work    : Fiber_Body;
+      Arg     : Fiber_Argument;
+      Started : out Boolean)
+     with Pre => Work /= null;
+
    ---------------------------------------------------------------------------
    --  Suspension
    ---------------------------------------------------------------------------

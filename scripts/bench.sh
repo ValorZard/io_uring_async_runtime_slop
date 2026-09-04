@@ -82,6 +82,7 @@ LOAD_CPUS=${BENCH_LOAD_CPUS:-$(seq -s, $((NCPU / 2)) $((NCPU - 1)))}
 SHARD_COUNT=$(sed -n 's/^ *Shard_Count *: *constant *:= *\([0-9]*\);.*/\1/p' src/iour.ads)
 FIRST_CPU=$(sed -n 's/^ *First_Shard_Cpu *: *constant *:= *\([0-9]*\);.*/\1/p' src/iour.ads)
 MAX_FUTURES=$(sed -n 's/^ *Max_Futures *: *constant *:= *\([0-9_]*\);.*/\1/p' src/iour.ads | tr -d _)
+MAX_FIBERS=$(sed -n 's/^ *Max_Fibers *: *constant *:= *\([0-9_]*\);.*/\1/p' src/iour.ads | tr -d _)
 
 # Ada CPU 1 is Linux CPU 0.
 cpus_from() { local first=$1 count=$2; seq -s, $((first - 1)) $((first - 2 + count)); }
@@ -160,8 +161,10 @@ build_variant() {
     if [[ -x $dir/bin/echo_server && -x $dir/bin/echo_client ]]; then
         return 0
     fi
-    if (( MAX_FUTURES % shards != 0 )); then
-        log "  skip $name: Shard_Count $shards does not divide Max_Futures $MAX_FUTURES"
+    # Both tables are banked per shard and both insist on exact division.
+    if (( MAX_FUTURES % shards != 0 || MAX_FIBERS % shards != 0 )); then
+        log "  skip $name: Shard_Count $shards divides neither Max_Futures" \
+            "$MAX_FUTURES nor Max_Fibers $MAX_FIBERS exactly"
         return 1
     fi
     rm -rf "$dir"; mkdir -p "$dir"
@@ -380,7 +383,8 @@ EOF
 # ---------------------------------------------------------------------------
 
 mkdir -p "$OUT"
-[[ -n $SHARD_COUNT && -n $FIRST_CPU && -n $MAX_FUTURES ]] || die "could not read Shard_Count, First_Shard_Cpu and Max_Futures from src/iour.ads"
+[[ -n $SHARD_COUNT && -n $FIRST_CPU && -n $MAX_FUTURES && -n $MAX_FIBERS ]] \
+    || die "could not read the tunables from src/iour.ads"
 command -v /usr/bin/time > /dev/null || die "/usr/bin/time not found"
 command -v ss > /dev/null || die "ss (iproute2) not found"
 command -v nstat > /dev/null || log "nstat not found: listen-overflow counts will be blank"

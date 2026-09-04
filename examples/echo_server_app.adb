@@ -10,7 +10,12 @@ package body Echo_Server_App with SPARK_Mode => On is
 
    --  Set once by the environment task before any shard runs, read by many
    --  fibers afterwards.  Atomic so the sharing is declared, not assumed.
-   Listen_Fd : Descriptor := Invalid_Descriptor with Atomic;
+   --  One listener per shard: they share a port through SO_REUSEPORT, and
+   --  all of them have to be shut down to stop the server.
+   type Listener_Table is array (Active_Shard) of Descriptor
+     with Atomic_Components;
+
+   Listeners : Listener_Table := [others => Invalid_Descriptor];
    Goal      : Natural := 0 with Atomic;
 
    protected Stats
@@ -98,9 +103,10 @@ package body Echo_Server_App with SPARK_Mode => On is
    --  Configure
    ---------------------------------------------------------------------------
 
-   procedure Configure (Listener : Descriptor; Target : Natural) is
+   procedure Configure
+     (Shard : Active_Shard; Listener : Descriptor; Target : Natural) is
    begin
-      Listen_Fd := Listener;
+      Listeners (Shard) := Listener;
       Goal := Target;
    end Configure;
 
@@ -115,11 +121,23 @@ package body Echo_Server_App with SPARK_Mode => On is
       pragma Unreferenced (Ignored);
    end Drop;
 
-   procedure Stop_Listening (S : Descriptor) is
+   procedure Stop_One (S : Descriptor) is
       Ignored : Io_Result;
    begin
       Ignored := Net.Shutdown_Now (S, Net.Shut_Both);
       pragma Unreferenced (Ignored);
+   end Stop_One;
+
+   --  Break every acceptor out of its pending accept.  Shutting a
+   --  listening socket down is what makes accept give up; with one
+   --  listener per core, stopping means stopping all of them.
+   procedure Stop_Listening is
+   begin
+      for S in Active_Shard loop
+         if Listeners (S) /= Invalid_Descriptor then
+            Stop_One (Listeners (S));
+         end if;
+      end loop;
    end Stop_Listening;
 
    ---------------------------------------------------------------------------
@@ -172,9 +190,9 @@ package body Echo_Server_App with SPARK_Mode => On is
       Stats.Completed_One (Frames, Failed, Last);
 
       if Last then
-         --  The connection we were counting to.  Break the acceptor out of
-         --  its pending accept, then wind the runtime down.
-         Stop_Listening (Listen_Fd);
+         --  The connection we were counting to.  Break the acceptors out
+         --  of their pending accepts, then wind the runtime down.
+         Stop_Listening;
          Iour.Scheduler.Request_Shutdown;
       end if;
    end Serve;
@@ -186,7 +204,7 @@ package body Echo_Server_App with SPARK_Mode => On is
    procedure Acceptor (Arg : Fiber_Argument) is
       Listener : constant Net.Socket := Net.Socket (Arg);
       Incoming : Io_Result;
-      Handle   : Future_Ref;
+      Started  : Boolean;
    begin
       loop
          exit when Stats.Accept_Limit_Reached;
@@ -200,13 +218,15 @@ package body Echo_Server_App with SPARK_Mode => On is
          else
             Stats.Accepted_One;
 
-            --  Publish the handler on the global run queue.  Which core
-            --  ends up serving this connection is decided by whichever one
-            --  is free to take it, not here.
-            Fibers.Spawn
-              (Serve'Access, Fiber_Argument (Incoming), Handle);
+            --  Run the handler on this core.  The socket was accepted
+            --  here, so its reads and writes will go through this core's
+            --  ring; sending it to the global queue would only mean
+            --  another core doing the same work with a colder cache and a
+            --  shared lock on the way.
+            Fibers.Spawn_Here
+              (Serve'Access, Fiber_Argument (Incoming), Started);
 
-            if Handle = No_Future then
+            if not Started then
                --  Runtime at capacity: refuse cleanly rather than leak the
                --  descriptor or stall the accept loop.
                Stats.Rejected_One;

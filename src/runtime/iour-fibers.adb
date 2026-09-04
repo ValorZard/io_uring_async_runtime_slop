@@ -12,7 +12,7 @@ with Iour.Trace;
 package body Iour.Fibers with
   SPARK_Mode    => On,
   Refined_State =>
-    (Registry => (Pool, Shard_Cells,
+    (Registry => (Banks, Shard_Cells,
                   Currents.Cells, Exits.Cells, Inbox_Flags.Cells))
 is
 
@@ -60,39 +60,88 @@ is
       Stack  : System.Address := System.Null_Address;
    end record;
 
-   type Fiber_Table is array (Fiber_Id) of Fiber_Record;
-   type Free_Stack is array (Natural range 0 .. Max_Fibers - 1) of Fiber_Id;
+   ---------------------------------------------------------------------------
+   --  The fiber table, banked per shard
+   ---------------------------------------------------------------------------
+
+   --  One bank per shard, each a contiguous stripe of the slot space, the
+   --  same shape Iour.Futures uses.  A slot number names its own bank, so
+   --  a fiber allocated on one core is still bound, recycled and asked
+   --  about from any other -- what changes is that the common case does
+   --  not have to.  Accepting a connection allocates a slot, binds it and
+   --  recycles it on one core, and that used to be three trips through a
+   --  lock every other core wanted.
+   Fiber_Bank_Size : constant := Max_Fibers / Shard_Count;
+
+   pragma Compile_Time_Error
+     (Fiber_Bank_Size < 8,
+      "Max_Fibers is too small to divide across Shard_Count banks");
+
+   --  Exact division, so Bank_Of is total over the whole slot space and
+   --  needs no clamp.  If you pick a Shard_Count that does not divide
+   --  Max_Fibers, round Max_Fibers up in Iour rather than working around
+   --  it here.
+   pragma Compile_Time_Error
+     (Fiber_Bank_Size * Shard_Count /= Max_Fibers,
+      "Shard_Count must divide Max_Fibers exactly");
+
+   subtype Bank_Index  is Active_Shard;
+   subtype Fiber_Local is Natural range 0 .. Fiber_Bank_Size - 1;
+
+   type Bank_Table is array (Fiber_Local) of Fiber_Record;
+   type Free_Stack is array (Fiber_Local) of Fiber_Local;
 
    Initial_Free : constant Free_Stack :=
-     [for I in 0 .. Max_Fibers - 1 => Fiber_Id (Max_Fibers - 1 - I)];
+     [for I in Fiber_Local => Fiber_Bank_Size - 1 - I];
 
-   protected Pool
+   function Bank_Of (Fiber : Fiber_Id) return Bank_Index is
+     (Bank_Index (Natural (Fiber) / Fiber_Bank_Size));
+
+   function Local_Of (Fiber : Fiber_Id) return Fiber_Local is
+     (Natural (Fiber) mod Fiber_Bank_Size);
+
+   function Fiber_Of (Bank : Bank_Index; Local : Fiber_Local) return Fiber_Id
+   is (Fiber_Id (Natural (Bank) * Fiber_Bank_Size + Local));
+
+   --  Every operation takes a bank-local index; composing and decomposing
+   --  slot numbers is the wrapper's job, which keeps the discriminant off
+   --  the protected type and so lets the banks live in a plain array.
+   protected type Fiber_Bank
      with Priority => Runtime_Priority
    is
       procedure Allocate
-        (Work : Fiber_Body; Arg : Fiber_Argument; Fiber : out Fiber_Ref);
-      procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id; Done : Future_Id);
+        (Work  : Fiber_Body;
+         Arg   : Fiber_Argument;
+         Local : out Fiber_Local;
+         Got   : out Boolean);
+      procedure Bind (Local : Fiber_Local; Shard : Shard_Id; Done : Future_Ref);
       procedure Launch_Info
-        (Fiber : Fiber_Id;
+        (Local : Fiber_Local;
          Shard : out Shard_Ref;
          Work  : out Fiber_Body;
          Arg   : out Fiber_Argument;
          Done  : out Future_Ref);
-      procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref);
-      procedure Stack_Of (Fiber : Fiber_Id; Base : out System.Address);
-      procedure Set_Stack (Fiber : Fiber_Id; Base : System.Address);
-      procedure Recycle (Fiber : Fiber_Id);
-      procedure Stats (Live : out Natural; High_Water : out Natural);
-      procedure Next_Stack (From : in out Natural; Base : out System.Address);
+      procedure Home_Of (Local : Fiber_Local; Shard : out Shard_Ref);
+      procedure Stack_Of (Local : Fiber_Local; Base : out System.Address);
+      procedure Set_Stack (Local : Fiber_Local; Base : System.Address);
+      procedure Recycle (Local : Fiber_Local);
+      procedure Stats (Live : out Natural; High_Water : out Natural)
+        with Post => Live <= Fiber_Bank_Size
+                     and then High_Water <= Fiber_Bank_Size;
+      procedure Next_Stack (From : in out Natural; Base : out System.Address)
+        with Pre  => From <= Fiber_Bank_Size,
+             Post => From <= Fiber_Bank_Size;
    private
-      Slots     : Fiber_Table := [others => (others => <>)];
-      Available : Free_Stack  := Initial_Free;
+      Slots     : Bank_Table := [others => (others => <>)];
+      Available : Free_Stack := Initial_Free;
 
       --  Available (0 .. Top - 1) holds the free slots; the bounded
       --  subtypes make the arithmetic provable rather than just correct.
-      Top  : Natural range 0 .. Max_Fibers := Max_Fibers;
-      Peak : Natural range 0 .. Max_Fibers := 0;
-   end Pool;
+      Top  : Natural range 0 .. Fiber_Bank_Size := Fiber_Bank_Size;
+      Peak : Natural range 0 .. Fiber_Bank_Size := 0;
+   end Fiber_Bank;
+
+   Banks : array (Bank_Index) of Fiber_Bank;
 
    ---------------------------------------------------------------------------
    --  Per-shard scheduling state
@@ -161,87 +210,95 @@ is
    --  Pool body
    ---------------------------------------------------------------------------
 
-   protected body Pool is
+   protected body Fiber_Bank is
 
       procedure Allocate
-        (Work : Fiber_Body; Arg : Fiber_Argument; Fiber : out Fiber_Ref)
+        (Work  : Fiber_Body;
+         Arg   : Fiber_Argument;
+         Local : out Fiber_Local;
+         Got   : out Boolean)
       is
          Live : Natural;
       begin
          if Top = 0 then
-            Fiber := No_Fiber;
+            --  This bank is exhausted.  The caller tries its siblings
+            --  before giving up.
+            Local := 0;
+            Got   := False;
             return;
          end if;
          Top := Top - 1;
-         Fiber := Available (Top);
+         Local := Available (Top);
+         Got   := True;
 
          --  Deliberately preserve Stack: a recycled slot keeps the mapping
          --  it already owns, so only the first use of a slot costs an mmap.
-         Slots (Fiber).In_Use := True;
-         Slots (Fiber).Home   := No_Shard;
-         Slots (Fiber).Work  := Work;
-         Slots (Fiber).Arg   := Arg;
-         Slots (Fiber).Done  := No_Future;
+         Slots (Local).In_Use := True;
+         Slots (Local).Home   := No_Shard;
+         Slots (Local).Work   := Work;
+         Slots (Local).Arg    := Arg;
+         Slots (Local).Done   := No_Future;
 
-         Live := Max_Fibers - Top;
+         Live := Fiber_Bank_Size - Top;
          if Live > Peak then
             Peak := Live;
          end if;
       end Allocate;
 
-      procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id; Done : Future_Id) is
+      procedure Bind
+        (Local : Fiber_Local; Shard : Shard_Id; Done : Future_Ref) is
       begin
-         Slots (Fiber).Home := Shard;
-         Slots (Fiber).Done := Done;
+         Slots (Local).Home := Shard;
+         Slots (Local).Done := Done;
       end Bind;
 
       procedure Launch_Info
-        (Fiber : Fiber_Id;
+        (Local : Fiber_Local;
          Shard : out Shard_Ref;
          Work  : out Fiber_Body;
          Arg   : out Fiber_Argument;
          Done  : out Future_Ref) is
       begin
-         Shard := Slots (Fiber).Home;
-         Work  := Slots (Fiber).Work;
-         Arg   := Slots (Fiber).Arg;
-         Done  := Slots (Fiber).Done;
+         Shard := Slots (Local).Home;
+         Work  := Slots (Local).Work;
+         Arg   := Slots (Local).Arg;
+         Done  := Slots (Local).Done;
       end Launch_Info;
 
-      procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref) is
+      procedure Home_Of (Local : Fiber_Local; Shard : out Shard_Ref) is
       begin
-         Shard := Slots (Fiber).Home;
+         Shard := Slots (Local).Home;
       end Home_Of;
 
-      procedure Stack_Of (Fiber : Fiber_Id; Base : out System.Address) is
+      procedure Stack_Of (Local : Fiber_Local; Base : out System.Address) is
       begin
-         Base := Slots (Fiber).Stack;
+         Base := Slots (Local).Stack;
       end Stack_Of;
 
-      procedure Set_Stack (Fiber : Fiber_Id; Base : System.Address) is
+      procedure Set_Stack (Local : Fiber_Local; Base : System.Address) is
       begin
-         Slots (Fiber).Stack := Base;
+         Slots (Local).Stack := Base;
       end Set_Stack;
 
-      procedure Recycle (Fiber : Fiber_Id) is
+      procedure Recycle (Local : Fiber_Local) is
       begin
-         if not Slots (Fiber).In_Use then
+         if not Slots (Local).In_Use then
             return;
          end if;
-         Slots (Fiber).In_Use := False;
-         Slots (Fiber).Home   := No_Shard;
-         Slots (Fiber).Work  := null;
-         Slots (Fiber).Arg   := 0;
-         Slots (Fiber).Done  := No_Future;
-         if Top < Max_Fibers then
-            Available (Top) := Fiber;
+         Slots (Local).In_Use := False;
+         Slots (Local).Home   := No_Shard;
+         Slots (Local).Work   := null;
+         Slots (Local).Arg    := 0;
+         Slots (Local).Done   := No_Future;
+         if Top < Fiber_Bank_Size then
+            Available (Top) := Local;
             Top := Top + 1;
          end if;
       end Recycle;
 
       procedure Stats (Live : out Natural; High_Water : out Natural) is
       begin
-         Live := Max_Fibers - Top;
+         Live := Fiber_Bank_Size - Top;
          High_Water := Peak;
       end Stats;
 
@@ -249,10 +306,10 @@ is
       is
       begin
          Base := System.Null_Address;
-         while From < Max_Fibers loop
-            if Slots (Fiber_Id (From)).Stack /= System.Null_Address then
-               Base := Slots (Fiber_Id (From)).Stack;
-               Slots (Fiber_Id (From)).Stack := System.Null_Address;
+         while From < Fiber_Bank_Size loop
+            if Slots (From).Stack /= System.Null_Address then
+               Base := Slots (From).Stack;
+               Slots (From).Stack := System.Null_Address;
                From := From + 1;
                return;
             end if;
@@ -260,7 +317,98 @@ is
          end loop;
       end Next_Stack;
 
-   end Pool;
+   end Fiber_Bank;
+
+   ---------------------------------------------------------------------------
+   --  Slot operations -- take the bank apart, then go straight to it
+   ---------------------------------------------------------------------------
+
+   --  Allocate prefers Near's bank and falls through to the others, so a
+   --  workload that accepts everything on one core still gets the whole
+   --  table rather than its share of it.  A slot's bank has nothing to do
+   --  with the shard that ends up running the fiber: that is Home, set by
+   --  Bind.
+   procedure Slot_Allocate
+     (Near  : Shard_Ref;
+      Work  : Fiber_Body;
+      Arg   : Fiber_Argument;
+      Fiber : out Fiber_Ref)
+   is
+      First : constant Natural :=
+        (if Near in Active_Shard then Natural (Near) else 0);
+      Bank_No : Bank_Index;
+      Local   : Fiber_Local;
+      Got     : Boolean;
+   begin
+      Fiber := No_Fiber;
+      for Step in 0 .. Shard_Count - 1 loop
+         Bank_No := Bank_Index ((First + Step) mod Shard_Count);
+         Banks (Bank_No).Allocate (Work, Arg, Local, Got);
+         if Got then
+            Fiber := Fiber_Of (Bank_No, Local);
+            return;
+         end if;
+      end loop;
+   end Slot_Allocate;
+
+   procedure Slot_Bind
+     (Fiber : Fiber_Id; Shard : Shard_Id; Done : Future_Ref) is
+   begin
+      Banks (Bank_Of (Fiber)).Bind (Local_Of (Fiber), Shard, Done);
+   end Slot_Bind;
+
+   procedure Slot_Launch_Info
+     (Fiber : Fiber_Id;
+      Shard : out Shard_Ref;
+      Work  : out Fiber_Body;
+      Arg   : out Fiber_Argument;
+      Done  : out Future_Ref) is
+   begin
+      Banks (Bank_Of (Fiber)).Launch_Info
+        (Local_Of (Fiber), Shard, Work, Arg, Done);
+   end Slot_Launch_Info;
+
+   procedure Slot_Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref) is
+   begin
+      Banks (Bank_Of (Fiber)).Home_Of (Local_Of (Fiber), Shard);
+   end Slot_Home_Of;
+
+   procedure Slot_Stack_Of (Fiber : Fiber_Id; Base : out System.Address) is
+   begin
+      Banks (Bank_Of (Fiber)).Stack_Of (Local_Of (Fiber), Base);
+   end Slot_Stack_Of;
+
+   procedure Slot_Set_Stack (Fiber : Fiber_Id; Base : System.Address) is
+   begin
+      Banks (Bank_Of (Fiber)).Set_Stack (Local_Of (Fiber), Base);
+   end Slot_Set_Stack;
+
+   procedure Slot_Recycle (Fiber : Fiber_Id) is
+   begin
+      Banks (Bank_Of (Fiber)).Recycle (Local_Of (Fiber));
+   end Slot_Recycle;
+
+   --  Summed across the banks, one at a time, so this never holds two
+   --  locks.  Live is exact; High_Water is the sum of the banks' own
+   --  marks, so it bounds the number ever live at one instant rather than
+   --  reading it.
+   procedure Slot_Stats (Live : out Natural; High_Water : out Natural) is
+      Bank_Live : Natural;
+      Bank_Peak : Natural;
+   begin
+      Live := 0;
+      High_Water := 0;
+      for B in Bank_Index loop
+         pragma Loop_Invariant
+           (Live <= Fiber_Bank_Size * Natural (B)
+            and then High_Water <= Fiber_Bank_Size * Natural (B));
+
+         Banks (B).Stats (Bank_Live, Bank_Peak);
+         Live := Live + Bank_Live;
+         High_Water := High_Water + Bank_Peak;
+      end loop;
+   end Slot_Stats;
+
 
    ---------------------------------------------------------------------------
    --  Shard_Cell body
@@ -433,12 +581,12 @@ is
 
    procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref) is
    begin
-      Pool.Home_Of (Fiber, Shard);
+      Slot_Home_Of (Fiber, Shard);
    end Home_Of;
 
    procedure Live_Fibers (Count : out Natural; High_Water : out Natural) is
    begin
-      Pool.Stats (Count, High_Water);
+      Slot_Stats (Count, High_Water);
    end Live_Fibers;
 
    ---------------------------------------------------------------------------
@@ -542,7 +690,7 @@ is
    begin
       Handle := No_Future;
 
-      Pool.Allocate (Work, Arg, Fiber);
+      Slot_Allocate (Me, Work, Arg, Fiber);
       if Fiber = No_Fiber then
          return;  --  fiber table full
       end if;
@@ -558,7 +706,7 @@ is
                        Home   => No_Shard,
                        Handle => Handle);
       if Handle = No_Future then
-         Pool.Recycle (Fiber);
+         Slot_Recycle (Fiber);
          return;
       end if;
 
@@ -567,7 +715,7 @@ is
       Run_Queue.Push (Handle, Accepted);
       if not Accepted then
          Futures.Release (Handle);
-         Pool.Recycle (Fiber);
+         Slot_Recycle (Fiber);
          Handle := No_Future;
          return;
       end if;
@@ -579,15 +727,52 @@ is
    --  Adopt
    ---------------------------------------------------------------------------
 
+   --  Everything a fiber needs between having a slot and being runnable:
+   --  bind it to the core that will run it, give it a stack, and point its
+   --  context at a fresh call of Fiber_Main.  The same whether the work
+   --  came off the global queue or was spawned straight onto a core.
+   --
+   --  Ok is False only when the stack could not be mapped.  Giving the
+   --  slot back is the caller's job, because only the caller knows whether
+   --  there is also a future to fail.
+   procedure Prepare
+     (Shard  : Shard_Id;
+      Fiber  : Fiber_Id;
+      Handle : Future_Ref;
+      Ok     : out Boolean)
+   is
+      Base : System.Address;
+   begin
+      Ok := False;
+      Slot_Bind (Fiber, Shard, Handle);
+
+      --  Give the fiber a stack, reusing the slot's previous one when it
+      --  has been round before.
+      Slot_Stack_Of (Fiber, Base);
+      if Base = System.Null_Address then
+         Base := Fib.Stack_Alloc (Ffi.C_Size (Fiber_Stack_Bytes));
+         if Base = System.Null_Address then
+            return;  --  out of address space
+         end if;
+         Slot_Set_Stack (Fiber, Base);
+      end if;
+
+      Fib.Prime (Slot => Fiber_Slot (Fiber),
+                 Base => Base,
+                 Size => Ffi.C_Size (Fiber_Stack_Bytes),
+                 Arg  => Ffi.C_Long (Fiber));
+      Ok := True;
+   end Prepare;
+
    procedure Adopt
      (Shard   : Shard_Id;
       Handle  : Future_Id;
       Started : out Boolean)
    is
       Fiber  : Fiber_Ref;
-      Base   : System.Address;
       Waiter : Fiber_Ref;
       Home   : Shard_Ref;
+      Ok     : Boolean;
    begin
       Started := False;
 
@@ -596,38 +781,101 @@ is
          return;  --  another shard claimed it first
       end if;
 
-      Pool.Bind (Fiber, Shard, Handle);
-
-      --  Give the fiber a stack, reusing the slot's previous one when it
-      --  has been round before.
-      Pool.Stack_Of (Fiber, Base);
-      if Base = System.Null_Address then
-         Base := Fib.Stack_Alloc (Ffi.C_Size (Fiber_Stack_Bytes));
-         if Base = System.Null_Address then
-            --  Out of address space.  Fail the future rather than drop the
-            --  work silently, so whoever awaits it learns why.
-            Futures.Resolve (Handle, -E_Again, Waiter, Home);
-            if Waiter /= No_Fiber
-              and then Home in Active_Shard
-              and then Shard in Active_Shard
-            then
-               Wake (Shard, Waiter, Home);
-            end if;
-            Pool.Recycle (Fiber);
-            return;
+      Prepare (Shard, Fiber, Handle, Ok);
+      if not Ok then
+         --  Fail the future rather than drop the work silently, so
+         --  whoever awaits it learns why.
+         Futures.Resolve (Handle, -E_Again, Waiter, Home);
+         if Waiter /= No_Fiber and then Home in Active_Shard then
+            Wake (Shard, Waiter, Home);
          end if;
-         Pool.Set_Stack (Fiber, Base);
+         Slot_Recycle (Fiber);
+         return;
       end if;
-
-      --  Point the context slot at a fresh call of Fiber_Main on that stack.
-      Fib.Prime (Slot => Fiber_Slot (Fiber),
-                 Base => Base,
-                 Size => Ffi.C_Size (Fiber_Stack_Bytes),
-                 Arg  => Ffi.C_Long (Fiber));
 
       Push_Ready (Shard, Fiber, Started);
       Trace.Event (Shard, "adopted fiber", Integer (Fiber));
    end Adopt;
+
+   ---------------------------------------------------------------------------
+   --  Spawning onto a particular core
+   ---------------------------------------------------------------------------
+
+   --  Both of these are detached: no future, so nothing to await and
+   --  nothing to release.  That is what work like a connection handler
+   --  actually wants, and it takes a whole future -- acquire, resolve,
+   --  release -- off the path.
+
+   procedure Spawn_Here
+     (Work    : Fiber_Body;
+      Arg     : Fiber_Argument;
+      Started : out Boolean)
+   is
+      Me    : constant Shard_Ref := Self;
+      Fiber : Fiber_Ref;
+      Ok    : Boolean;
+   begin
+      Started := False;
+      if Me not in Active_Shard then
+         return;  --  not on a shard: there is no "here"
+      end if;
+
+      Slot_Allocate (Me, Work, Arg, Fiber);
+      if Fiber = No_Fiber then
+         return;  --  fiber table full
+      end if;
+
+      Prepare (Me, Fiber, No_Future, Ok);
+      if not Ok then
+         Slot_Recycle (Fiber);
+         return;
+      end if;
+
+      Push_Ready (Me, Fiber, Started);
+      if not Started then
+         Slot_Recycle (Fiber);
+      end if;
+   end Spawn_Here;
+
+   procedure Spawn_On
+     (Shard   : Active_Shard;
+      Work    : Fiber_Body;
+      Arg     : Fiber_Argument;
+      Started : out Boolean)
+   is
+      Me    : constant Shard_Ref := Self;
+      Fiber : Fiber_Ref;
+      Ok    : Boolean;
+   begin
+      Started := False;
+
+      --  Allocate out of the target's bank, since that is the core that
+      --  will bind, run and recycle the slot.
+      Slot_Allocate (Shard, Work, Arg, Fiber);
+      if Fiber = No_Fiber then
+         return;
+      end if;
+
+      Prepare (Shard, Fiber, No_Future, Ok);
+      if not Ok then
+         Slot_Recycle (Fiber);
+         return;
+      end if;
+
+      if Me = Shard then
+         Push_Ready (Shard, Fiber, Started);
+         if not Started then
+            Slot_Recycle (Fiber);
+         end if;
+      else
+         --  Only a shard may enqueue onto its own ready queue, so hand the
+         --  fiber over through the inbox and let it do the enqueue on its
+         --  next pass.  This is the path the environment task takes, which
+         --  is where the acceptors come from.
+         Post_Wake (Fiber, Shard);
+         Started := True;
+      end if;
+   end Spawn_On;
 
    ---------------------------------------------------------------------------
    --  Resume / After_Resume
@@ -657,7 +905,7 @@ is
       case Why is
          when Completed =>
             --  The slot goes back to the pool but keeps its stack.
-            Pool.Recycle (Fiber);
+            Slot_Recycle (Fiber);
          when Yielded =>
             --  Back of the queue.
             Shard_Cells (Shard).Enqueue (Fiber);
@@ -773,7 +1021,7 @@ is
       Status : Io_Result;
    begin
       loop
-         Pool.Launch_Info (Me, Shard, Work, Param, Done);
+         Slot_Launch_Info (Me, Shard, Work, Param, Done);
          Status := 0;
          Trace.Event (Shard, "fiber starts", Integer (Me));
 
@@ -831,13 +1079,19 @@ is
    ---------------------------------------------------------------------------
 
    procedure Release_All_Stacks is
-      Cursor : Natural := 0;
+      --  Bounded rather than plain Natural, so Next_Stack's precondition
+      --  is discharged by the subtype instead of by a proof about the
+      --  loop.
+      Cursor : Natural range 0 .. Fiber_Bank_Size;
       Base   : System.Address;
    begin
-      loop
-         Pool.Next_Stack (Cursor, Base);
-         exit when Base = System.Null_Address;
-         Fib.Stack_Free (Base, Ffi.C_Size (Fiber_Stack_Bytes));
+      for B in Bank_Index loop
+         Cursor := 0;
+         loop
+            Banks (B).Next_Stack (Cursor, Base);
+            exit when Base = System.Null_Address;
+            Fib.Stack_Free (Base, Ffi.C_Size (Fiber_Stack_Bytes));
+         end loop;
       end loop;
    end Release_All_Stacks;
 

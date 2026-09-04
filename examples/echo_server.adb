@@ -5,6 +5,10 @@
 --
 --  A connections-to-serve of 0 means run until killed.
 --
+--  Every core gets its own SO_REUSEPORT listener and its own acceptor, and
+--  serves the connections it accepted.  Nothing about a connection crosses
+--  cores.
+--
 --  The environment task is pinned to Ada CPU 1 (Linux CPU 0); the shards
 --  take First_Shard_Cpu upward.  Keeping them apart matters, because a
 --  shard's identity is derived from the core it is running on.
@@ -44,10 +48,13 @@ procedure Echo_Server with SPARK_Mode => On, CPU => 1 is
    Port     : constant Natural := Argument_Or (1, 9099);
    Target   : constant Natural := Argument_Or (2, 0);
 
-   Listener : Io_Result;
-   Bound    : Io_Result;
-   Handle   : Future_Ref;
-   Fd_Limit : Natural;
+   type Listener_Table is array (Active_Shard) of Io_Result;
+
+   Listeners : Listener_Table := [others => 0];
+   Opened    : Io_Result;
+   Bound     : Io_Result;
+   Started   : Boolean;
+   Fd_Limit  : Natural;
 
    Accepted, Completed, Rejected, Frames, Errors, Concurrent : Natural;
    Live, Peak : Natural;
@@ -58,16 +65,39 @@ begin
    Net.Ignore_Broken_Pipes;
    Fd_Limit := Ffi.Sys.Raise_Descriptor_Limit;
 
-   Listener := Net.Listen (Port);
-   if Failed (Listener) then
+   --  One listener per shard, all on the same port through SO_REUSEPORT,
+   --  so the kernel gives every core its own accept queue and spreads
+   --  arriving connections between them.  The first one binds the port --
+   --  which matters when Port is zero and the kernel chooses -- and the
+   --  rest join the port it settled on.
+   Opened := Net.Listen (Port => Port, Reuseport => True);
+   if Failed (Opened) then
       Put_Line ("echo_server: cannot listen on port" & Port'Image
-                & " (errno" & Errno (Listener)'Image & ")");
+                & " (errno" & Errno (Opened)'Image & ")");
+      Ffi.Sys.Exit_Process (1);
+   end if;
+   Listeners (Active_Shard'First) := Opened;
+
+   Bound := Net.Port_Of (Descriptor (Opened));
+   if Failed (Bound) then
+      Put_Line ("echo_server: cannot read back the bound port");
       Ffi.Sys.Exit_Process (1);
    end if;
 
-   Bound := Net.Port_Of (Descriptor (Listener));
+   for S in Active_Shard loop
+      if S /= Active_Shard'First then
+         Opened := Net.Listen (Port      => Natural (Bound),
+                               Reuseport => True);
+         if Failed (Opened) then
+            Put_Line ("echo_server: cannot add a listener for shard"
+                      & S'Image & " (errno" & Errno (Opened)'Image & ")");
+            Ffi.Sys.Exit_Process (1);
+         end if;
+         Listeners (S) := Opened;
+      end if;
 
-   Echo_Server_App.Configure (Descriptor (Listener), Target);
+      Echo_Server_App.Configure (S, Descriptor (Listeners (S)), Target);
+   end loop;
 
    Shards.Activate;
    Scheduler.Wait_Until_Ready;
@@ -82,17 +112,23 @@ begin
       Put_Line ("echo_server: serving until killed");
    end if;
 
-   --  One acceptor fiber.  Everything else is spawned by it, onto the
-   --  global run queue, and picked up by whichever core is free.
-   Fibers.Spawn
-     (Echo_Server_App.Acceptor'Access,
-      Fiber_Argument (Listener),
-      Handle);
+   --  One acceptor per core, each on its own listener.  Placed rather
+   --  than published: an acceptor that landed on the same core as another
+   --  would leave a core with no accept queue of its own, and the
+   --  connections it accepts are served where it runs.
+   for S in Active_Shard loop
+      Fibers.Spawn_On
+        (S,
+         Echo_Server_App.Acceptor'Access,
+         Fiber_Argument (Listeners (S)),
+         Started);
 
-   if Handle = No_Future then
-      Put_Line ("echo_server: could not start the acceptor");
-      Ffi.Sys.Exit_Process (1);
-   end if;
+      if not Started then
+         Put_Line ("echo_server: could not start the acceptor for shard"
+                   & S'Image);
+         Ffi.Sys.Exit_Process (1);
+      end if;
+   end loop;
 
    Scheduler.Wait_For_Shutdown;
 
