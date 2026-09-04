@@ -3,7 +3,10 @@ with System.Storage_Elements;
 with Iour.Ffi.Sys;
 with Iour.Ffi.Net;
 
-package body Iour.Reactor with SPARK_Mode => On is
+package body Iour.Reactor with
+  SPARK_Mode    => On,
+  Refined_State => (Rings => Cells)
+is
 
    package Uring renames Iour.Ffi.Uring;
    package Sys renames Iour.Ffi.Sys;
@@ -13,6 +16,85 @@ package body Iour.Reactor with SPARK_Mode => On is
    use type System.Address;
    use type Interfaces.C.int;
    use type Interfaces.C.size_t;
+
+   ---------------------------------------------------------------------------
+   --  Ring handle
+   ---------------------------------------------------------------------------
+
+   type Ring_Handle is record
+      Fd : Ffi.C_Int := -1;
+
+      --  Submission side.  Head is written by the kernel and read by us;
+      --  tail is the reverse.
+      Sq_Head    : System.Address := System.Null_Address;
+      Sq_Tail    : System.Address := System.Null_Address;
+      Sq_Flags   : System.Address := System.Null_Address;
+      Sq_Indices : System.Address := System.Null_Address;
+      Sqes       : System.Address := System.Null_Address;
+      Sq_Mask    : Unsigned_32 := 0;
+      Sq_Entries : Unsigned_32 := 0;
+
+      --  Completion side.
+      Cq_Head    : System.Address := System.Null_Address;
+      Cq_Tail    : System.Address := System.Null_Address;
+      Cqes       : System.Address := System.Null_Address;
+      Cq_Mask    : Unsigned_32 := 0;
+      Cq_Entries : Unsigned_32 := 0;
+
+      --  Our private copy of the tail.  Operations accumulate here and
+      --  become visible to the kernel only when Flush publishes it, so a
+      --  burst of submissions costs one release store, not one per entry.
+      Local_Tail : Unsigned_32 := 0;
+
+      --  Mappings, kept for teardown.
+      Sq_Ring_Base : System.Address := System.Null_Address;
+      Cq_Ring_Base : System.Address := System.Null_Address;
+      Sqes_Base    : System.Address := System.Null_Address;
+      Sq_Ring_Size : Ffi.C_Size := 0;
+      Cq_Ring_Size : Ffi.C_Size := 0;
+      Sqes_Size    : Ffi.C_Size := 0;
+      Shared_Map   : Boolean := False;
+   end record;
+
+   ---------------------------------------------------------------------------
+   --  Ring_Cell -- one shard's ring
+   ---------------------------------------------------------------------------
+
+   --  Only ever touched by its owning shard, so the lock is uncontended;
+   --  it is here because SPARK requires state reachable from more than one
+   --  task to be synchronised, and because it keeps the ring's invariants
+   --  in one auditable place.
+   --
+   --  Nothing in here blocks.  io_uring_enter, the one call that can sleep,
+   --  is issued by Flush from outside the protected action.
+   protected type Ring_Cell is
+
+      procedure Install (Handle : Ring_Handle);
+      procedure Take (Handle : out Ring_Handle);
+
+      procedure Push (Spec : Op_Spec; Queued : out Boolean);
+
+      --  Publish the tail and report what the kernel should be told to
+      --  submit.  Also yields the descriptor, since the caller needs it for
+      --  io_uring_enter and must not hold the lock across that call.
+      procedure Prepare_Submit
+        (Fd : out Ffi.C_Int; To_Submit : out Unsigned_32);
+
+      --  Account for what io_uring_enter actually accepted.
+      procedure Accept_Submission (Count : Natural);
+
+      procedure Harvest (Batch : out Completion_Batch; Count : out Natural);
+
+      function Pending return Natural;
+      function Fd_Of return Ffi.C_Int;
+
+   private
+      H         : Ring_Handle;
+      Unsent    : Unsigned_32 := 0;  --  queued but not yet handed to enter
+      Ops_Live  : Natural := 0;      --  submitted, completion not yet seen
+   end Ring_Cell;
+
+   Cells : array (Shard_Id) of Ring_Cell;
 
    ---------------------------------------------------------------------------
    --  Address arithmetic helpers
@@ -189,84 +271,6 @@ package body Iour.Reactor with SPARK_Mode => On is
         (Seconds     => Integer_64 (Backoff_Nanos (L) / 1_000_000_000),
          Nanoseconds => Integer_64 (Backoff_Nanos (L) mod 1_000_000_000))];
 
-   ---------------------------------------------------------------------------
-   --  Ring handle
-   ---------------------------------------------------------------------------
-
-   type Ring_Handle is record
-      Fd : Ffi.C_Int := -1;
-
-      --  Submission side.  Head is written by the kernel and read by us;
-      --  tail is the reverse.
-      Sq_Head    : System.Address := System.Null_Address;
-      Sq_Tail    : System.Address := System.Null_Address;
-      Sq_Flags   : System.Address := System.Null_Address;
-      Sq_Indices : System.Address := System.Null_Address;
-      Sqes       : System.Address := System.Null_Address;
-      Sq_Mask    : Unsigned_32 := 0;
-      Sq_Entries : Unsigned_32 := 0;
-
-      --  Completion side.
-      Cq_Head    : System.Address := System.Null_Address;
-      Cq_Tail    : System.Address := System.Null_Address;
-      Cqes       : System.Address := System.Null_Address;
-      Cq_Mask    : Unsigned_32 := 0;
-      Cq_Entries : Unsigned_32 := 0;
-
-      --  Our private copy of the tail.  Operations accumulate here and
-      --  become visible to the kernel only when Flush publishes it, so a
-      --  burst of submissions costs one release store, not one per entry.
-      Local_Tail : Unsigned_32 := 0;
-
-      --  Mappings, kept for teardown.
-      Sq_Ring_Base : System.Address := System.Null_Address;
-      Cq_Ring_Base : System.Address := System.Null_Address;
-      Sqes_Base    : System.Address := System.Null_Address;
-      Sq_Ring_Size : Ffi.C_Size := 0;
-      Cq_Ring_Size : Ffi.C_Size := 0;
-      Sqes_Size    : Ffi.C_Size := 0;
-      Shared_Map   : Boolean := False;
-   end record;
-
-   ---------------------------------------------------------------------------
-   --  Ring_Cell -- one shard's ring
-   ---------------------------------------------------------------------------
-
-   --  Only ever touched by its owning shard, so the lock is uncontended;
-   --  it is here because SPARK requires state reachable from more than one
-   --  task to be synchronised, and because it keeps the ring's invariants
-   --  in one auditable place.
-   --
-   --  Nothing in here blocks.  io_uring_enter, the one call that can sleep,
-   --  is issued by Flush from outside the protected action.
-   protected type Ring_Cell is
-
-      procedure Install (Handle : Ring_Handle);
-      procedure Take (Handle : out Ring_Handle);
-
-      procedure Push (Spec : Op_Spec; Queued : out Boolean);
-
-      --  Publish the tail and report what the kernel should be told to
-      --  submit.  Also yields the descriptor, since the caller needs it for
-      --  io_uring_enter and must not hold the lock across that call.
-      procedure Prepare_Submit
-        (Fd : out Ffi.C_Int; To_Submit : out Unsigned_32);
-
-      --  Account for what io_uring_enter actually accepted.
-      procedure Accept_Submission (Count : Natural);
-
-      procedure Harvest (Batch : out Completion_Batch; Count : out Natural);
-
-      function Pending return Natural;
-      function Fd_Of return Ffi.C_Int;
-
-   private
-      H         : Ring_Handle;
-      Unsent    : Unsigned_32 := 0;  --  queued but not yet handed to enter
-      Ops_Live  : Natural := 0;      --  submitted, completion not yet seen
-   end Ring_Cell;
-
-   Cells : array (Shard_Id) of Ring_Cell;
 
    ---------------------------------------------------------------------------
    --  Ring_Cell body
@@ -316,6 +320,11 @@ package body Iour.Reactor with SPARK_Mode => On is
          Index := H.Local_Tail and H.Sq_Mask;
 
          declare
+            --  Memory the kernel reads once the tail is published.  Not
+            --  marked Volatile: SPARK forbids a volatile object that is not
+            --  at library level, and this one cannot be, since its address
+            --  is only known after mmap.  The release store of the tail in
+            --  Prepare_Submit is what orders these writes for the kernel.
             Slots : Uring.Sqe_Array (0 .. H.Sq_Entries - 1)
               with Import, Address => H.Sqes;
             E : Uring.Sqe renames Slots (Index);
@@ -393,16 +402,24 @@ package body Iour.Reactor with SPARK_Mode => On is
          Tail := Load (H.Cq_Tail);
 
          declare
+            --  Memory the kernel writes as operations complete.  The
+            --  acquire load of the tail above is what makes those writes
+            --  visible before these reads; see the note on the SQE overlay.
             Slots : Uring.Cqe_Array (0 .. H.Cq_Entries - 1)
               with Import, Address => H.Cqes;
          begin
             while Head /= Tail and then N < Reap_Batch loop
                declare
                   E : Uring.Cqe renames Slots (Head and H.Cq_Mask);
+                  --  Each volatile read stands alone as the whole
+                  --  right-hand side, as SPARK requires.
+                  Token : constant Unsigned_64 := E.User_Data;
+                  Res   : constant Integer_32  := E.Res;
+                  Flags : constant Unsigned_32 := E.Flags;
                begin
-                  Batch (N) := (Token => E.User_Data,
-                                Res   => Io_Result (E.Res),
-                                Flags => E.Flags);
+                  Batch (N) := (Token => Token,
+                                Res   => Io_Result (Res),
+                                Flags => Flags);
                end;
                Head := Head + 1;
                N := N + 1;
@@ -514,6 +531,7 @@ package body Iour.Reactor with SPARK_Mode => On is
       --  and then the SQE it points at.  Nothing here ever reorders
       --  submissions, so the mapping is the identity and is written once.
       declare
+         --  Written once here, read by the kernel from then on.
          Indices : Uring.Index_Array (0 .. P.Sq_Entries - 1)
            with Import, Address => H.Sq_Indices;
       begin
@@ -612,7 +630,7 @@ package body Iour.Reactor with SPARK_Mode => On is
    end Push;
 
    procedure Flush
-     (Shard    : Active_Shard;
+     (Shard    : Shard_Id;
       Wait_For : Natural;
       Status   : out Io_Result)
    is
@@ -651,6 +669,12 @@ package body Iour.Reactor with SPARK_Mode => On is
 
       Status := Io_Result (Result);
    end Flush;
+
+   procedure Flush_Quietly (Shard : Shard_Id) is
+      Status : Io_Result;
+   begin
+      Flush (Shard, 0, Status);
+   end Flush_Quietly;
 
    procedure Harvest
      (Shard : Shard_Id;

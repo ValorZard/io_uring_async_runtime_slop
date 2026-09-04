@@ -1,3 +1,4 @@
+with System;
 with Iour.Ffi.Sys;
 
 package body Iour.Ffi.Net with SPARK_Mode => On is
@@ -40,10 +41,12 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
       Address : out Unsigned_32;
       Valid   : out Boolean)
    is
-      Octet  : Natural := 0;
-      Count  : Natural := 0;   --  octets completed
-      Digits_Seen : Natural := 0;
-      Result : Unsigned_32 := 0;
+      --  Bounded subtypes are what let the arithmetic below be proved:
+      --  an octet never exceeds 255, and never has more than three digits.
+      Octet       : Natural range 0 .. 255 := 0;
+      Count       : Natural range 0 .. 4   := 0;   --  octets completed
+      Digits_Seen : Natural range 0 .. 3   := 0;
+      Result      : Unsigned_32 := 0;
    begin
       Address := Any_Address;
       Valid   := True;
@@ -63,12 +66,20 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
                Valid := False;
                return;
             end if;
-            Octet := Octet * 10 + (Character'Pos (Text (I)) - Character'Pos ('0'));
+
+            declare
+               Digit : constant Natural range 0 .. 9 :=
+                 Character'Pos (Text (I)) - Character'Pos ('0');
+            begin
+               --  Reject before accumulating, so Octet * 10 + Digit is
+               --  known to fit 0 .. 255 at the point it is computed.
+               if Octet > (255 - Digit) / 10 then
+                  Valid := False;
+                  return;
+               end if;
+               Octet := Octet * 10 + Digit;
+            end;
             Digits_Seen := Digits_Seen + 1;
-            if Octet > 255 then
-               Valid := False;
-               return;
-            end if;
 
          elsif Text (I) = '.' then
             if Digits_Seen = 0 or else Count = 3 then
@@ -94,18 +105,16 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
 
       Result := Shift_Left (Result, 8) or Unsigned_32 (Octet);
 
-      --  Result is in host order with the first octet most significant;
-      --  the wire wants that same order byte-for-byte, so swap into
-      --  network order explicitly rather than relying on the host's.
+      --  Result holds the first octet most significant.  The wire wants
+      --  exactly that byte order, which on a big-endian host is already
+      --  the case and on a little-endian one needs a swap.
       Address :=
-        Shift_Left (Result and 16#0000_00FF#, 24) or
-        Shift_Left (Result and 16#0000_FF00#, 8)  or
-        Shift_Right (Result and 16#00FF_0000#, 8) or
-        Shift_Right (Result and 16#FF00_0000#, 24);
-
-      if System."=" (System.Default_Bit_Order, System.High_Order_First) then
-         Address := Result;
-      end if;
+        (if System."=" (System.Default_Bit_Order, System.High_Order_First)
+         then Result
+         else Shift_Left (Result and 16#0000_00FF#, 24) or
+              Shift_Left (Result and 16#0000_FF00#, 8)  or
+              Shift_Right (Result and 16#00FF_0000#, 8) or
+              Shift_Right (Result and 16#FF00_0000#, 24));
    end Parse_Ipv4;
 
    ---------------------------------------------------------------------------
@@ -125,14 +134,16 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Set_Flag (Fd : C_Int; Level, Name : C_Int) is
-      One     : aliased constant C_Int := 1;
-      Ignored : constant C_Int :=
-        C_Setsockopt (Fd, Level, Name, One'Address, C_Unsigned (C_Int'Size / 8));
+      One   : aliased constant C_Int := 1;
+      --  SPARK accepts 'Access only in a declaration, not inline as an
+      --  actual parameter.
+      Value : constant access constant C_Int := One'Access;
    begin
       --  A refused socket option is never fatal here: TCP_NODELAY and
       --  SO_REUSEPORT are optimisations, and the caller would rather have a
-      --  working socket than none.
-      pragma Unreferenced (Ignored);
+      --  working socket than none.  Hence the procedure form, which does
+      --  not return the status at all.
+      Set_Option (Fd, Level, Name, Value, C_Unsigned (C_Int'Size / 8));
    end Set_Flag;
 
    ---------------------------------------------------------------------------
@@ -141,9 +152,8 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Discard_Close (Fd : C_Int) is
-      Ignored : constant C_Int := C_Close (Fd);
    begin
-      pragma Unreferenced (Ignored);
+      Close_Quietly (Fd);
    end Discard_Close;
 
    ---------------------------------------------------------------------------
@@ -172,6 +182,7 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
    is
       Fd     : constant C_Int := C_Socket (Af_Inet, Sock_Stream, 0);
       Addr   : aliased constant Sockaddr_In := Make_Address (Host, Port);
+      Where  : constant access constant Sockaddr_In := Addr'Access;
       Status : C_Int;
       Failure : Io_Result;
    begin
@@ -186,7 +197,7 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
          Set_Flag (Fd, Sol_Socket, So_Reuseport);
       end if;
 
-      Status := C_Bind (Fd, Addr'Address, C_Unsigned (Sockaddr_In'Size / 8));
+      Status := C_Bind (Fd, Where, C_Unsigned (Sockaddr_In'Size / 8));
       if Status < 0 then
          --  Capture errno before close(), which would overwrite it.
          Failure := Adapt (Status);
@@ -211,9 +222,18 @@ package body Iour.Ffi.Net with SPARK_Mode => On is
    function Local_Port (Fd : Descriptor) return Io_Result is
       Addr   : aliased Sockaddr_In := (others => <>);
       Len    : aliased C_Unsigned := C_Unsigned (Sockaddr_In'Size / 8);
-      Status : constant C_Int :=
-        C_Getsockname (C_Int (Fd), Addr'Address, Len'Address);
+      Status : C_Int;
    begin
+      --  The borrows live only for the call.  SPARK forbids reading an
+      --  object while something still points at it, so Addr.Port below has
+      --  to be read after this block has given the pointer back.
+      declare
+         Where : constant access Sockaddr_In := Addr'Access;
+         Room  : constant access C_Unsigned := Len'Access;
+      begin
+         Status := C_Getsockname (C_Int (Fd), Where, Room);
+      end;
+
       if Status < 0 then
          return Adapt (Status);
       end if;

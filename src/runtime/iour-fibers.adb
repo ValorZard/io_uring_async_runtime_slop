@@ -9,61 +9,39 @@ with Iour.Run_Queue;
 
 package body Iour.Fibers with
   SPARK_Mode    => On,
-  Refined_State =>
-    (Registry   => (Pool, Ready_Cells),
-     Scheduling => (Contexts, Cpu_Owner, Current, Asleep))
+  Refined_State => (Registry => (Pool, Shard_Cells))
 is
 
    package Fib renames Iour.Ffi.Fiber;
    use type System.Address;
    use type Ffi.C_Int;
-   use type Ffi.C_Size;
+   use type Ffi.C_Long;
 
    ---------------------------------------------------------------------------
-   --  Machine contexts
+   --  Machine context slots
    ---------------------------------------------------------------------------
 
-   --  One context slot per fiber, plus one per shard for the scheduler it
-   --  switches back to.  The values are written only by the assembly in
-   --  iour_fiber.c; Ada never reads them, it only hands over their
-   --  addresses.  Atomic components make the array a synchronised object,
-   --  which is what lets several shard tasks share it.
-   subtype Context_Slot is Natural range 0 .. Max_Fibers + Max_Shards - 1;
+   --  Contexts live on the C side; Ada only names them.  Slots 0 ..
+   --  Max_Fibers - 1 belong to fibers, the rest to the shard schedulers
+   --  they switch back to.
+   Total_Slots : constant := Max_Fibers + Max_Shards;
 
-   type Context_Store is array (Context_Slot) of System.Address
-     with Atomic_Components;
-
-   Contexts : Context_Store := [others => System.Null_Address]
-     with Async_Writers => True, Async_Readers => False,
-          Effective_Reads => False, Effective_Writes => False;
+   --  Reserved once, during elaboration of this package body.
+   --  Partition_Elaboration_Policy (Sequential) guarantees every library
+   --  unit is elaborated before any task is activated, so the table exists
+   --  before a shard could possibly want it.  Making it a constant is what
+   --  keeps it out of the protected objects entirely: there is no lock to
+   --  take, no allocation inside a protected action, and nothing for two
+   --  shards to race over.
+   Contexts_Ready : constant Boolean :=
+     Fib.Reserve (Ffi.C_Long (Total_Slots)) = 0;
 
    ---------------------------------------------------------------------------
    --  Shard identity
    ---------------------------------------------------------------------------
 
-   --  A shard is pinned to one core for its whole life, so the CPU the
-   --  kernel reports identifies it outright.  That makes Self a vDSO read
-   --  and an array index -- no thread-local storage, which SPARK does not
-   --  model, and no registry lookup on the hot path.
-   Max_Cpus : constant := 4096;
-   subtype Cpu_Index is Natural range 0 .. Max_Cpus - 1;
-
-   type Cpu_Map is array (Cpu_Index) of Shard_Ref with Atomic_Components;
-   Cpu_Owner : Cpu_Map := [others => No_Shard]
-     with Async_Writers => True, Async_Readers => False,
-          Effective_Reads => False, Effective_Writes => False;
-
-   type Current_Map is array (Shard_Id) of Fiber_Ref with Atomic_Components;
-   Current : Current_Map := [others => No_Fiber]
-     with Async_Writers => True, Async_Readers => False,
-          Effective_Reads => False, Effective_Writes => False;
-
-   type Idle_Map is array (Shard_Id) of Boolean with Atomic_Components;
-   Asleep : Idle_Map := [others => False]
-     with Async_Writers => True, Async_Readers => False,
-          Effective_Reads => False, Effective_Writes => False;
-
-   ---------------------------------------------------------------------------
+   --  Linux CPU number of shard 0.  Ada counts CPUs from one.
+   Linux_Base : constant Ffi.C_Int := Ffi.C_Int (First_Shard_Cpu) - 1;
 
    ---------------------------------------------------------------------------
    --  Fiber table
@@ -87,8 +65,7 @@ is
    protected Pool is
       procedure Allocate
         (Work : Fiber_Body; Arg : Fiber_Argument; Fiber : out Fiber_Ref);
-      procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id;
-                      Done : Future_Id);
+      procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id; Done : Future_Id);
       procedure Launch_Info
         (Fiber : Fiber_Id;
          Shard : out Shard_Ref;
@@ -114,30 +91,46 @@ is
    end Pool;
 
    ---------------------------------------------------------------------------
-   --  Per-shard ready queues
+   --  Per-shard scheduling state
    ---------------------------------------------------------------------------
 
-   --  One lock per shard rather than one for the runtime.  In practice each
-   --  is touched only by its owning shard, so it is always uncontended; it
-   --  exists because SPARK requires state reachable from several tasks to
-   --  be synchronised, and it makes the cross-shard handoff path safe by
-   --  construction rather than by argument.
+   --  One protected object per shard, holding everything that shard's loop
+   --  touches: its ready queue, which fiber is on its core, and whether it
+   --  is asleep.  One lock per shard rather than one for the runtime, so
+   --  the path a shard takes through its own state never contends; a
+   --  sibling only reaches in to hand over a fiber or to see if it is
+   --  sleeping.
    type Ready_Index is mod Max_Fibers;
    type Ready_Array is array (Ready_Index) of Fiber_Id;
 
-   protected type Ready_Cell is
+   protected type Shard_Cell is
       procedure Push (Fiber : Fiber_Id; Accepted : out Boolean);
+      --  Push for the paths where a full queue is impossible: the queue
+      --  holds Max_Fibers entries, a fiber sits in at most one queue at a
+      --  time, and there are never more than Max_Fibers fibers.  The guard
+      --  stays because SPARK proves the arithmetic from it; the branch it
+      --  guards is unreachable.
+      procedure Enqueue (Fiber : Fiber_Id);
       procedure Pop (Fiber : out Fiber_Ref);
       procedure Depth (Count : out Natural);
+      procedure Put_Running (Fiber : Fiber_Ref);
+      procedure Take_Running (Fiber : out Fiber_Ref);
+      procedure Put_Idle (Idle : Boolean);
+      procedure Take_Idle (Idle : out Boolean);
    private
-      Items : Ready_Array := [others => 0];
-      Head  : Ready_Index := 0;
-      Tail  : Ready_Index := 0;
-      Held  : Natural range 0 .. Max_Fibers := 0;
-   end Ready_Cell;
+      Items   : Ready_Array := [others => 0];
+      Head    : Ready_Index := 0;
+      Tail    : Ready_Index := 0;
+      Held    : Natural range 0 .. Max_Fibers := 0;
+      Current : Fiber_Ref := No_Fiber;
+      Asleep  : Boolean := False;
+   end Shard_Cell;
 
-   Ready_Cells : array (Shard_Id) of Ready_Cell;
+   Shard_Cells : array (Shard_Id) of Shard_Cell;
 
+   ---------------------------------------------------------------------------
+   --  Pool body
+   ---------------------------------------------------------------------------
 
    protected body Pool is
 
@@ -167,8 +160,7 @@ is
          end if;
       end Allocate;
 
-      procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id;
-                      Done : Future_Id) is
+      procedure Bind (Fiber : Fiber_Id; Shard : Shard_Id; Done : Future_Id) is
       begin
          Slots (Fiber).Home := Shard;
          Slots (Fiber).Done := Done;
@@ -251,7 +243,11 @@ is
 
    end Pool;
 
-   protected body Ready_Cell is
+   ---------------------------------------------------------------------------
+   --  Shard_Cell body
+   ---------------------------------------------------------------------------
+
+   protected body Shard_Cell is
 
       procedure Push (Fiber : Fiber_Id; Accepted : out Boolean) is
       begin
@@ -264,6 +260,16 @@ is
          Held := Held + 1;
          Accepted := True;
       end Push;
+
+      procedure Enqueue (Fiber : Fiber_Id) is
+      begin
+         if Held = Max_Fibers then
+            return;
+         end if;
+         Items (Tail) := Fiber;
+         Tail := Tail + 1;
+         Held := Held + 1;
+      end Enqueue;
 
       procedure Pop (Fiber : out Fiber_Ref) is
       begin
@@ -281,85 +287,96 @@ is
          Count := Held;
       end Depth;
 
-   end Ready_Cell;
+      procedure Put_Running (Fiber : Fiber_Ref) is
+      begin
+         Current := Fiber;
+      end Put_Running;
 
-   function Fiber_Slot (Fiber : Fiber_Id) return Context_Slot is
-     (Natural (Fiber));
+      procedure Take_Running (Fiber : out Fiber_Ref) is
+      begin
+         Fiber := Current;
+      end Take_Running;
 
-   function Shard_Slot (Shard : Shard_Id) return Context_Slot is
-     (Max_Fibers + Natural (Shard));
+      procedure Put_Idle (Idle : Boolean) is
+      begin
+         Asleep := Idle;
+      end Put_Idle;
 
-   function Context_Address (Slot : Context_Slot) return System.Address is
-     (Contexts (Slot)'Address);
+      procedure Take_Idle (Idle : out Boolean) is
+      begin
+         Idle := Asleep;
+      end Take_Idle;
 
-   function Context_Layout_Matches return Boolean is
-     (Fib.Context_Size = Ffi.C_Size (System.Address'Size / 8));
+   end Shard_Cell;
+
+   ---------------------------------------------------------------------------
+   --  Context slots and shard identity
+   ---------------------------------------------------------------------------
+
+   function Fiber_Slot (Fiber : Fiber_Id) return Ffi.C_Long is
+     (Ffi.C_Long (Fiber));
+
+   function Shard_Slot (Shard : Shard_Id) return Ffi.C_Long is
+     (Ffi.C_Long (Max_Fibers) + Ffi.C_Long (Shard));
+
+   procedure Context_Slots (Count : out Natural) is
+      Slots : constant Ffi.C_Long := Fib.Slot_Count;
+   begin
+      Count := (if Slots <= 0 then 0
+                elsif Slots > Ffi.C_Long (Natural'Last) then Natural'Last
+                else Natural (Slots));
+   end Context_Slots;
 
    function Self return Shard_Ref is
       Cpu : constant Ffi.C_Int := Ffi.Sys.Sched_Getcpu;
    begin
-      if Cpu < 0 or else Cpu > Ffi.C_Int (Cpu_Index'Last) then
+      if Cpu < Linux_Base
+        or else Cpu >= Linux_Base + Ffi.C_Int (Shard_Count)
+      then
          return No_Shard;
       end if;
-      declare
-         Owner : constant Shard_Ref := Cpu_Owner (Cpu_Index (Cpu));
-      begin
-         return Owner;
-      end;
+      return Shard_Ref (Cpu - Linux_Base);
    end Self;
 
-   function Running_Fiber (Shard : Shard_Id) return Fiber_Ref is
-      Value : constant Fiber_Ref := Current (Shard);
+   procedure Verify_Cpu (Shard : Active_Shard; Ok : out Boolean) is
+      Who : constant Shard_Ref := Self;
    begin
-      return Value;
+      Ok := Who = Shard;
+   end Verify_Cpu;
+
+   ---------------------------------------------------------------------------
+   --  Thin forwarding layer
+   ---------------------------------------------------------------------------
+
+   procedure Reserve_Contexts (Ok : out Boolean) is
+   begin
+      Ok := Contexts_Ready;
+   end Reserve_Contexts;
+
+   procedure Running_Fiber (Shard : Shard_Id; Fiber : out Fiber_Ref) is
+   begin
+      Shard_Cells (Shard).Take_Running (Fiber);
    end Running_Fiber;
-
-   procedure Set_Running (Shard : Shard_Id; Fiber : Fiber_Ref) is
-   begin
-      Current (Shard) := Fiber;
-   end Set_Running;
-
-   procedure Claim_Cpu (Shard : Shard_Id; Ok : out Boolean) is
-      Cpu : constant Ffi.C_Int := Ffi.Sys.Sched_Getcpu;
-   begin
-      if Cpu < 0 or else Cpu > Ffi.C_Int (Cpu_Index'Last) then
-         Ok := False;
-         return;
-      end if;
-      Cpu_Owner (Cpu_Index (Cpu)) := Shard;
-      Ok := True;
-   end Claim_Cpu;
 
    procedure Set_Idle (Shard : Shard_Id; Idle : Boolean) is
    begin
-      Asleep (Shard) := Idle;
+      Shard_Cells (Shard).Put_Idle (Idle);
    end Set_Idle;
-
-   --  Volatile_Function: Asleep is written by every shard, so reading it is
-   --  a volatile read and SPARK requires the function to say so.
-   function Is_Idle (Shard : Shard_Id) return Boolean
-     with Volatile_Function;
-
-   function Is_Idle (Shard : Shard_Id) return Boolean is
-      Value : constant Boolean := Asleep (Shard);
-   begin
-      return Value;
-   end Is_Idle;
 
    procedure Push_Ready
      (Shard : Shard_Id; Fiber : Fiber_Id; Accepted : out Boolean) is
    begin
-      Ready_Cells (Shard).Push (Fiber, Accepted);
+      Shard_Cells (Shard).Push (Fiber, Accepted);
    end Push_Ready;
 
    procedure Pop_Ready (Shard : Shard_Id; Fiber : out Fiber_Ref) is
    begin
-      Ready_Cells (Shard).Pop (Fiber);
+      Shard_Cells (Shard).Pop (Fiber);
    end Pop_Ready;
 
    procedure Ready_Depth (Shard : Shard_Id; Count : out Natural) is
    begin
-      Ready_Cells (Shard).Depth (Count);
+      Shard_Cells (Shard).Depth (Count);
    end Ready_Depth;
 
    procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref) is
@@ -376,15 +393,29 @@ is
    --  Wakeups
    ---------------------------------------------------------------------------
 
-   procedure Wake
-     (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id)
-   is
+   --  Post a ring message from From's ring.  The submission queue can be
+   --  momentarily full; a message dropped for that reason would be a lost
+   --  wakeup, so flush and retry rather than give up.  The retry is bounded
+   --  because a ring that fails to flush is not coming back, and the idle
+   --  timer will surface the work eventually in any case.
+   procedure Send_Message (From : Shard_Id; Message : Reactor.Op_Spec) is
       Accepted : Boolean;
+      Status   : Io_Result;
+   begin
+      for Attempt in 1 .. 4 loop
+         Reactor.Push (From, Message, Accepted);
+         exit when Accepted;
+         Reactor.Flush (From, 0, Status);
+         exit when Failed (Status);
+      end loop;
+   end Send_Message;
+
+   procedure Wake (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id) is
    begin
       Pool.Mark (Fiber, Runnable);
 
       if Home = From then
-         Push_Ready (From, Fiber, Accepted);
+         Shard_Cells (From).Enqueue (Fiber);
          return;
       end if;
 
@@ -392,27 +423,26 @@ is
       --  post a message on its ring: it arrives as an ordinary completion,
       --  so a sibling asleep in io_uring_enter wakes with no shared lock
       --  and no eventfd anywhere in the path.
-      if Home in Active_Shard then
+      if Home in Active_Shard and then From in Active_Shard then
          declare
             Target_Fd : Descriptor;
          begin
             Reactor.Ring_Descriptor (Home, Target_Fd);
-            Reactor.Push
+            Send_Message
               (From,
                Reactor.Op_Msg_Ring
                  (Target_Ring  => Target_Fd,
                   Target_Token =>
                     Reactor.Encode
                       (Reactor.Tag_Wake, Unsigned_32 (Fiber) + 1),
-                  Token => Reactor.Encode (Reactor.Tag_Msg_Send, 0)),
-               Accepted);
+                  Token => Reactor.Encode (Reactor.Tag_Msg_Send, 0)));
          end;
       end if;
    end Wake;
 
    --  Nudge one sleeping shard so it notices new work on the global queue.
    procedure Nudge_Idle (From : Shard_Ref) is
-      Accepted : Boolean;
+      Sleeping : Boolean;
    begin
       --  Only a shard can send: the message has to come from a ring, and
       --  the environment task owns none.  Work published from there is
@@ -422,15 +452,14 @@ is
       end if;
 
       for Target in Active_Shard loop
-         declare
-            Sleeping : constant Boolean := Is_Idle (Target);
-         begin
-            if Target /= From and then Sleeping then
+         if Target /= From then
+            Shard_Cells (Target).Take_Idle (Sleeping);
+            if Sleeping then
                declare
                   Target_Fd : Descriptor;
                begin
                   Reactor.Ring_Descriptor (Target, Target_Fd);
-                  Reactor.Push
+                  Send_Message
                     (From,
                      Reactor.Op_Msg_Ring
                        (Target_Ring  => Target_Fd,
@@ -438,12 +467,11 @@ is
                         Target_Token =>
                           Reactor.Encode (Reactor.Tag_Wake, 0),
                         Token =>
-                          Reactor.Encode (Reactor.Tag_Msg_Send, 0)),
-                     Accepted);
+                          Reactor.Encode (Reactor.Tag_Msg_Send, 0)));
                end;
                exit;  --  one woken core is enough to drain the queue
             end if;
-         end;
+         end if;
       end loop;
    end Nudge_Idle;
 
@@ -492,7 +520,7 @@ is
    ---------------------------------------------------------------------------
 
    procedure Adopt
-     (Shard   : Active_Shard;
+     (Shard   : Shard_Id;
       Handle  : Future_Id;
       Started : out Boolean)
    is
@@ -519,7 +547,10 @@ is
             --  Out of address space.  Fail the future rather than drop the
             --  work silently, so whoever awaits it learns why.
             Futures.Resolve (Handle, -E_Again, Waiter, Home);
-            if Waiter /= No_Fiber and then Home in Active_Shard then
+            if Waiter /= No_Fiber
+              and then Home in Active_Shard
+              and then Shard in Active_Shard
+            then
                Wake (Shard, Waiter, Home);
             end if;
             Pool.Recycle (Fiber);
@@ -528,8 +559,8 @@ is
          Pool.Set_Stack (Fiber, Base);
       end if;
 
-      --  Point the context at a fresh call of Fiber_Main on that stack.
-      Fib.Prime (Ctx  => Context_Address (Fiber_Slot (Fiber)),
+      --  Point the context slot at a fresh call of Fiber_Main on that stack.
+      Fib.Prime (Slot => Fiber_Slot (Fiber),
                  Base => Base,
                  Size => Ffi.C_Size (Fiber_Stack_Bytes),
                  Arg  => Ffi.C_Long (Fiber));
@@ -545,20 +576,18 @@ is
    procedure Resume (Shard : Shard_Id; Fiber : Fiber_Id) is
    begin
       Pool.Mark (Fiber, Running);
-      Set_Running (Shard, Fiber);
+      Shard_Cells (Shard).Put_Running (Fiber);
 
       --  Hand the core to the fiber.  This returns once the fiber suspends,
       --  yields or finishes -- on this same stack, with the scheduler's
       --  registers restored exactly as they were.
-      Fib.Switch (From => Context_Address (Shard_Slot (Shard)),
-                  To   => Context_Address (Fiber_Slot (Fiber)));
+      Fib.Switch (From => Shard_Slot (Shard), To => Fiber_Slot (Fiber));
 
-      Set_Running (Shard, No_Fiber);
+      Shard_Cells (Shard).Put_Running (No_Fiber);
    end Resume;
 
    procedure After_Resume (Shard : Shard_Id; Fiber : Fiber_Id) is
-      State    : Fiber_State;
-      Accepted : Boolean;
+      State : Fiber_State;
    begin
       Pool.State_Of (Fiber, State);
       case State is
@@ -567,7 +596,7 @@ is
             Pool.Recycle (Fiber);
          when Runnable =>
             --  Yielded voluntarily: back of the queue.
-            Push_Ready (Shard, Fiber, Accepted);
+            Shard_Cells (Shard).Enqueue (Fiber);
          when others =>
             --  Suspended on a future; whoever resolves it will call Wake.
             null;
@@ -580,24 +609,8 @@ is
 
    procedure Switch_To_Scheduler (Fiber : Fiber_Id; Shard : Shard_Id) is
    begin
-      Fib.Switch (From => Context_Address (Fiber_Slot (Fiber)),
-                  To   => Context_Address (Shard_Slot (Shard)));
+      Fib.Switch (From => Fiber_Slot (Fiber), To => Shard_Slot (Shard));
    end Switch_To_Scheduler;
-
-   function In_Fiber return Boolean is
-      Shard : constant Shard_Ref := Self;
-   begin
-      if Shard not in Active_Shard then
-         return False;
-      end if;
-      --  A volatile read has to stand alone as the whole right-hand side,
-      --  so it cannot be folded into the expression above.
-      declare
-         Fiber : constant Fiber_Ref := Running_Fiber (Shard);
-      begin
-         return Fiber /= No_Fiber;
-      end;
-   end In_Fiber;
 
    procedure Await (Handle : Future_Id; Result : out Io_Result) is
       Shard    : constant Shard_Ref := Self;
@@ -610,7 +623,7 @@ is
          return;  --  not on a shard: nothing to suspend
       end if;
 
-      Me := Running_Fiber (Shard);
+      Running_Fiber (Shard, Me);
       if Me = No_Fiber then
          return;  --  not in a fiber: nothing to suspend
       end if;
@@ -639,7 +652,7 @@ is
       if Shard not in Active_Shard then
          return;
       end if;
-      Me := Running_Fiber (Shard);
+      Running_Fiber (Shard, Me);
       if Me = No_Fiber then
          return;
       end if;
@@ -654,8 +667,13 @@ is
    --  Fiber entry point
    ---------------------------------------------------------------------------
 
+   --  The precondition is a contract with the C trampoline, not a check on
+   --  an Ada caller: Adopt primes every slot with a valid Fiber_Id, and the
+   --  trampoline passes that value back unchanged.  Stating it lets SPARK
+   --  prove the conversion below instead of assuming it.
    procedure Fiber_Main (Arg : Ffi.C_Long)
-     with Export, Convention => C, External_Name => "iour_fiber_main";
+     with Export, Convention => C, External_Name => "iour_fiber_main",
+          Pre => Arg >= 0 and then Arg <= Ffi.C_Long (Fiber_Id'Last);
 
    procedure Fiber_Main (Arg : Ffi.C_Long) is
       Me     : constant Fiber_Id := Fiber_Id (Arg);
@@ -672,6 +690,11 @@ is
          Status := 0;
 
          if Work /= null then
+            pragma Warnings
+              (GNATprove, Off, "this statement is never reached",
+               Reason => "Defence in depth: SPARK proves fiber bodies raise"
+                         & " nothing, and the handler exists for the case"
+                         & " where that proof no longer holds.");
             begin
                Work.all (Param);
             exception
@@ -684,6 +707,8 @@ is
                when others =>
                   Status := -E_Canceled;
             end;
+            pragma Warnings
+              (GNATprove, On, "this statement is never reached");
          end if;
 
          --  Publish the result and hand the awaiting fiber, if any, back to

@@ -13,8 +13,13 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    --  glibc's errno is a macro over this function, which is the symbol a
-   --  foreign caller is expected to use.
-   function Errno_Location return System.Address
+   --  foreign caller is expected to use.  It is bound as returning a named
+   --  access type rather than an address: dereferencing an access value is
+   --  something SPARK can follow, whereas overlaying an object on an
+   --  address is not.
+   type Errno_Cell is access all C_Int;
+
+   function Errno_Location return Errno_Cell
      with Import, Convention => C, External_Name => "__errno_location",
           Global => null;
 
@@ -77,11 +82,15 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
 
    Rlimit_Nofile : constant := 7;
 
-   function Getrlimit (Resource : C_Int; Value : System.Address) return C_Int
+   --  Pointer parameters expressed as access types, so no caller has to
+   --  take the address of an Ada object.
+   function Getrlimit
+     (Resource : C_Int; Value : access Rlimit) return C_Int
      with Import, Convention => C, External_Name => "getrlimit",
           Global => null;
 
-   function Setrlimit (Resource : C_Int; Value : System.Address) return C_Int
+   function Setrlimit
+     (Resource : C_Int; Value : access constant Rlimit) return C_Int
      with Import, Convention => C, External_Name => "setrlimit",
           Global => null;
 
@@ -97,8 +106,12 @@ package Iour.Ffi.Sys with SPARK_Mode => On is
 
    Sig_Pipe : constant := 13;
 
-   function Signal (Sig : C_Int; Handler : System.Address) return System.Address
-     with Import, Convention => C, External_Name => "signal", Global => null;
+   --  signal(2) returns the previous handler, which nothing here wants.
+   --  Importing it as a procedure discards that and lets the binding say
+   --  what it is actually for: changing kernel state.
+   procedure Set_Signal (Sig : C_Int; Handler : System.Address)
+     with Import, Convention => C, External_Name => "signal",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    --  Writing to a socket whose peer has gone must surface as EPIPE on the
    --  completion, not as a signal that kills the process.

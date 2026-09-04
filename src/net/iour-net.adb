@@ -17,18 +17,26 @@ package body Iour.Net with SPARK_Mode => On is
       Backlog   : Natural := 4096;
       Reuseport : Boolean := False) return Io_Result
    is
+      Result : Io_Result;
    begin
       if Port > 65_535 then
          return -E_Invalid;
       end if;
-      return Raw.Tcp_Listener
+      --  A Side_Effects function may only be called as an assignment.
+      Result := Raw.Tcp_Listener
         (Host      => Raw.Any_Address,
          Port      => Unsigned_16 (Port),
          Backlog   => Backlog,
          Reuseport => Reuseport);
+      return Result;
    end Listen;
 
-   function New_Socket return Io_Result is (Raw.Tcp_Socket);
+   function New_Socket return Io_Result is
+      Result : Io_Result;
+   begin
+      Result := Raw.Tcp_Socket;
+      return Result;
+   end New_Socket;
 
    function Port_Of (S : Socket) return Io_Result is (Raw.Local_Port (S));
 

@@ -5,16 +5,21 @@ with Iour.Futures;
 package body Iour.Async with SPARK_Mode => On is
 
    procedure Perform (Spec : Reactor.Op_Spec; Result : out Io_Result) is
-      Shard    : constant Shard_Ref := Fibers.Self;
-      On_Fiber : constant Boolean := Fibers.In_Fiber;
+      Shard   : constant Shard_Ref := Fibers.Self;
+      Me      : Fiber_Ref;
       Handle  : Future_Ref;
       Request : Reactor.Op_Spec := Spec;
       Queued  : Boolean;
-      Status  : Io_Result;
    begin
       --  Suspending only means anything on a fiber: there is nothing to
       --  switch away from otherwise.
-      if Shard not in Active_Shard or else not On_Fiber then
+      if Shard not in Active_Shard then
+         Result := -E_Invalid;
+         return;
+      end if;
+
+      Fibers.Running_Fiber (Shard, Me);
+      if Me = No_Fiber then
          Result := -E_Invalid;
          return;
       end if;
@@ -38,8 +43,9 @@ package body Iour.Async with SPARK_Mode => On is
 
          --  The submission queue is momentarily full.  Hand the kernel what
          --  is already queued and let sibling fibers run while it drains;
-         --  spinning here would stall the very loop that empties it.
-         Reactor.Flush (Shard, 0, Status);
+         --  spinning here would stall the very loop that empties it.  The
+         --  shard loop is where a failing flush gets counted.
+         Reactor.Flush_Quietly (Shard);
          Fibers.Yield;
       end loop;
 

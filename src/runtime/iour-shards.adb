@@ -22,12 +22,18 @@ package body Iour.Shards with SPARK_Mode => On is
       Released : Boolean := False;
    end Parking;
 
+   --  Barrier-only entries: the body is "null" because the wait is the
+   --  point, and SPARK reports a null statement as having no effect.
+   pragma Warnings
+     (GNATprove, Off, "statement has no effect",
+      Reason => "Barrier-only entry: the wait is the point.");
    protected body Parking is
       entry Wait_Forever when Released is
       begin
          null;
       end Wait_Forever;
    end Parking;
+   pragma Warnings (GNATprove, On, "statement has no effect");
 
    ---------------------------------------------------------------------------
    --  Shared body
@@ -40,7 +46,14 @@ package body Iour.Shards with SPARK_Mode => On is
    procedure Serve (Index : Shard_Id) is
    begin
       Scheduler.Run (Index);
-      Parking.Wait_Forever;
+
+      --  Park for good.  The loop is what makes "never returns" visible:
+      --  the barrier below is permanently closed, but nothing in the
+      --  language says so, and under Jorvik a task that runs off the end of
+      --  its body is a bounded error.
+      loop
+         Parking.Wait_Forever;
+      end loop;
    end Serve;
 
    ---------------------------------------------------------------------------

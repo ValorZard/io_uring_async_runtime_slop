@@ -77,6 +77,18 @@ Run it yourself with `make demo`.
   another, so `Await` can be a plain call. This is the model Seastar exposes as
   `seastar::thread`, and it is what the stack-per-task cost buys.
 
+  The saved contexts themselves live on the C side and are named from Ada by
+  slot index. That split is deliberate: a saved stack pointer is machine state
+  whose only accessor is the assembly, and an Ada array that has to hand out
+  addresses into itself can be neither a protected object nor anything SPARK
+  will let an access type designate. Naming slots by integer leaves the Ada
+  scheduler with no addresses to hand out and no shared array to race over.
+
+* **Shard identity is arithmetic.** Shard N is pinned to Ada CPU
+  `First_Shard_Cpu + N` by a static aspect, so the shard a thread belongs to is
+  a function of the CPU the kernel reports. There is no lookup table to keep in
+  step and nothing for two shards to race over.
+
 * **Futures.** One global, shard-agnostic table of small integer handles. Any
   shard can resolve any future; the shard owning the waiting fiber is woken
   through `IORING_OP_MSG_RING`, so a cross-core handoff lands in the sibling's
@@ -143,12 +155,19 @@ directly. Byte-order conversion and dotted-quad parsing are done in Ada rather
 than borrowed from `htons` and `inet_pton`, so the whole address path stays
 analysable.
 
+Where libc wants a pointer, the Ada binding takes an `access` parameter and the
+caller passes `X'Access` from a declaration of its own. GNAT passes that as a
+plain pointer, so the C side is unchanged, and no Ada code has to take the
+address of an Ada object: SPARK can follow an access value where it cannot
+follow an address.
+
 ### The one C file
 
 `src/c/iour_fiber.c` is the only C in the project, and it is essentially
 assembly: saving and restoring a machine context cannot be expressed in Ada at
 all. It is about twenty instructions on x86-64 (an AArch64 path is included),
-plus `mmap` for a fiber stack with a guard page below it.
+`mmap` for a fiber stack with a guard page below it, and the table of saved
+contexts that the assembly reads and writes, indexed by slot.
 
 The switch is deliberately tiny. It saves the SysV callee-saved registers on
 the outgoing stack, swaps the stack pointer, and pops them back. It touches no
@@ -160,63 +179,81 @@ signal mask, so a switch costs tens of cycles rather than the microsecond
 Every unit is `SPARK_Mode => On`, and every unit compiles under GNAT's SPARK
 legality rules. Neither SPARK nor Jorvik is disabled anywhere.
 
-`gnatprove` goes further than the compiler, and it is worth being precise about
-where it stops.
+`gnatprove` goes further than the compiler, and there are two targets because
+there are two honest answers.
 
-**Fully verified** (`make prove-core`) — the parts that never hand an object's
-address to the kernel: `Iour`, `Iour.Futures`, `Iour.Run_Queue` and
-`Echo_Protocol`.
+**`make prove`** — everything inside SPARK's analysable subset, in full proof
+mode. Expected to come back clean, and does:
 
 ```
-SPARK Analysis results     Total     Flow    Provers   Unproved
-Data Dependencies             12       12          .          .
-Flow Dependencies              2        2          .          .
-Initialization                35       35          .          .
-Run-time Checks               17        .         17          .
-Functional Contracts           2        .          2          .
-Termination                    5        5          .          .
-Total                         73  54 (74%)   19 (26%)         .
+Success: all checks proved (383 checks).
+
+SPARK Analysis results     Total       Flow    Provers   Unproved
+Data Dependencies             17         17          .          .
+Flow Dependencies              4          4          .          .
+Initialization               155        155          .          .
+Run-time Checks              176          .        176          .
+Functional Contracts          12          .         12          .
+Termination                   19         19          .          .
 ```
 
-Zero unproved. Getting there meant fixing real defects gnatprove found and the
-compiler did not: an overflow when negating `Io_Result'First` in `Errno`, an
-unbounded statistics counter in the run queue, and two free-list cursors whose
-index arithmetic was correct but not provably so. Those are fixed in the
-shipped code.
+Zero unproved checks, zero warnings, zero data races. That covers the fiber
+scheduler, the per-shard event loop, the future table, the run queue, the
+shard tasks, the submit-and-await primitive, both libc binding packages, and
+the demo protocol. Everything the runtime *decides* is in there.
 
-**Outside SPARK's analysable subset**: 19 sites across 6 files, of two kinds.
+Getting there meant fixing defects gnatprove found and the compiler did not:
+an overflow when negating `Io_Result'First`; statistics counters that would
+wrap on a long-lived server; free-list cursors whose index arithmetic was
+correct but not provably so; an out-of-range shard conversion in the surplus
+task declarations; an allocation inside a protected action; an IPv4 parser
+whose accumulator could overflow before its bound was checked; a cross-shard
+wakeup that was silently dropped if the submission queue happened to be full;
+and a flush failure that would have left a shard in a silent hot loop. All are
+fixed in the shipped code.
+
+Three modelling decisions made the rest provable rather than assumed:
+
+* The operating system is SPARK external state, `Iour.Ffi.Kernel`. A binding
+  whose whole purpose is a side effect declares that it writes `Kernel`, so
+  SPARK knows the call does something even though it cannot see what.
+* Socket creation is declared with Ada 2022's `Side_Effects` aspect. A
+  function that creates a kernel object is not pure, and saying so is what
+  lets it stay a function without SPARK rejecting it.
+* `Iour.Reactor`'s spec carries full `Global` and `Always_Terminates`
+  contracts, so every caller is checked against a stated promise rather than
+  an assumption of "no effect", even though the body itself is not analysed.
+
+**`make prove-boundary`** — flow analysis over the *whole* runtime, including
+the three bodies that must hand an object's address to the kernel. Expected to
+end in `error during analysis`; its purpose is to list exactly those sites:
 
 | Kind | Sites | Where |
 |---|---|---|
-| `X'Address` used as an expression (E0002) | 16 | `Iour.Net`, `Iour.Time`, `Iour.Reactor`, `Iour.Fibers`, `Iour.Ffi.Sys`, `Iour.Ffi.Net` |
-| Memory-mapped overlay declared inside a subprogram (E0001) | 3 | `Iour.Reactor`, `Iour.Ffi.Sys` |
+| `X'Address` used as an expression (E0002) | 8 | `Iour.Net`, `Iour.Time`, `Iour.Reactor` |
+| Memory-mapped overlay declared inside a subprogram (E0001) | 2 | `Iour.Reactor` |
 
-Both are precisely what a kernel interface needs. Handing a receive buffer, a
-socket address or a timespec to `io_uring` means materialising its address, and
-reading a ring index means overlaying an object on an address that is only
-known at run time. `make prove` lists every site.
+Both are precisely what the `io_uring` interface needs, and neither has a
+SPARK-legal substitute:
 
-SPARK's own manual prescribes the fix: hoist each address-taking expression
-into a small subprogram whose declaration is in SPARK and whose body is
-`SPARK_Mode => Off`, then give it a `Global` contract. That would let
-`gnatprove` analyse the remaining units, which today it refuses outright.
-**It is not done here, because the brief was not to turn SPARK off anywhere.**
-It is a contained change if that trade is ever worth making.
+* An SQE carries a buffer's address as a 64-bit integer. SPARK forbids
+  `Unchecked_Conversion` from an access type to an integer, deliberately: its
+  ownership model depends on pointers not being forgeable as numbers.
+* The ring words must be atomic, because the kernel writes them concurrently,
+  and SPARK forbids an access type designating a volatile type. Marking the
+  overlays `Volatile` instead trips the "not at library level" rule, since
+  their addresses are only known after `mmap`. There is no annotation that
+  satisfies both.
 
-**One further report worth stating plainly.** `gnatprove` flags a possible data
-race on `Iour.Fibers.Scheduling`, the lock-free half of the scheduler state:
-which CPU belongs to which shard, which fiber each shard is running, which
-shards are asleep, and the machine contexts. Every shard task reaches it, and
-SPARK cannot see that the accesses are disjoint by index — each shard touches
-only its own entry, and every component is atomic.
+SPARK's own manual prescribes hoisting each site into a small subprogram whose
+body is `SPARK_Mode => Off`, which would let `gnatprove` analyse the remaining
+three bodies. **That is not done here, because the brief was not to turn SPARK
+off anywhere.**
 
-The report is not a false alarm so much as a limit on what SPARK can express
-here. Making it provable would mean moving that state into protected objects,
-which puts a lock acquisition on the `Await` path taken by every I/O operation.
-The lock-free arrays were chosen instead, deliberately, and the disjointness
-argument is an argument rather than a proof. The state that genuinely needs
-mutual exclusion — the future table, the run queue, the fiber pool, the ring
-descriptors — does live in protected objects, and SPARK verifies those.
+One toolchain note: GNAT 16.1 crashes (`exp_ch9.adb:8406`) on a
+`pragma Warnings (GNATprove, ...)` placed inside a protected body. The
+justifications for barrier-only entries are therefore placed around the whole
+protected body instead.
 
 ## Rules for code built on this runtime
 
@@ -280,8 +317,8 @@ make examples     # library, server, client
 make smoke        # runtime self-test
 make demo         # server and client, 2000 connections
 make abi-check    # kernel-ABI mirrors vs. this system's headers
-make prove-core   # SPARK proof of the address-free core
-make prove        # SPARK flow analysis of everything
+make prove           # SPARK proof of everything analysable (expected clean)
+make prove-boundary  # list the sites outside SPARK's subset (expected to error)
 ```
 
 Run the demo by hand:

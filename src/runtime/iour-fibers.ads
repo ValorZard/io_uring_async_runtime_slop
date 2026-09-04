@@ -2,9 +2,9 @@
 --  Iour.Fibers -- stackful green threads, and the Await that suspends them.
 --
 --  A fiber is a slot in a fixed table plus a stack of its own.  Because it
---  has a real stack, suspending is just a matter of saving the machine
---  context and restoring another one, and Await can therefore be an
---  ordinary function call:
+--  has a real stack, suspending is just a matter of saving one machine
+--  context and restoring another, and Await can therefore be an ordinary
+--  function call:
 --
 --     Bytes := Net.Receive (Conn, Buffer);   --  suspends, resumes, returns
 --
@@ -21,23 +21,19 @@
 --  Stacks are allocated lazily and never returned to the OS while running.
 --  A fiber slot that has finished keeps its mapping for the next occupant,
 --  so accepting a connection after the first costs no system call.
+--
+--  All mutable state here is protected-object state, and there is one
+--  object per shard rather than one for the runtime, so the locks a shard
+--  takes on its own path are always uncontended.  Machine contexts are not
+--  Ada state at all: they live on the C side and are named by slot index,
+--  which is what leaves this package with nothing to race over and no
+--  address to hand out.
 ------------------------------------------------------------------------------
 
 package Iour.Fibers with
   SPARK_Mode     => On,
-  Abstract_State =>
-    ((Registry with Synchronous, External),
-
-     --  Scheduling is the lock-free half: atomic arrays holding which CPU
-     --  belongs to which shard, which fiber each shard is running, and
-     --  which shards are asleep.  Each is written by other tasks
-     --  (Async_Writers) but nothing outside the program reads them
-     --  (Async_Readers => False) and reading one has no side effect
-     --  (Effective_Reads => False) -- which is what lets Self and
-     --  Running_Fiber be functions rather than procedures with an out
-     --  parameter, and keeps them off the critical path of every Await.
-     (Scheduling with External => (Async_Writers => True))),
-  Initializes    => (Registry, Scheduling)
+  Abstract_State => (Registry with Synchronous, External),
+  Initializes    => Registry
 is
 
    type Fiber_State is
@@ -51,21 +47,39 @@ is
    --  Identity
    ---------------------------------------------------------------------------
 
-   --  Which shard the calling thread is.  Every shard is pinned to its own
-   --  core, so the CPU number the kernel reports is a sufficient and very
-   --  cheap identity -- no thread-local storage, no registration lookup.
-   --  Returns No_Shard when called from a thread that is not a shard, such
-   --  as the environment task.
+   --  Which shard the calling thread is.
+   --
+   --  Shard N is pinned to Ada CPU First_Shard_Cpu + N by a static aspect,
+   --  and Ada numbers CPUs from one where Linux numbers them from zero, so
+   --  the answer is arithmetic on the CPU the kernel reports.  No lookup
+   --  table, so nothing to keep in step and nothing for two shards to race
+   --  over.  Yields No_Shard on any thread that is not a shard, including
+   --  the environment task.
    function Self return Shard_Ref
-     with Volatile_Function, Global => (Input => Scheduling);
+     with Global => null;
+
+   --  Confirm a shard is running on the core its CPU aspect promised.
+   --  Purely a check: it records nothing.
+   procedure Verify_Cpu (Shard : Active_Shard; Ok : out Boolean)
+     with Global => null;
 
    --  The fiber currently on this shard's core, or No_Fiber between fibers.
-   function Running_Fiber (Shard : Shard_Id) return Fiber_Ref
-     with Volatile_Function, Global => (Input => Scheduling);
+   procedure Running_Fiber (Shard : Shard_Id; Fiber : out Fiber_Ref);
 
-   --  Claim a CPU as belonging to a shard.  Called once, by the shard.
-   procedure Claim_Cpu (Shard : Shard_Id; Ok : out Boolean)
-     with Global => (In_Out => Scheduling);
+   ---------------------------------------------------------------------------
+   --  Start-up
+   ---------------------------------------------------------------------------
+
+   --  Whether the machine-context slot table was reserved successfully.
+   --  The table is built during elaboration, which sequential elaboration
+   --  guarantees happens before any task is activated; this only reports
+   --  the outcome, so shards can refuse to start rather than prime a slot
+   --  that does not exist.
+   procedure Reserve_Contexts (Ok : out Boolean);
+
+   --  Slots the context table currently holds, for reporting.
+   procedure Context_Slots (Count : out Natural)
+     with Global => null;
 
    ---------------------------------------------------------------------------
    --  Creating work
@@ -100,9 +114,6 @@ is
    --  computation does not starve its shard.
    procedure Yield;
 
-   --  True when the caller is running on a fiber, and so may Await.
-   function In_Fiber return Boolean with Volatile_Function;
-
    ---------------------------------------------------------------------------
    --  Scheduler-facing operations
    ---------------------------------------------------------------------------
@@ -111,7 +122,7 @@ is
    --  Take a task future off the global queue and make its fiber runnable
    --  on this shard, allocating and priming a stack for it.
    procedure Adopt
-     (Shard   : Active_Shard;
+     (Shard   : Shard_Id;
       Handle  : Future_Id;
       Started : out Boolean);
 
@@ -134,23 +145,13 @@ is
    --  When the fiber belongs to another shard this goes out as a MSG_RING
    --  submission, which lands in that shard's completion stream and lifts
    --  it out of io_uring_enter without any shared lock.
-   procedure Wake
-     (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id);
+   procedure Wake (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id);
 
    --  Record that a shard is about to sleep, or has woken.  Spawn consults
    --  this to decide whom to nudge.
-   procedure Set_Idle (Shard : Shard_Id; Idle : Boolean)
-     with Global => (In_Out => Scheduling);
+   procedure Set_Idle (Shard : Shard_Id; Idle : Boolean);
 
    procedure Live_Fibers (Count : out Natural; High_Water : out Natural);
-
-   ---------------------------------------------------------------------------
-   --  Startup
-   ---------------------------------------------------------------------------
-
-   --  Verify that the Ada context record and the C one agree before any
-   --  fiber is created.
-   function Context_Layout_Matches return Boolean;
 
    --  Release every stack.  Called once, after the shards have stopped.
    procedure Release_All_Stacks;

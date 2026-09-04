@@ -20,6 +20,7 @@ RR NO_PROTECTED_TYPE_ALLOCATORS
 RR NO_REQUEUE_STATEMENTS
 RR NO_SELECT_STATEMENTS
 RR NO_SPECIFIC_TERMINATION_HANDLERS
+RV NO_STANDARD_STORAGE_POOLS
 RR NO_TASK_ALLOCATORS
 RR NO_TASK_ATTRIBUTES_PACKAGE
 RR NO_TASK_HIERARCHY
@@ -33,167 +34,183 @@ RR MAX_SELECT_ALTERNATIVES=0
 RR MAX_TASK_ENTRIES=0
 RR MAX_ASYNCHRONOUS_SELECT_NESTING=0
 
-U iour.ffi.net%b	iour-ffi-net.adb	eeef4b2b OO PK
+U iour.ffi.net%b	iour-ffi-net.adb	88bc01bb OO PK
 W iour%s		iour.ads		iour.ali
 W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
 W iour.ffi.sys%s	iour-ffi-sys.adb	iour-ffi-sys.ali
-Z system%s		system.ads		system.ali
+W system%s		system.ads		system.ali
 
-U iour.ffi.net%s	iour-ffi-net.ads	da2a337b EE OO PK
+U iour.ffi.net%s	iour-ffi-net.ads	cb1e0898 EE OO PK
 W interfaces%s		interfac.ads		interfac.ali
 W iour.ffi%s		iour-ffi.ads		iour-ffi.ali
-W system%s		system.ads		system.ali
 
 D interfac.ads		20260430083320 9111f9c1 interfaces%s
 D i-c.ads		20260430083320 dbdd3be7 interfaces.c%s
-D iour.ads		20260904005252 aa97d699 iour%s
+D iour.ads		20260904013609 2e2a61b2 iour%s
 D iour-ffi.ads		20260904005333 675c5442 iour.ffi%s
-D iour-ffi-net.ads	20260904010007 ced05765 iour.ffi.net%s
-D iour-ffi-net.adb	20260904010053 2ca7042f iour.ffi.net%b
-D iour-ffi-sys.ads	20260904005831 0c981861 iour.ffi.sys%s
+D iour-ffi-net.ads	20260904015349 3d53a51b iour.ffi.net%s
+D iour-ffi-net.adb	20260904015357 3fcd7ff7 iour.ffi.net%b
+D iour-ffi-sys.ads	20260904015326 689512ca iour.ffi.sys%s
 D system.ads		20260430083320 e2b7c99d system%s
 D s-parame.ads		20260430083320 a1aeab5c system.parameters%s
 D gnat.adc		20260904005252 00000000
 G a e
-G c Z s b [host_to_network iour__ffi__net 60 13 none]
-G c Z s b [network_to_host iour__ffi__net 61 13 none]
-G c Z s b [parse_ipv4 iour__ffi__net 71 14 none]
-G c Z s b [make_address iour__ffi__net 76 13 none]
-G c Z s s [c_socket iour__ffi__net 84 13 none]
-G c Z s s [c_bind iour__ffi__net 87 13 none]
-G c Z s s [c_listen iour__ffi__net 91 13 none]
-G c Z s s [c_setsockopt iour__ffi__net 94 13 none]
-G c Z s s [c_getsockname iour__ffi__net 103 13 none]
-G c Z s s [c_close iour__ffi__net 108 13 none]
-G c Z s b [tcp_socket iour__ffi__net 122 13 none]
-G c Z s b [tcp_listener iour__ffi__net 126 13 none]
-G c Z s b [local_port iour__ffi__net 134 13 none]
-G c Z s b [close iour__ffi__net 136 13 none]
-G r c none [tcp_socket iour__ffi__net 122 13 none] [last_error iour__ffi__sys 22 13 none]
-G r c none [tcp_listener iour__ffi__net 126 13 none] [last_error iour__ffi__sys 22 13 none]
-G r c none [local_port iour__ffi__net 134 13 none] [last_error iour__ffi__sys 22 13 none]
-G r c none [close iour__ffi__net 136 13 none] [last_error iour__ffi__sys 22 13 none]
+G c Z s b [host_to_network iour__ffi__net 59 13 none]
+G c Z s b [network_to_host iour__ffi__net 60 13 none]
+G c Z s b [parse_ipv4 iour__ffi__net 70 14 none]
+G c Z s b [make_address iour__ffi__net 75 13 none]
+G c Z s s [c_socket iour__ffi__net 83 13 none]
+G c Z s s [c_bind iour__ffi__net 90 13 none]
+G c Z s s [c_listen iour__ffi__net 96 13 none]
+G c Z s s [c_setsockopt iour__ffi__net 99 13 none]
+G c Z s s [c_getsockname iour__ffi__net 108 13 none]
+G c Z s s [c_close iour__ffi__net 115 13 none]
+G c Z s s [c_shutdown iour__ffi__net 122 13 none]
+G c Z s b [tcp_socket iour__ffi__net 137 13 none]
+G c Z s b [tcp_listener iour__ffi__net 141 13 none]
+G c Z s b [local_port iour__ffi__net 149 13 none]
+G c Z s b [close iour__ffi__net 151 13 none]
+G c Z s b [shutdown iour__ffi__net 156 13 none]
+G r c none [tcp_socket iour__ffi__net 137 13 none] [last_error iour__ffi__sys 27 13 none]
+G r c none [tcp_listener iour__ffi__net 141 13 none] [last_error iour__ffi__sys 27 13 none]
+G r c none [local_port iour__ffi__net 149 13 none] [last_error iour__ffi__sys 27 13 none]
+G r c none [close iour__ffi__net 151 13 none] [last_error iour__ffi__sys 27 13 none]
+G r c none [shutdown iour__ffi__net 156 13 none] [last_error iour__ffi__sys 27 13 none]
 X 1 interfac.ads
 47K9*Interfaces 247e15 5|15w6 15r22
-84M9*Unsigned_16 5|37r16 38r16 60r38 60r58 61r38 61r58 76r54 128r19 6|26r38
-. 26r58 31r38 31r58 115r54 169r19
-92M9*Unsigned_32 5|39r16 67r27 73r21 76r34 127r19 6|40r21 46r16 78r49 95r43
-. 115r34 168r19
-95M9*Unsigned_64 5|40r16
-129V13*Shift_Left{84M9} 6|29s12
-134V13*Shift_Right{84M9} 6|29s50
-154V13*Shift_Left{92M9} 6|78s23 95s17 101s9 102s9
-159V13*Shift_Right{92M9} 6|103s9 104s9
+84M9*Unsigned_16 5|36r16 37r16 59r38 59r58 60r38 60r58 75r54 143r19 6|27r38
+. 27r58 32r38 32r58 116r54 173r19
+92M9*Unsigned_32 5|38r16 66r27 72r21 75r34 142r19 6|41r21 47r16 79r49 96r43
+. 116r34 172r19
+95M9*Unsigned_64 5|39r16
+129V13*Shift_Left{84M9} 6|30s12
+134V13*Shift_Right{84M9} 6|30s50
+154V13*Shift_Left{92M9} 6|79s23 96s17 102s9 103s9
+159V13*Shift_Right{92M9} 6|104s9 105s9
 X 2 i-c.ads
 62I9*int<integer>
 71M9*unsigned
 X 3 iour.ads
-35K9*Iour 159e9 5|18r9 138r5 6|1r6 3r14 235r5
-105I9*Descriptor<integer> 5|134r30 136r25 6|211r30 227r25
-121I12*Io_Result{integer} 5|122r31 130r44 134r49 136r44 6|11r43 15r17 19r32
-. 153r31 160r14 171r44 176r17 204r14 211r49 220r14 227r44
+35K9*Iour 172e9 5|17r9 158r5 6|2r6 4r14 249r5
+111I9*Descriptor<integer> 5|149r30 151r25 156r28 6|216r30 233r25 241r28
+127I12*Io_Result{integer} 5|137r31 145r44 149r49 151r44 156r62 6|12r43 16r17
+. 20r32 157r31 164r14 175r44 181r17 209r14 216r49 226r14 233r44 241r62 244r18
+144N4*E_Invalid 6|244r29
 X 4 iour-ffi.ads
-23K14*Ffi 3|35k9 4|33e13 5|18r14 138r10 6|1r11 3r19 235r10
-25I12*C_Int{2|62I9} 5|84r48 84r62 87r26 88r13 91r28 91r45 91r59 95r15 96r15
-. 97r15 99r34 104r12 104r71 108r27 108r41 6|5r13 11r29 12r13 127r29 127r50
-. 128r34 129r26 130r65 143r34 144r26 154r21 173r25 175r16 197r31 214r25 215r24
-. 232r30
-27M12*C_Unsigned{2|71M9} 5|87r62 99r15 6|130r53 189r43 213r24 213r38
+23K14*Ffi 3|35k9 4|33e13 5|17r14 158r10 6|2r11 4r19 249r10
+25I12*C_Int{2|62I9} 5|83r48 83r62 91r14 93r33 96r28 96r45 96r59 100r15 101r15
+. 102r15 103r31 104r34 109r14 111r40 115r27 115r41 122r30 122r43 122r57 6|6r13
+. 12r29 13r13 128r29 128r50 129r34 132r42 133r26 134r59 147r34 148r26 158r21
+. 177r25 180r16 202r31 221r26 221r50 238r30 246r33 246r45
+27M12*C_Unsigned{2|71M9} 5|93r14 104r15 111r21 6|134r47 194r36 218r25 218r39
+. 220r33
 X 5 iour-ffi-net.ads
-18K18*Net 4|23k14 5|138l14 138e17 6|3b23 235l14 235t17
-24N4*Af_Inet 78r48 6|118r17 154r40 173r44
-25N4*Sock_Stream 6|154r49 173r53
-26N4*Sol_Socket 6|184r21 186r24
-27N4*So_Reuseaddr 6|184r33
-28N4*So_Reuseport 6|186r36
-29N4*Ipproto_Tcp 6|159r21
-30N4*Tcp_Nodelay 6|159r34
-36R9*Sockaddr_In 42e6 44r8 52r7 77r13 6|116r13 174r33 189r55 212r24 213r50
-37m7*Family{1|84M9} 45r7 78r39 6|118m7
-38m7*Port{1|84M9} 46r7 6|119m7 220r47
-39m7*Addr{1|92M9} 47r7 6|120m7
-40m7*Pad{1|95M9} 48r7 6|121m7
-60V13*Host_To_Network{1|84M9} 60>30 6|26b13 32s7 119s17
-60m30 Value{1|84M9} 6|28r12 29r24 29r63
-61V13*Network_To_Host{1|84M9} 61>30 6|31b13 220s25
-61m30 Value{1|84M9} 6|32r24
-67m4*Any_Address{1|92M9} 6|48r18
-71U14*Parse_Ipv4 72>7 73<7 74<7 6|38b14 109l8 109t18
-72a7 Text{string} 6|39b7 53r10 57r16 61r13 66r51 73r16
-73m7 Address{1|92M9} 6|40b7 48m7 100m7 107m10
-74b7 Valid{boolean} 6|41b7 49m7 63m16 69m16 75m16 84m13 91m10
-76V13*Make_Address{36R9} 76>27 76>47 78r19 6|115b13 174s48
-76m27 Host{1|92M9} 6|120r17
-76m47 Port{1|84M9} 6|119r34
-84V13*C_Socket{4|25I12} 84>23 84>31 84>37 6|154s30 173s34
-84i23 Domain{4|25I12}
-84i31 Kind{4|25I12}
-84i37 Protocol{4|25I12}
-87V13*C_Bind{4|25I12} 87>21 87>33 87>56 6|189s17
-87i21 Fd{4|25I12}
-87m33 Addr{8|67M9}
-87m56 Len{4|27M12}
-91V13*C_Listen{4|25I12} 91>23 91>35 6|197s17
-91i23 Fd{4|25I12}
-91i35 Backlog{4|25I12}
-94V13*C_Setsockopt{4|25I12} 95>7 96>7 97>7 98>7 99>7 6|130s9
-95i7 Fd{4|25I12}
-96i7 Level{4|25I12}
-97i7 Name{4|25I12}
-98m7 Value{8|67M9}
-99m7 Len{4|27M12}
-103V13*C_Getsockname{4|25I12} 104>7 104>19 104>42 6|215s9
-104i7 Fd{4|25I12}
-104m19 Addr{8|67M9}
-104m42 Len{8|67M9}
-108V13*C_Close{4|25I12} 108>22 6|144s35 232s21
-108i22 Fd{4|25I12}
-122V13*Tcp_Socket{3|121I12} 6|153b13 161l8 161t18
-126V13*Tcp_Listener{3|121I12} 127>7 128>7 129>7 130>7 6|167b13 205l8 205t20
-127m7 Host{1|92M9} 6|168b7 174r62
-128m7 Port{1|84M9} 6|169b7 174r68
-129i7 Backlog{natural} 6|170b7 197r38
-130b7 Reuseport{boolean} 6|171b7 185r10
-134V13*Local_Port{3|121I12} 134>25 6|211b13 221l8 221t18
-134i25 Fd{3|105I9} 6|211b25 215r31
-136V13*Close{3|121I12} 136>20 6|227b13 233l8 233t13
-136i20 Fd{3|105I9} 6|227b20 229r10 232r37
+17K18*Net 4|23k14 5|158l14 158e17 6|4b23 249l14 249t17
+23N4*Af_Inet 36r31 77r48 6|119r17 158r40 177r44
+24N4*Sock_Stream 6|158r49 177r53
+25N4*Sol_Socket 6|189r21 191r24
+26N4*So_Reuseaddr 6|189r33
+27N4*So_Reuseport 6|191r36
+28N4*Ipproto_Tcp 6|163r21
+29N4*Tcp_Nodelay 6|163r34
+35R9*Sockaddr_In 41e6 43r8 51r7 76r13 92r30 110r21 6|117r13 178r33 179r41
+. 194r48 217r25 218r51 219r33
+36m7*Family{1|84M9} 44r7 77r39 6|119m7
+37m7*Port{1|84M9} 45r7 6|120m7 226r47
+38m7*Addr{1|92M9} 46r7 6|121m7
+39m7*Pad{1|95M9} 47r7 6|122m7
+59V13*Host_To_Network{1|84M9} 59>30 6|27b13 33s7 120s17
+59m30 Value{1|84M9} 6|29r12 30r24 30r63
+60V13*Network_To_Host{1|84M9} 60>30 6|32b13 226s25
+60m30 Value{1|84M9} 6|33r24
+66m4*Any_Address{1|92M9} 6|49r18
+70U14*Parse_Ipv4 71>7 72<7 73<7 6|39b14 110l8 110t18
+71a7 Text{string} 6|40b7 54r10 58r16 62r13 67r51 74r16
+72m7 Address{1|92M9} 6|41b7 49m7 101m7 108m10
+73b7 Valid{boolean} 6|42b7 50m7 64m16 70m16 76m16 85m13 92m10
+75V13*Make_Address{35R9} 75>27 75>47 77r19 6|116b13 178s48
+75m27 Host{1|92M9} 6|121r17
+75m47 Port{1|84M9} 6|120r34
+83V13*C_Socket{4|25I12} 83>23 83>31 83>37 6|158s30 177s34
+83i23 Domain{4|25I12}
+83i31 Kind{4|25I12}
+83i37 Protocol{4|25I12}
+90V13*C_Bind{4|25I12} 91>7 92^7 93>7 6|194s17
+91i7 Fd{4|25I12}
+92p7 Addr(35R9)
+93m7 Len{4|27M12}
+96V13*C_Listen{4|25I12} 96>23 96>35 6|202s17
+96i23 Fd{4|25I12}
+96i35 Backlog{4|25I12}
+99V13*C_Setsockopt{4|25I12} 100>7 101>7 102>7 103^7 104>7 6|134s9
+100i7 Fd{4|25I12}
+101i7 Level{4|25I12}
+102i7 Name{4|25I12}
+103p7 Value(4|25I12)
+104m7 Len{4|27M12}
+108V13*C_Getsockname{4|25I12} 109>7 110^7 111^7 6|221s35
+109i7 Fd{4|25I12}
+110p7 Addr(35R9)
+111p7 Len(4|27M12)
+115V13*C_Close{4|25I12} 115>22 6|148s35 238s21
+115i22 Fd{4|25I12}
+118N4*Shut_Read
+119N4*Shut_Write
+120N4*Shut_Both
+122V13*C_Shutdown{4|25I12} 122>25 122>37 6|246s21
+122i25 Fd{4|25I12}
+122i37 How{4|25I12}
+137V13*Tcp_Socket{3|127I12} 6|157b13 165l8 165t18
+141V13*Tcp_Listener{3|127I12} 142>7 143>7 144>7 145>7 6|171b13 210l8 210t20
+142m7 Host{1|92M9} 6|172b7 178r62
+143m7 Port{1|84M9} 6|173b7 178r68
+144i7 Backlog{natural} 6|174b7 202r38
+145b7 Reuseport{boolean} 6|175b7 190r10
+149V13*Local_Port{3|127I12} 149>25 6|216b13 227l8 227t18
+149i25 Fd{3|111I9} 6|216b25 221r57
+151V13*Close{3|127I12} 151>20 6|233b13 239l8 239t13
+151i20 Fd{3|111I9} 6|233b20 235r10 238r37
+156V13*Shutdown{3|127I12} 156>23 156>40 6|241b13 247l8 247t16
+156i23 Fd{3|111I9} 6|241b23 243r10 246r40
+156i40 How{natural} 6|241b40 246r52
 X 6 iour-ffi-net.adb
-11V13 Adapt{3|121I12} 11b13 11>20 20l8 20t13 157s17 179s17 192s21 199s21
-. 218s17 232s14
-11i20 Result{4|25I12} 14r10 15r28
-12i7 Err{4|25I12} 17m7 19r18 19r43
-43i7 Octet{natural} 66m13 66r22 68r16 78r62 80m13 95r56
-44i7 Count{natural} 59r20 74r40 79m13 79r22 90r10
-45i7 Digits_Seen{natural} 62r16 67m13 67r28 74r16 81m13 90r29
-46m7 Result{1|92M9} 78m13 78r35 95m7 95r29 101r21 102r21 103r22 104r22 107r21
-57i11 I{integer} 61r19 66r57 73r22
-127U14 Set_Flag 127b14 127>24 127>36 127>43 136l8 136t16 159s7 184s7 186s10
-127i24 Fd{4|25I12} 130r23
-127i36 Level{4|25I12} 130r27
-127i43 Name{4|25I12} 130r34
-128i7 One{4|25I12} 130r40
-129i7 Ignored{4|25I12} 135r28
-143U14 Discard_Close 143b14 143>29 147l8 147t21 193s10 200s10
-143i29 Fd{4|25I12} 144r44
-144i7 Ignored{4|25I12} 146r28
-154i7 Fd{4|25I12} 156r10 157r24 159r17 160r25
-173i7 Fd{4|25I12} 178r10 179r24 184r17 186r20 189r25 193r25 197r27 200r25
-. 204r25
-174r7 Addr{5|36R9} 189r29
-175i7 Status{4|25I12} 189m7 190r10 192r28 197m7 198r10 199r28
-176i7 Failure{3|121I12} 192m10 194r17 199m10 201r17
-212r7 Addr{5|36R9} 215m36 215r36 220r42
-213m7 Len{4|27M12} 215m50 215r50
-214i7 Status{4|25I12} 217r10 218r24
+12V13 Adapt{3|127I12} 12b13 12>20 21l8 21t13 161s17 184s17 197s21 204s21
+. 224s17 238s14 246s14
+12i20 Result{4|25I12} 15r10 16r28
+13i7 Err{4|25I12} 18m7 20r18 20r43
+44i7 Octet{natural} 67m13 67r22 69r16 79r62 81m13 96r56
+45i7 Count{natural} 60r20 75r40 80m13 80r22 91r10
+46i7 Digits_Seen{natural} 63r16 68m13 68r28 75r16 82m13 91r29
+47m7 Result{1|92M9} 79m13 79r35 96m7 96r29 102r21 103r21 104r22 105r22 108r21
+58i11 I{integer} 62r19 67r57 74r22
+128U14 Set_Flag 128b14 128>24 128>36 128>43 140l8 140t16 163s7 189s7 191s10
+128i24 Fd{4|25I12} 134r23
+128i36 Level{4|25I12} 134r27
+128i43 Name{4|25I12} 134r34
+129i7 One{4|25I12} 132r51
+132p7 Value(4|25I12) 134r40
+133i7 Ignored{4|25I12} 139r28
+147U14 Discard_Close 147b14 147>29 151l8 151t21 198s10 205s10
+147i29 Fd{4|25I12} 148r44
+148i7 Ignored{4|25I12} 150r28
+158i7 Fd{4|25I12} 160r10 161r24 163r17 164r25
+177i7 Fd{4|25I12} 183r10 184r24 189r17 191r20 194r25 198r25 202r27 205r25
+. 209r25
+178r7 Addr{5|35R9} 179r56
+179p7 Where(5|35R9) 194r29
+180i7 Status{4|25I12} 194m7 195r10 197r28 202m7 203r10 204r28
+181i7 Failure{3|127I12} 197m10 199r17 204m10 206r17
+217r7 Addr{5|35R9} 219m48 219r48 226r42
+218m7 Len{4|27M12} 220m47 220r47
+219p7 Where(5|35R9) 221r62
+220p7 Room(4|27M12) 221r69
+221i7 Status{4|25I12} 223r10 224r24
 X 7 iour-ffi-sys.ads
-9K18*Sys 6|1w15 17r14 7|80e17
-22V13*Last_Error{4|25I12} 6|17s18
+9K18*Sys 6|2w15 18r14 7|116e17
+27V13*Last_Error{4|25I12} 6|18s18
 X 8 system.ads
-37K9*System 5|16w6 87r40 98r15 104r26 104r48 6|27r10 27r22 27r48 106r10 106r22
-. 106r48 8|155e11
-67M9*Address 5|87r47 98r22 104r33 104r55
-81V14*"="{boolean} 6|27r18 106r18
-91n23*High_Order_First{91E9} 6|27r55 106r55
-92e4*Default_Bit_Order{91E9} 6|27r29 106r29
+37K9*System 6|1w6 28r10 28r22 28r48 107r10 107r22 107r48 8|155e11
+81V14*"="{boolean} 6|28r18 107r18
+91n23*High_Order_First{91E9} 6|28r55 107r55
+92e4*Default_Bit_Order{91E9} 6|28r29 107r29
 

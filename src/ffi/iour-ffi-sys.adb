@@ -9,12 +9,14 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    function Last_Error return C_Int is
-      --  Overlay an integer on the address glibc hands back.  This is the
-      --  documented way to reach errno from a non-C caller.
-      Cell : aliased C_Int
-        with Import, Volatile, Address => Errno_Location;
+      Cell : constant Errno_Cell := Errno_Location;
    begin
-      return Cell;
+      --  glibc always returns a valid pointer here; the guard is so this
+      --  function stays total rather than because it can happen.
+      if Cell = null then
+         return 0;
+      end if;
+      return Cell.all;
    end Last_Error;
 
    ---------------------------------------------------------------------------
@@ -33,18 +35,34 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
       use type C_Int;
       Limit  : aliased Rlimit;
       Status : C_Int;
+
+      --  Each borrow is confined to its own block.  SPARK forbids reading
+      --  or writing an object while something still points at it, and the
+      --  code below has to inspect Limit between calls.
+      procedure Read is
+         Cell : constant access Rlimit := Limit'Access;
+      begin
+         Status := Getrlimit (Rlimit_Nofile, Cell);
+      end Read;
+
+      procedure Write is
+         Cell : constant access constant Rlimit := Limit'Access;
+      begin
+         Status := Setrlimit (Rlimit_Nofile, Cell);
+      end Write;
+
    begin
-      Status := Getrlimit (Rlimit_Nofile, Limit'Address);
+      Read;
       if Status /= 0 then
          return 0;
       end if;
 
       if Limit.Soft < Limit.Hard then
          Limit.Soft := Limit.Hard;
-         Status := Setrlimit (Rlimit_Nofile, Limit'Address);
+         Write;
          if Status /= 0 then
             --  Refused: carry on with whatever the soft limit already was.
-            Status := Getrlimit (Rlimit_Nofile, Limit'Address);
+            Read;
             if Status /= 0 then
                return 0;
             end if;
@@ -62,11 +80,9 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Ignore_Sigpipe is
-      --  SIG_IGN is the constant 1 reinterpreted as a handler address.
-      Ignored : constant System.Address :=
-        Signal (Sig_Pipe, To_Address (1));
    begin
-      pragma Unreferenced (Ignored);
+      --  SIG_IGN is the constant 1 reinterpreted as a handler address.
+      Set_Signal (Sig_Pipe, To_Address (1));
    end Ignore_Sigpipe;
 
 end Iour.Ffi.Sys;

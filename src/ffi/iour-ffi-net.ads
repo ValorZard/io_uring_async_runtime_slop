@@ -13,7 +13,6 @@
 ------------------------------------------------------------------------------
 
 with Interfaces; use Interfaces;
-with System;
 
 package Iour.Ffi.Net with SPARK_Mode => On is
 
@@ -84,8 +83,14 @@ package Iour.Ffi.Net with SPARK_Mode => On is
    function C_Socket (Domain, Kind, Protocol : C_Int) return C_Int
      with Import, Convention => C, External_Name => "socket", Global => null;
 
-   function C_Bind (Fd : C_Int; Addr : System.Address; Len : C_Unsigned)
-     return C_Int
+   --  Pointer parameters are expressed as Ada access types rather than
+   --  addresses.  GNAT passes an access value as a plain pointer, so the C
+   --  side is unchanged, and no caller has to take the address of an Ada
+   --  object -- which is what keeps this package inside SPARK.
+   function C_Bind
+     (Fd   : C_Int;
+      Addr : access constant Sockaddr_In;
+      Len  : C_Unsigned) return C_Int
      with Import, Convention => C, External_Name => "bind", Global => null;
 
    function C_Listen (Fd : C_Int; Backlog : C_Int) return C_Int
@@ -95,18 +100,36 @@ package Iour.Ffi.Net with SPARK_Mode => On is
      (Fd    : C_Int;
       Level : C_Int;
       Name  : C_Int;
-      Value : System.Address;
+      Value : access constant C_Int;
       Len   : C_Unsigned) return C_Int
      with Import, Convention => C, External_Name => "setsockopt",
           Global => null;
 
    function C_Getsockname
-     (Fd : C_Int; Addr : System.Address; Len : System.Address) return C_Int
+     (Fd   : C_Int;
+      Addr : access Sockaddr_In;
+      Len  : access C_Unsigned) return C_Int
      with Import, Convention => C, External_Name => "getsockname",
           Global => null;
 
    function C_Close (Fd : C_Int) return C_Int
      with Import, Convention => C, External_Name => "close", Global => null;
+
+   --  The same two calls imported as procedures, for the places that want
+   --  the effect and not the result.  Declaring the effect on Kernel is
+   --  what tells SPARK these calls do something.
+   procedure Set_Option
+     (Fd    : C_Int;
+      Level : C_Int;
+      Name  : C_Int;
+      Value : access constant C_Int;
+      Len   : C_Unsigned)
+     with Import, Convention => C, External_Name => "setsockopt",
+          Global => (In_Out => Kernel), Always_Terminates;
+
+   procedure Close_Quietly (Fd : C_Int)
+     with Import, Convention => C, External_Name => "close",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    Shut_Read  : constant := 0;
    Shut_Write : constant := 1;
@@ -125,9 +148,15 @@ package Iour.Ffi.Net with SPARK_Mode => On is
    --  "negated errno in the result": at or above zero is the value, below
    --  zero is the negated errno.
 
+   --  Side_Effects (Ada 2022 / SPARK) is what lets a function both return
+   --  a value and be honest about changing kernel state.  The price is that
+   --  such a function may only be called as the right-hand side of an
+   --  assignment, which is how every caller already uses these.
+
    --  A TCP socket with TCP_NODELAY set.  Latency beats coalescing for the
    --  request/response traffic this runtime is built for.
-   function Tcp_Socket return Io_Result;
+   function Tcp_Socket return Io_Result
+     with Side_Effects, Global => (In_Out => Kernel);
 
    --  A bound, listening socket.  SO_REUSEADDR always; SO_REUSEPORT when
    --  asked, which lets several shards hold a listener on one port.
@@ -135,7 +164,8 @@ package Iour.Ffi.Net with SPARK_Mode => On is
      (Host      : Unsigned_32;
       Port      : Unsigned_16;
       Backlog   : Natural := 4096;
-      Reuseport : Boolean := False) return Io_Result;
+      Reuseport : Boolean := False) return Io_Result
+     with Side_Effects, Global => (In_Out => Kernel);
 
    --  The port a socket ended up bound to, which matters when binding to
    --  port 0 and letting the kernel choose.

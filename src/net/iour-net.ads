@@ -33,6 +33,8 @@
 --  negated errno.
 ------------------------------------------------------------------------------
 
+with Iour.Ffi;
+
 package Iour.Net with SPARK_Mode => On is
 
    subtype Socket is Descriptor;
@@ -44,12 +46,17 @@ package Iour.Net with SPARK_Mode => On is
    --  Bind and listen.  Port 0 lets the kernel choose; ask Port_Of for the
    --  result.  Reuseport lets several listeners share one port, which is
    --  how a shared-nothing server gives every core its own accept queue.
+   --  Side_Effects: these create kernel objects, and SPARK requires a
+   --  function that does so to say it.  Call them only as the right-hand
+   --  side of an assignment.
    function Listen
      (Port      : Natural;
       Backlog   : Natural := 4096;
-      Reuseport : Boolean := False) return Io_Result;
+      Reuseport : Boolean := False) return Io_Result
+     with Side_Effects, Global => (In_Out => Ffi.Kernel);
 
-   function New_Socket return Io_Result;
+   function New_Socket return Io_Result
+     with Side_Effects, Global => (In_Out => Ffi.Kernel);
 
    function Port_Of (S : Socket) return Io_Result;
 

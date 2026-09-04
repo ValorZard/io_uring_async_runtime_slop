@@ -28,6 +28,7 @@ procedure Smoke with SPARK_Mode => On, CPU => 1 is
    Spread     : String (1 .. 240);
    Spread_End : Natural;
    Live, Peak : Natural;
+   Slots      : Natural;
    Ok         : Boolean;
 begin
    Shards.Activate;
@@ -35,8 +36,8 @@ begin
 
    Put_Line ("smoke: starting" & Shard_Count'Image & " shards");
    Scheduler.Wait_Until_Ready;
-   Put_Line ("smoke: rings up, context layout matches = "
-             & Fibers.Context_Layout_Matches'Image);
+   Fibers.Context_Slots (Slots);
+   Put_Line ("smoke: rings up," & Slots'Image & " machine-context slots");
 
    Fibers.Spawn (Smoke_Workload.Root'Access, 0, Handle);
    if Handle = No_Future then
@@ -56,14 +57,16 @@ begin
 
    for S in Active_Shard loop
       declare
-         Completions, Resumes, Adopted, Sleeps, Left : Natural;
+         Completions, Resumes, Adopted, Sleeps, Left, Bad : Natural;
       begin
-         Scheduler.Report (S, Completions, Resumes, Adopted, Sleeps, Left);
+         Scheduler.Report
+           (S, Completions, Resumes, Adopted, Sleeps, Left, Bad);
          Put_Line ("  shard" & S'Image
                    & ": completions" & Completions'Image
                    & ", resumes" & Resumes'Image
                    & ", adopted" & Adopted'Image
-                   & ", sleeps" & Sleeps'Image);
+                   & ", sleeps" & Sleeps'Image
+                   & (if Bad > 0 then ", FLUSH ERRORS" & Bad'Image else ""));
       end;
    end loop;
 

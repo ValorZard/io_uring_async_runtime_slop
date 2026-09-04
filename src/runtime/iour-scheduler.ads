@@ -38,7 +38,8 @@ package Iour.Scheduler with SPARK_Mode => On is
       Fibers_Run   : out Natural;
       Adopted      : out Natural;
       Sleeps       : out Natural;
-      Abandoned    : out Natural);
+      Abandoned    : out Natural;
+      Flush_Errors : out Natural);
 
    --  True once every shard's ring is up, so the environment task knows the
    --  runtime is ready to accept work.

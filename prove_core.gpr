@@ -1,13 +1,29 @@
---  The subset of the runtime that never has to hand an object's address to
---  the kernel, and so falls entirely inside SPARK's analysable subset.
+--  Everything that falls inside SPARK's analysable subset.
+--
+--  Excluded: the bodies of Iour.Reactor, Iour.Net and Iour.Time.  Those are
+--  the three places that must hand an object's address to the kernel, which
+--  SPARK does not permit.  Their specs are analysed, so every caller is
+--  checked against them.
 project Prove_Core is
    for Languages use ("Ada");
-   for Source_Dirs use ("src", "src/runtime", "examples");
+   for Source_Dirs use ("src", "src/ffi", "src/runtime", "src/net", "examples");
    for Source_Files use
      ("iour.ads",
-      "iour-futures.ads", "iour-futures.adb",
-      "iour-run_queue.ads", "iour-run_queue.adb",
-      "echo_protocol.ads", "echo_protocol.adb");
+      "iour-ffi.ads",
+      "iour-ffi-fiber.ads",
+      "iour-ffi-sys.ads",       "iour-ffi-sys.adb",
+      "iour-ffi-net.ads",       "iour-ffi-net.adb",
+      "iour-ffi-uring.ads",
+      "iour-futures.ads",       "iour-futures.adb",
+      "iour-run_queue.ads",     "iour-run_queue.adb",
+      "iour-fibers.ads",        "iour-fibers.adb",
+      "iour-scheduler.ads",     "iour-scheduler.adb",
+      "iour-shards.ads",        "iour-shards.adb",
+      "iour-async.ads",         "iour-async.adb",
+      "iour-reactor.ads",
+      "iour-net.ads",
+      "iour-time.ads",
+      "echo_protocol.ads",      "echo_protocol.adb");
    for Object_Dir use "obj/prove_core";
    for Create_Missing_Dirs use "True";
    package Builder is

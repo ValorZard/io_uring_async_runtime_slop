@@ -19,6 +19,18 @@ package body Iour.Scheduler with SPARK_Mode => On is
 
    type Counter_Array is array (Shard_Id) of Natural;
 
+   --  Statistics only.  A shard runs for as long as the process does, so an
+   --  unguarded counter really would wrap; saturating keeps the arithmetic
+   --  total without pretending the number stays exact for ever.
+   procedure Bump (Counter : in out Natural; By : Natural := 1) is
+   begin
+      if Natural'Last - Counter >= By then
+         Counter := Counter + By;
+      else
+         Counter := Natural'Last;
+      end if;
+   end Bump;
+
    ---------------------------------------------------------------------------
    --  Control -- startup barrier, shutdown flag and tallies
    ---------------------------------------------------------------------------
@@ -40,7 +52,8 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Fibers_Run  : Natural;
          Adopted     : Natural;
          Slept       : Natural;
-         Left_Over   : Natural);
+         Left_Over   : Natural;
+         Flush_Fail  : Natural);
 
       procedure Read
         (Shard       : Shard_Id;
@@ -48,7 +61,8 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Fibers_Run  : out Natural;
          Adopted     : out Natural;
          Slept       : out Natural;
-         Left_Over   : out Natural);
+         Left_Over   : out Natural;
+         Flush_Fail  : out Natural);
 
    private
       Rings_Up  : Natural := 0;
@@ -60,8 +74,14 @@ package body Iour.Scheduler with SPARK_Mode => On is
       N_Adopted     : Counter_Array := [others => 0];
       N_Sleeps      : Counter_Array := [others => 0];
       N_Abandoned   : Counter_Array := [others => 0];
+      N_Flush_Bad   : Counter_Array := [others => 0];
    end Control;
 
+   --  Barrier-only entries: the body is "null" because the wait is the
+   --  point, and SPARK reports a null statement as having no effect.
+   pragma Warnings
+     (GNATprove, Off, "statement has no effect",
+      Reason => "Barrier-only entry: the wait is the point.");
    protected body Control is
 
       procedure Ring_Up is
@@ -103,13 +123,15 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Fibers_Run  : Natural;
          Adopted     : Natural;
          Slept       : Natural;
-         Left_Over   : Natural) is
+         Left_Over   : Natural;
+         Flush_Fail  : Natural) is
       begin
          N_Completions (Shard) := Completions;
          N_Fibers (Shard)      := Fibers_Run;
          N_Adopted (Shard)     := Adopted;
          N_Sleeps (Shard)      := Slept;
          N_Abandoned (Shard)   := Left_Over;
+         N_Flush_Bad (Shard)   := Flush_Fail;
       end Tally;
 
       procedure Read
@@ -118,16 +140,19 @@ package body Iour.Scheduler with SPARK_Mode => On is
          Fibers_Run  : out Natural;
          Adopted     : out Natural;
          Slept       : out Natural;
-         Left_Over   : out Natural) is
+         Left_Over   : out Natural;
+         Flush_Fail  : out Natural) is
       begin
          Completions := N_Completions (Shard);
          Fibers_Run  := N_Fibers (Shard);
          Adopted     := N_Adopted (Shard);
          Slept       := N_Sleeps (Shard);
          Left_Over   := N_Abandoned (Shard);
+         Flush_Fail  := N_Flush_Bad (Shard);
       end Read;
 
    end Control;
+   pragma Warnings (GNATprove, On, "statement has no effect");
 
    ---------------------------------------------------------------------------
    --  Dispatching one completion
@@ -190,8 +215,9 @@ package body Iour.Scheduler with SPARK_Mode => On is
    procedure Run (Shard : Shard_Id) is
       Batch   : Reactor.Completion_Batch;
       Count   : Natural;
-      Status  : Io_Result;
-      Pinned  : Boolean;
+      Status      : Io_Result;
+      Pinned      : Boolean;
+      Contexts_Ok : Boolean;
 
       Progress : Boolean;
       Useful   : Boolean;
@@ -200,8 +226,13 @@ package body Iour.Scheduler with SPARK_Mode => On is
       Started  : Boolean;
       Ready    : Natural;
       Queued   : Natural;
-      Outstanding : Natural := 0;
-      Stop_Requested : Boolean := False;
+      Outstanding    : Natural;
+      Stop_Requested : Boolean;
+
+      --  A flush that fails leaves submissions queued and the shard looping
+      --  on them.  Counting it is what makes a broken ring visible instead
+      --  of a silent hot loop.
+      N_Flush_Errors : Natural := 0;
       Resumed  : Natural;
 
       N_Completions : Natural := 0;
@@ -224,13 +255,17 @@ package body Iour.Scheduler with SPARK_Mode => On is
          return;
       end if;
 
-      --  Establish this thread's identity before anything can Await.  The
-      --  CPU it reports is fixed for the life of the task, because the
-      --  static CPU aspect pinned it there.
-      Fibers.Claim_Cpu (Shard, Pinned);
+      --  The machine-context table has to exist before any fiber can be
+      --  primed.  Idempotent, so every shard calling it is fine; the first
+      --  one through does the work.
+      Fibers.Reserve_Contexts (Contexts_Ok);
+
+      --  Confirm this task really is on the core its static CPU aspect
+      --  promised, because shard identity is derived from that.
+      Fibers.Verify_Cpu (Shard, Pinned);
 
       Reactor.Open (Shard, Status);
-      if Failed (Status) or else not Pinned then
+      if Failed (Status) or else not Pinned or else not Contexts_Ok then
          --  A shard with no ring cannot take part.  Count it as finished so
          --  the environment task is not left waiting on it forever.
          Control.Ring_Up;
@@ -248,7 +283,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
          loop
             Reactor.Harvest (Shard, Batch, Count);
             exit when Count = 0;
-            N_Completions := N_Completions + Count;
+            Bump (N_Completions, Count);
             for I in 0 .. Count - 1 loop
                Dispatch (Shard, Batch (I), Useful);
                Progress := Progress or Useful;
@@ -262,7 +297,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
             Fibers.Adopt (Shard, Item, Started);
             if Started then
                Progress := True;
-               N_Adopted := N_Adopted + 1;
+               Bump (N_Adopted);
             end if;
          end loop;
 
@@ -277,8 +312,8 @@ package body Iour.Scheduler with SPARK_Mode => On is
             Fibers.After_Resume (Shard, Fiber);
 
             Progress := True;
-            Resumed := Resumed + 1;
-            N_Fibers := N_Fibers + 1;
+            Bump (Resumed);
+            Bump (N_Fibers);
          end loop;
 
          --  4. Submit, and sleep if there is nothing else to do ---------
@@ -287,6 +322,9 @@ package body Iour.Scheduler with SPARK_Mode => On is
             --  without waiting, then go round again.
             Idle_Streak := 0;
             Reactor.Flush (Shard, 0, Status);
+            if Failed (Status) then
+               Bump (N_Flush_Errors);
+            end if;
          else
             --  Announce the sleep BEFORE the final check.  A sibling that
             --  publishes work after this point is guaranteed to see us
@@ -313,8 +351,11 @@ package body Iour.Scheduler with SPARK_Mode => On is
                if Idle_Streak <= Reactor.Max_Backoff then
                   Idle_Streak := Idle_Streak + 1;
                end if;
-               N_Sleeps := N_Sleeps + 1;
+               Bump (N_Sleeps);
                Reactor.Flush (Shard, 1, Status);
+               if Failed (Status) then
+                  Bump (N_Flush_Errors);
+               end if;
             end if;
 
             Fibers.Set_Idle (Shard, False);
@@ -333,13 +374,16 @@ package body Iour.Scheduler with SPARK_Mode => On is
                --  Still waiting on the kernel.  Keep draining, but not for
                --  ever: give up after a bounded number of idle passes so a
                --  never-completing operation cannot wedge shutdown.
-               Draining := Draining + 1;
+               Bump (Draining);
                if Draining >= Drain_Passes then
                   Abandoned := Outstanding;
                   exit;
                end if;
                Reactor.Arm_Idle_Timer (Shard);
                Reactor.Flush (Shard, 1, Status);
+               if Failed (Status) then
+                  Bump (N_Flush_Errors);
+               end if;
             else
                Draining := 0;
             end if;
@@ -347,7 +391,7 @@ package body Iour.Scheduler with SPARK_Mode => On is
       end loop;
 
       Control.Tally (Shard, N_Completions, N_Fibers, N_Adopted, N_Sleeps,
-                     Abandoned);
+                     Abandoned, N_Flush_Errors);
       Reactor.Shut (Shard);
       Control.Shard_Finished;
    end Run;
@@ -375,10 +419,12 @@ package body Iour.Scheduler with SPARK_Mode => On is
       Fibers_Run   : out Natural;
       Adopted      : out Natural;
       Sleeps       : out Natural;
-      Abandoned    : out Natural) is
+      Abandoned    : out Natural;
+      Flush_Errors : out Natural) is
    begin
       Control.Read
-        (Shard, Completions, Fibers_Run, Adopted, Sleeps, Abandoned);
+        (Shard, Completions, Fibers_Run, Adopted, Sleeps, Abandoned,
+         Flush_Errors);
    end Report;
 
 end Iour.Scheduler;

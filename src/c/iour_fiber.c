@@ -46,11 +46,11 @@ void iour_fiber_entry_c(long arg)
 
 __asm__(
     ".text\n"
-    ".globl iour_ctx_switch\n"
-    ".hidden iour_ctx_switch\n"
-    ".type iour_ctx_switch,@function\n"
+    ".globl iour_ctx_swap_raw\n"
+    ".hidden iour_ctx_swap_raw\n"
+    ".type iour_ctx_swap_raw,@function\n"
     ".align 16\n"
-    "iour_ctx_switch:\n"
+    "iour_ctx_swap_raw:\n"
     "    pushq %rbp\n"
     "    pushq %rbx\n"
     "    pushq %r12\n"
@@ -66,7 +66,7 @@ __asm__(
     "    popq  %rbx\n"
     "    popq  %rbp\n"
     "    ret\n"
-    ".size iour_ctx_switch,.-iour_ctx_switch\n"
+    ".size iour_ctx_swap_raw,.-iour_ctx_swap_raw\n"
 
     ".globl iour_fiber_trampoline\n"
     ".hidden iour_fiber_trampoline\n"
@@ -98,11 +98,11 @@ extern void iour_fiber_trampoline(void);
 
 __asm__(
     ".text\n"
-    ".globl iour_ctx_switch\n"
-    ".hidden iour_ctx_switch\n"
-    ".type iour_ctx_switch,%function\n"
+    ".globl iour_ctx_swap_raw\n"
+    ".hidden iour_ctx_swap_raw\n"
+    ".type iour_ctx_swap_raw,%function\n"
     ".align 4\n"
-    "iour_ctx_switch:\n"
+    "iour_ctx_swap_raw:\n"
     "    sub  sp, sp, #160\n"
     "    stp  x19, x20, [sp, #0]\n"
     "    stp  x21, x22, [sp, #16]\n"
@@ -130,7 +130,7 @@ __asm__(
     "    ldp  x29, x30, [sp, #144]\n"
     "    add  sp, sp, #160\n"
     "    ret\n"
-    ".size iour_ctx_switch,.-iour_ctx_switch\n"
+    ".size iour_ctx_swap_raw,.-iour_ctx_swap_raw\n"
 
     ".globl iour_fiber_trampoline\n"
     ".hidden iour_fiber_trampoline\n"
@@ -150,6 +150,47 @@ extern void iour_fiber_trampoline(void);
 #error "iour_fiber.c: unsupported architecture (need x86-64 or aarch64)"
 #endif
 
+/*  The internal register-level swap, defined in assembly above. */
+extern void iour_ctx_swap_raw(iour_ctx_t *from, iour_ctx_t *to);
+
+/*  ---- the slot table ----------------------------------------------------
+ *  Ada names contexts by index and never holds one.  Allocated once, from
+ *  inside an Ada protected action, before any fiber exists.
+ */
+static iour_ctx_t *ctx_slots;
+static long ctx_slot_count;
+
+int iour_ctx_reserve(long slots)
+{
+    if (slots <= 0)
+        return -1;
+    if (ctx_slots != NULL)
+        return (slots <= ctx_slot_count) ? 0 : -1;
+
+    ctx_slots = calloc((size_t)slots, sizeof *ctx_slots);
+    if (ctx_slots == NULL)
+        return -1;
+    ctx_slot_count = slots;
+    return 0;
+}
+
+long iour_ctx_slots(void) { return ctx_slot_count; }
+
+void iour_ctx_switch(long from, long to)
+{
+    /* Refuse rather than corrupt.  The Ada side never generates an
+     * out-of-range or self-directed slot; if one ever appears, stalling
+     * that fiber is recoverable and scribbling on the heap is not. */
+    if (ctx_slots == NULL || from == to)
+        return;
+    if (from < 0 || from >= ctx_slot_count)
+        return;
+    if (to < 0 || to >= ctx_slot_count)
+        return;
+
+    iour_ctx_swap_raw(&ctx_slots[from], &ctx_slots[to]);
+}
+
 static size_t page_size(void)
 {
     long p = sysconf(_SC_PAGESIZE);
@@ -157,7 +198,6 @@ static size_t page_size(void)
 }
 
 size_t iour_ctx_guard_size(void) { return page_size(); }
-size_t iour_ctx_size(void) { return sizeof(iour_ctx_t); }
 
 void *iour_stack_alloc(size_t size)
 {
@@ -193,14 +233,19 @@ void iour_stack_free(void *base, size_t size)
     munmap(base, usable + page);
 }
 
-void iour_ctx_prime(iour_ctx_t *ctx, void *base, size_t size, long arg)
+void iour_ctx_prime(long slot, void *base, size_t size, long arg)
 {
     const size_t page = page_size();
+    iour_ctx_t *ctx;
     size_t usable;
     unsigned char *top, *sp;
 
-    if (ctx == NULL || base == NULL)
+    if (ctx_slots == NULL || base == NULL)
         return;
+    if (slot < 0 || slot >= ctx_slot_count)
+        return;
+    ctx = &ctx_slots[slot];
+
     usable = (size + page - 1) & ~(page - 1);
 
     /* Usable region starts one guard page above the mapping base. */
