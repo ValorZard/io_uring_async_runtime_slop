@@ -22,6 +22,18 @@ package body Echo_Server_App with SPARK_Mode => On is
    --  keeping them.  Set before any shard runs, read by acceptors after.
    Distribute : Boolean := False with Atomic;
 
+   --  Where the next dealt connection goes.  Shared by every acceptor
+   --  fiber, and a plain variable on purpose: it is read and written only
+   --  when Distribute is set, and Distribute is set only in the
+   --  one-listener configuration, where every acceptor fiber lives on the
+   --  same shard.  Fibers on one shard run one at a time and switch only
+   --  at an explicit suspension point, so this increment cannot be
+   --  interleaved with another's.  Giving each acceptor its own counter
+   --  instead would be no simpler and would deal badly: thirty-two
+   --  counters all starting at the first core would send thirty-two
+   --  connections there before any went to the second.
+   Next_Core : Active_Shard := Active_Shard'First;
+
    protected Stats
      with Priority => Runtime_Priority
    is
@@ -209,15 +221,36 @@ package body Echo_Server_App with SPARK_Mode => On is
    --  Acceptor
    ---------------------------------------------------------------------------
 
+   --  Choose the core for the next dealt connection: plain round robin
+   --  over every core, the acceptors' own included.
+   --
+   --  Skipping the acceptors' core is the obvious-looking refinement and
+   --  it does not pay.  The argument for it is real -- a pending accept is
+   --  an operation the kernel completes on the completion port, and a
+   --  shard with any of those outstanding cannot take the cheap sleep, so
+   --  it bridges the ring's completion event onto the port and pays two
+   --  extra thread wakeups on every completion it then receives -- but the
+   --  arithmetic goes the other way.  Skipping it moves a quarter of the
+   --  connections onto the remaining cores rather than sparing them
+   --  anything, and giving up a quarter of the serving capacity costs more
+   --  than the bridge does.  Measured with it and without, on this
+   --  machine: 500 connections 139.0k against 131.9k round trips a second,
+   --  2000 connections 211.7k against 201.4k, one connection no
+   --  distinguishable difference at all.  It stays round robin.
+   --
+   --  Counted in the base type and wrapped rather than compared against
+   --  Active_Shard'Last and incremented: with Shard_Count of one the
+   --  increment is statically outside the subtype, and the compiler
+   --  rejects it even on the branch that never runs.
+   procedure Advance_Core is
+   begin
+      Next_Core := Active_Shard ((Integer (Next_Core) + 1) mod Shard_Count);
+   end Advance_Core;
+
    procedure Acceptor (Arg : Fiber_Argument) is
       Listener : constant Net.Socket := Net.Socket (Arg);
       Incoming : Io_Result;
       Started  : Boolean;
-
-      --  Where the next connection goes when this is the only acceptor.
-      --  Plain round robin: the work per connection is much the same, so
-      --  anything cleverer would only be a guess with a counter behind it.
-      Next : Active_Shard := Active_Shard'First;
    begin
       loop
          exit when Stats.Accept_Limit_Reached;
@@ -238,14 +271,9 @@ package body Echo_Server_App with SPARK_Mode => On is
                --  needs no future, which matters for a fiber that nothing
                --  will ever await.
                Fibers.Spawn_On
-                 (Next, Serve'Access, Fiber_Argument (Incoming), Started);
-
-               --  Counted in the base type and wrapped, rather than
-               --  compared against Active_Shard'Last and incremented: with
-               --  Shard_Count of one the increment is statically outside
-               --  the subtype, and the compiler rejects it even on the
-               --  branch that never runs.
-               Next := Active_Shard ((Integer (Next) + 1) mod Shard_Count);
+                 (Next_Core, Serve'Access, Fiber_Argument (Incoming),
+                  Started);
+               Advance_Core;
             else
                --  Run the handler on this core.  The socket was accepted
                --  here, so its reads and writes will go through this

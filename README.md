@@ -1,9 +1,9 @@
 # A ring-based async runtime for Ada 2022 / SPARK
 
-A thread-per-core asynchronous runtime built on the operating system's
-submission ring — `io_uring` on Linux, **IoRing** on Windows 11 — written
-entirely in Ada 2022 under the **Jorvik** tasking profile and proved with
-SPARK.
+A thread-per-core asynchronous runtime built on the operating system's own
+completion machinery — `io_uring` on Linux, **I/O completion ports** on
+Windows — written entirely in Ada 2022 under the **Jorvik** tasking profile
+and proved with SPARK.
 
 One runtime, two backends, and the seam between them is a single package
 spec. Everything above `Iour.Reactor` — the scheduler, the fibers, the
@@ -37,12 +37,22 @@ core is serving other connections.
 
 Measured on this machine, 4 shards, loopback, `make demo`:
 
-| | Linux (io_uring) | Windows (IoRing) |
+| | Linux (io_uring) | Windows (IOCP) |
 |---|---|---|
 | Simultaneous connections | 2000 | 2000 |
 | Operating system threads | 4 | 4 |
 | Frames exchanged | 20000 | 20000 |
 | Errors | 0 | 0 |
+
+And against the Tokio and Go equivalents in `bench/`, on Windows — one
+connection, thousands of sequential round trips, idle server:
+
+| | Ada | Tokio | Go |
+|---|---|---|---|
+| µs per round trip | 22.0 | 21.5 | 23.2 |
+| server µs of CPU per round trip, 1 core | 8.9 | 11.9 | 8.8 |
+
+`make bench` runs the whole matrix; `bench/results/` has the CSVs.
 
 Run it yourself with `make demo`, which shows a small traced run first so you
 can watch the scheduler work, then the full 2000-connection run for the
@@ -77,12 +87,13 @@ figure. The same command on either system.
   rather than declaring an array of them. That is what makes the
   thread-to-core map checkable at compile time.
 
-* **Rings.** Each shard owns one ring outright. No other task submits to it or
-  reaps from it. On Linux that is exactly the promise
-  `IORING_SETUP_SINGLE_ISSUER` wants; on Windows it is what makes an IoRing
-  submission queue, which is not thread-safe, safe to build without a lock. It
-  is the same invariant either way, and it is why submission needs no
-  cross-core synchronisation.
+* **Rings and ports.** Each shard owns its completion machinery outright: one
+  `io_uring` on Linux, one completion port on Windows. No other task submits
+  to it or reaps from it. On Linux that is exactly the promise
+  `IORING_SETUP_SINGLE_ISSUER` wants; on Windows it is what lets a port be
+  created with a concurrency of one and every per-shard structure behind it be
+  a plain variable. It is the same invariant either way, and it is why
+  submission needs no cross-core synchronisation.
 
 * **Fibers.** Work runs on stackful green threads. Because a fiber has a real
   stack, suspending is a matter of saving one machine context and restoring
@@ -197,64 +208,90 @@ plain pointer, so libc sees what it expects, and no Ada code has to take the
 address of an Ada object: SPARK can follow an access value where it cannot
 follow an address.
 
-### Windows: IoRing, and the one rule that shapes everything
+### Windows: a completion port, and the ring that used to be here
 
-Windows 11 has a real submission ring. `CreateIoRing` gives a queue the
-process fills without a system call per operation and `SubmitIoRing` hands the
-batch over in one, which is the same bargain io_uring offers. What it does not
-have is opcodes: `IORING_OP_READ`, `IORING_OP_WRITE`, register, cancel and
-flush, and that is the list. There is no accept, no connect, no timeout, and
-nothing resembling `MSG_RING`.
+Every shard owns one I/O completion port. Every operation the backend performs
+either is an overlapped Win32 call whose completion the kernel delivers to
+that port, or is finished by the runtime itself and announced on the port with
+`PostQueuedCompletionStatus`. So a shard has one place to look and one place
+to sleep, and `GetQueuedCompletionStatusEx` is doing three jobs in a single
+system call: the wait, the batch collection, and — because a sibling's post
+lands in the same queue — the cross-core wakeup.
 
-So each shard runs two things that behave as one:
+* **Reads and writes** are `WSARecv` and `WSASend` with an `OVERLAPPED`.
+* **Accept** is `AcceptEx`, which needs the listener on the port.
+* **Connect** is a blocking `connect(2)` on a thread-pool thread.
+* **Timeouts** are thread-pool timers, which post their result to the port.
+* **`Op_Write` to a standard stream is synchronous.** Overlapped I/O needs a
+  handle opened for asynchronous access and a console handle has no overlapped
+  mode to ask for, so the write happens in place and the completion is posted.
+  `Iour.Text` then behaves the same on both systems.
 
-* **The IoRing carries the data plane.** Every byte a connection sends or
-  receives is a `BuildIoRingReadFile` or `BuildIoRingWriteFile` on the socket
-  handle, batched and submitted exactly as on Linux. This is not what the
-  documentation advertises — IoRing is presented as a file API — but a Winsock
-  handle opened `WSA_FLAG_OVERLAPPED` is a file handle to `\Device\Afd`, and
-  the ring reads and writes it.
+A socket is associated with a port by whichever shard issues the first
+operation on it — which is the shard that will serve that connection for its
+whole life, not necessarily the one that accepted it. A per-shard cache keeps
+that to one `CreateIoCompletionPort` per socket rather than one per read.
 
-* **A completion port carries the rest** — accept, connect, timeouts — and is
-  the single place the shard sleeps. The ring's completion event is bridged
-  onto it by one registered wait per shard, so a shard blocked in
-  `GetQueuedCompletionStatusEx` is woken equally by a ring completion, a port
-  completion, or a sibling's `PostQueuedCompletionStatus`. One loop, one wait,
-  one wakeup path.
+#### Why there is no IoRing here any more
 
-And then the rule that shapes the whole design:
+Windows 11 has a real submission ring, and this backend used to use it:
+`CreateIoRing` gives a queue the process fills without a system call per
+operation and `SubmitIoRing` hands the batch over in one, which is the same
+bargain io_uring offers. It carried the data plane while the port carried
+accept, connect and timeouts, with the ring's completion event bridged onto
+the port by a registered wait so that a shard still had one place to sleep.
+
+It was removed, and the reason is not the one the Linux side would suggest.
+
+The ring's opcodes are read, write, register-files, register-buffers, cancel
+and flush — that is the whole list. No accept, no connect, no timeout, nothing
+like `MSG_RING`. So the completion port had to exist anyway, and the ring's
+only real saving was one system call per *batch* of submissions. Against that
+it cost a wakeup: a ring completion signals an event that a shard waits on,
+where a port completion is handed to a waiting thread by the I/O manager
+directly. It also cost a rule —
 
 > **A socket that has been associated with an I/O completion port cannot be
 > read or written through an IoRing.** The builders refuse it with
 > `E_INVALIDARG`.
 
-That is not documented anywhere; it was established by experiment, and it is
-worth knowing before changing any of this. Everything else follows from it:
+— which is documented nowhere, was established by experiment, and shaped the
+whole backend around keeping data sockets off the port. It is why connect was
+handed to a thread pool rather than spelled `ConnectEx`: `ConnectEx` needs the
+socket on a port, and that socket would then have spent the rest of its life
+off the ring for the sake of one call at the start of it.
 
-* The **listener** goes on the port, because `AcceptEx` needs it there, and it
-  is the one socket that never carries data. Sockets it produces are *not* put
-  on the port, and stay readable through the ring — which is also something
-  the documentation does not say either way, and which had to be measured.
+Both paths were built from one binary and run alternately, rep by rep, so that
+machine drift hit both equally — absolute throughput here moves by a third
+between batches an hour apart, so only paired readings inside one batch mean
+anything.
 
-* **Connect is a blocking `connect(2)` handed to a thread pool**, not
-  `ConnectEx`. `ConnectEx` would need the socket on the port, and that socket
-  would then spend the rest of its life off the ring for the sake of one call
-  at the start of it. A thread pool callback costs a thread for the length of
-  a TCP handshake and nothing afterwards.
+| | runs the port won | typical |
+|---|---|---|
+| 1 connection, sequential | 33 of 36 | 32.2k against 41.8k rt/s, and 40% less CPU |
+| 100 connections × 1000 | 3 of 5 | 243k against 266k rt/s |
+| 500 connections × 200 | 6 of 12 | 141k against 139k rt/s |
+| 2000 connections × 100 | 10 of 16 | 229k against 223k rt/s |
 
-* **`Op_Write` to a standard stream is synchronous.** IoRing takes only
-  handles opened for asynchronous access, and a console handle has no
-  overlapped mode to ask for. The write happens in place and the completion is
-  posted, so `Iour.Text` behaves the same on both systems.
+A tie once there is enough concurrency to batch, and a clear loss for the ring
+at one connection, where there is no batch to amortise and only the wakeup is
+left. Nothing in the table justified keeping a second data plane, an
+undocumented rule, a thread-pool bridge and a set of entry points resolved by
+`GetProcAddress`, so none of them are here.
 
-Where `CreateIoRing` is missing altogether — Windows 10, which has the
-completion port but not the ring — the backend falls back to overlapped
-`WSARecv` and `WSASend` on the port, and *then* data sockets are associated
-with it. `Iour.Reactor.Ring_Carries_Sockets` reports which path a shard got,
-and the echo server prints it in its banner:
+Removing it was not itself a speedup — measured, the port path is the same
+before and after the deletion, 4 paired wins to 2 at 2000 connections and 4 to
+4 at one. What it bought is what was around it: a socket may now go on a port
+freely, so the accept path has no rule to keep; a shard has one sleep rather
+than two and needs no thread-pool bridge between them; and nothing has to be
+told by an event that a wakeup has been posted, because the post *is* the
+wakeup.
+
+`Iour.Reactor.Ring_Carries_Sockets` still exists and now answers False on
+Windows, which is what the echo server prints in its banner:
 
 ```
-echo_server: Windows IoRing, carrying connections, one listener, ...
+echo_server: Windows IOCP, no ring, one listener, ...
 ```
 
 Two other differences are visible to a program rather than hidden:
@@ -266,17 +303,12 @@ Two other differences are visible to a program rather than hidden:
   so, and the echo server puts a single acceptor on one core and deals the
   connections it accepts round the others.
 
-* **There are no registered files.** IoRing does have
-  `IORING_OP_REGISTER_FILES`, but what fills a table like that is accept — and
-  the ring has no accept. `Has_Fixed_Files` is therefore False on Windows and
-  every descriptor is an ordinary one, which is a path the runtime already had
-  for kernels that refuse the registration.
-
-The IoRing entry points are resolved with `GetProcAddress` rather than linked.
-Two reasons: a binary that imported them would refuse to start on Windows 10
-instead of falling back, and the GNAT toolchain ships a Kernel32 import
-library that predates them, so there is nothing to link against even where
-they exist.
+* **There are no registered files.** They are an io_uring idea: a table the
+  kernel indexes instead of resolving a descriptor, filled by accept and
+  referenced by everything after it. Nothing on a completion port takes an
+  index in place of a handle, so `Has_Fixed_Files` is False on Windows and
+  every descriptor is an ordinary one — which is a path the runtime already
+  had for kernels that refuse the registration.
 
 ### The context switch
 
@@ -332,6 +364,11 @@ trusted base by design:
 | `Iour.Ffi.Identity` | one thread-local: which shard this thread is | per-thread state SPARK has no model for |
 | `Iour.Ffi.Win32`, `Iour.Ffi.Sys`, `Iour.Ffi.Net`, `Iour.Reactor` (Windows) | the whole Windows backend | overlays records on completion-port pointers, and is re-entered from thread-pool threads |
 
+Only the Windows reactor has a reason of the same kind as the Linux four; the
+other three are a gap rather than a boundary, and removing the IoRing cut the
+work needed to close it down to two lazily-resolved entry points. `CLAUDE.md`
+has the detail.
+
 The Linux backend is written in SPARK throughout, and `make prove` is run
 there. The Windows reactor is a trusted body in the same sense the context
 switch is: its spec is in SPARK with full contracts, and every client above it
@@ -344,13 +381,14 @@ hardware or kernel boundary: hoist each operation the language cannot express
 into a subprogram with a SPARK declaration and an Off body, then verify
 everything above it. On the Linux side each Off body is a few lines per
 subprogram; the Windows reactor is larger, and that is the honest cost of a
-backend whose ring cannot express accept, connect or a timeout.
+backend that has to assemble accept, connect and a timeout out of three
+different Win32 mechanisms.
 
 **`make prove`** — full proof of the Linux build, every analysable body
 included:
 
 ```
-Success: all checks proved (961 checks).
+Success: all checks proved (962 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
 Data Dependencies            111        109          .           2          .
@@ -561,8 +599,8 @@ src/os/linux/
   iour-reactor.adb           the io_uring submission/completion protocol
   iour-ffi-sys.adb, iour-ffi-net.adb
 src/os/windows/
-  iour-ffi-win32.ads/.adb    Kernel32, Winsock, and IoRing by GetProcAddress
-  iour-reactor.adb           IoRing for data, a completion port for the rest
+  iour-ffi-win32.ads/.adb    Kernel32, Winsock, the thread pool
+  iour-reactor.adb           one completion port per shard
   iour-ffi-sys.adb, iour-ffi-net.adb
 src/arch/x86_64-sysv/
   iour-ffi-fiber.adb         the context switch: inline Asm, SPARK_Mode Off
@@ -577,8 +615,8 @@ tests/abi_check.c            kernel-ABI conformance, checked at compile time
 
 A GNAT toolchain with SPARK, from Alire; `alr exec` puts it on `PATH`. On
 Linux, `liburing` (2.5 here) as well. On Windows, nothing beyond the
-toolchain: Winsock is linked and the IoRing entry points are resolved at run
-time, so no Windows SDK is needed to build.
+toolchain: everything the backend calls is in Kernel32 or Winsock and is old
+enough to link against directly, so no Windows SDK is needed to build.
 
 The same commands on either system. The project file reads the `OS`
 environment variable, which Windows sets for every process and no Unix does;

@@ -16,9 +16,9 @@
 --  operations to bookkeeping and does the memory access outside the lock --
 --  which is sound, since each ring has exactly one owner.
 --
---  Linux only.  The Windows backend has nothing corresponding: its IoRing
---  submission and completion queues are reached through builder and pop
---  calls, not through memory the process maps for itself.
+--  Linux only.  The Windows backend has nothing corresponding: a
+--  completion port is reached through calls, not through memory the
+--  process maps for itself, so there is no shared ring word to order.
 ------------------------------------------------------------------------------
 
 with System;

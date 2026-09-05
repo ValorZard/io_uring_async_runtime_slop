@@ -2,13 +2,15 @@
 --  Iour.Ffi.Net body -- Windows.
 --
 --  Winsock, with one rule running through it: every socket is created
---  overlapped, and no socket that will carry data is ever handed to a
---  completion port.  The second half of that is not a style preference.  A
---  socket associated with a port is refused by CreateIoRing's read and
---  write builders with E_INVALIDARG, so associating one would silently
---  move that connection off the ring for the rest of its life.  The
---  listener is the single exception, and it carries no data: see the
---  Windows Iour.Reactor body, which owns that decision.
+--  overlapped.  Overlapped is what a completion port requires, and this is
+--  the only place sockets are made, so it is the only place that rule has
+--  to hold.
+--
+--  There used to be a second half to that rule -- no socket that will
+--  carry data is ever handed to a completion port -- because an IoRing
+--  refuses a socket that has been on one.  The ring is gone and so is the
+--  rule; associating sockets with a port is now what the reactor does with
+--  all of them.
 ------------------------------------------------------------------------------
 
 with Iour.Ffi.Inet;
@@ -27,7 +29,12 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
    --  Winsock start-up
    ---------------------------------------------------------------------------
 
-   Started : Boolean := False;
+   --  Atomic, and guarded on the result rather than on having started:
+   --  every shard calls this the moment its task activates.  WSAStartup is
+   --  reference counted and idempotent, so two shards racing simply start
+   --  Winsock twice, which is what the second WSACleanup we never make
+   --  would have balanced.
+   Started : Boolean := False with Atomic;
 
    procedure Initialize is
       Data   : aliased Win.Wsa_Data;
@@ -222,17 +229,53 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
       end if;
    end Close_Quietly;
 
+   --  The spec promises that shutting down a listening socket is what makes
+   --  a pending accept give up.  On Linux shutdown(2) does exactly that.
+   --  On Windows it does not: shutdown is about a connection's two
+   --  directions, a listening socket has none, and the call comes straight
+   --  back with WSAENOTCONN having cancelled nothing.  A server that asked
+   --  its acceptors to stop then waited for accepts that would never
+   --  complete -- measured here as a sixty-four second shutdown, one
+   --  drain pass per second until the scheduler gave up on them.
+   --
+   --  CancelIoEx is the call that does mean it.  Reaching for it only when
+   --  shutdown has already refused keeps a connected socket's behaviour
+   --  exactly as it was: there, shutdown succeeds and this never runs.
+   --  Closing the listener would work too and is what a Windows server
+   --  usually does, but it is not what the caller asked for, and a handle
+   --  closed underneath a pending AcceptEx is a harder thing to reason
+   --  about than one whose I/O has been cancelled.
    function Shutdown (Fd : Descriptor; How : Natural) return Io_Result is
       Which : constant C_Int :=
         (case How is
             when Shut_Read  => Win.Sd_Receive,
             when Shut_Write => Win.Sd_Send,
             when others     => Win.Sd_Both);
+      Status  : C_Int;
+      Failure : Win.Dword;
+      Ignored : Win.Bool;
    begin
       if Fd < 0 then
          return -E_Invalid;
       end if;
-      return Adapt (Win.C_Shutdown (Win.Handle (Fd), Which));
+
+      Status := Win.C_Shutdown (Win.Handle (Fd), Which);
+      if Status = 0 then
+         return 0;
+      end if;
+
+      Failure := Win.Dword (Win.Wsa_Get_Last_Error);
+      if Failure = Win.Wsaenotconn or else Failure = Win.Wsaeinval then
+         --  A listening socket, or one that never connected.  Cancel what
+         --  is outstanding on it instead; the pending AcceptEx then
+         --  complete with ERROR_OPERATION_ABORTED, which the acceptors
+         --  read as "stop", exactly as they read a shutdown listener on
+         --  Linux.
+         Ignored := Win.Cancel_Io (Win.Handle (Fd), System.Null_Address);
+         return 0;
+      end if;
+
+      return Win.As_Failure (Failure);
    end Shutdown;
 
 end Iour.Ffi.Net;

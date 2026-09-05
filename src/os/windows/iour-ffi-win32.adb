@@ -1,11 +1,14 @@
 ------------------------------------------------------------------------------
 --  Iour.Ffi.Win32 body.
 --
---  Three things happen here that a plain Import cannot express: translating
---  Windows' two error vocabularies into the one the runtime uses, fetching
---  the Winsock extension functions through WSAIoctl, and resolving the
---  IoRing entry points by name so that a Windows 10 machine gets a runtime
---  that works rather than one that will not load.
+--  Two things happen here that a plain Import cannot express: translating
+--  Windows' two error vocabularies into the one the runtime uses, and
+--  fetching the Winsock extension functions through WSAIoctl.
+--
+--  There was a third -- resolving the IoRing entry points by name, so that
+--  a binary built on Windows 11 would still start on Windows 10 -- and it
+--  went with the ring.  Everything imported here now is old enough to link
+--  against directly.
 ------------------------------------------------------------------------------
 
 with Ada.Unchecked_Conversion;
@@ -58,9 +61,10 @@ package body Iour.Ffi.Win32 with SPARK_Mode => Off is
    --  HRESULT translation
    ---------------------------------------------------------------------------
 
-   --  An IoRing completion reports an HRESULT.  Two shapes turn up: a
-   --  Win32 code wrapped as 0x8007xxxx, and an NTSTATUS the I/O manager
-   --  produced, which arrives with the whole status in the low bits.
+   --  Two shapes of failure code turn up on the completion path: a Win32
+   --  code wrapped as an HRESULT, 0x8007xxxx, and an NTSTATUS the I/O
+   --  manager produced, which arrives with the whole status in the low
+   --  bits.  An OVERLAPPED's Internal field is the second kind.
 
    Facility_Win32 : constant Unsigned_32 := 16#8007_0000#;
 
@@ -70,10 +74,6 @@ package body Iour.Ffi.Win32 with SPARK_Mode => Off is
    Status_Connection_Aborted : constant Unsigned_32 := 16#C000_0241#;
    Status_Pipe_Broken        : constant Unsigned_32 := 16#C000_014B#;
    Status_Cancelled          : constant Unsigned_32 := 16#C000_0120#;
-   Status_Invalid_Handle     : constant Unsigned_32 := 16#C000_0008#;
-   Status_Invalid_Parameter  : constant Unsigned_32 := 16#C000_000D#;
-   Status_Not_Supported      : constant Unsigned_32 := 16#C000_00BB#;
-   Status_Invalid_Device_Req : constant Unsigned_32 := 16#C000_0010#;
 
    function Raw (Code : Hresult) return Unsigned_32 is
      (Unsigned_32'Mod (Code));
@@ -106,19 +106,6 @@ package body Iour.Ffi.Win32 with SPARK_Mode => Off is
 
    function Status_Failure (Status : Unsigned_64) return Io_Result is
      (Hresult_Failure (From_Bits (Unsigned_32 (Status and 16#FFFF_FFFF#))));
-
-   function Means_Unsupported (Code : Hresult) return Boolean is
-      Bits : constant Unsigned_32 := Raw (Code);
-   begin
-      --  E_INVALIDARG (0x80070057), E_HANDLE (0x80070006), E_NOTIMPL
-      --  (0x80004001), and the NTSTATUS forms of the same three.  A socket
-      --  that has been associated with a completion port answers with the
-      --  first of these, which is the case this predicate exists for.
-      return Bits in 16#8007_0057# | 16#8007_0006# | 16#8007_0001#
-                   | 16#8007_0032# | 16#8000_4001#
-                   | Status_Invalid_Handle | Status_Invalid_Parameter
-                   | Status_Not_Supported | Status_Invalid_Device_Req;
-   end Means_Unsupported;
 
    ---------------------------------------------------------------------------
    --  Winsock extension functions
@@ -156,9 +143,18 @@ package body Iour.Ffi.Win32 with SPARK_Mode => Off is
       Completion     : System.Address) return C_Int
      with Import, Convention => Stdcall, External_Name => "WSAIoctl";
 
-   Accept_Ex_Ptr  : Accept_Ex_Fn := null;
-   Connect_Ex_Ptr : Connect_Ex_Fn := null;
-   Extensions_Tried : Boolean := False;
+   --  Atomic because the shards resolve these concurrently.  Every shard
+   --  runs Reactor.Open the instant its task activates, and there is no
+   --  barrier before that point: the tasks are library-level, so they are
+   --  running before the environment task's first statement.
+   Accept_Ex_Ptr  : Accept_Ex_Fn := null with Atomic;
+   Connect_Ex_Ptr : Connect_Ex_Fn := null with Atomic;
+
+   --  Set only when the lookup has been tried and genuinely failed, so
+   --  that a machine without the extensions does not repeat it on every
+   --  accept.  It is NOT an "in progress" flag, and the distinction is the
+   --  whole point: see the guard in Load_Socket_Extensions below.
+   Extensions_Missing : Boolean := False with Atomic;
 
    procedure Load_Socket_Extensions (S : Handle) is
       Returned : aliased Dword := 0;
@@ -173,10 +169,28 @@ package body Iour.Ffi.Win32 with SPARK_Mode => Off is
       Connect_Slot : aliased System.Address := System.Null_Address;
       Which        : aliased Guid;
    begin
-      if Extensions_Tried or else S = Invalid_Socket then
+      --  Guard on the RESULT, never on having started.
+      --
+      --  This is the shape a once-only initialiser has to have here, and it
+      --  is not the shape one usually gets written in.  Every shard reaches
+      --  this at once -- the shard tasks are library-level, so they are
+      --  running before the environment task's first statement -- and a
+      --  flag set on entry would let whichever arrived second conclude
+      --  "already done" while both pointers were still null.  Start_Accept
+      --  would then refuse every accept on that shard.  The identical bug
+      --  in the IoRing loader that used to live here cost roughly one
+      --  start-up in six: the losing shard silently ran a different data
+      --  plane from its siblings.
+      --
+      --  Guarding on the result costs a second ioctl on the rare occasion
+      --  two callers overlap.  Both compute the same pointer, so the racing
+      --  writes store the same value.
+      if S = Invalid_Socket
+        or else Extensions_Missing
+        or else (Accept_Ex_Ptr /= null and then Connect_Ex_Ptr /= null)
+      then
          return;
       end if;
-      Extensions_Tried := True;
 
       Which := Id_Accept_Ex;
       Status := Wsa_Ioctl
@@ -197,116 +211,14 @@ package body Iour.Ffi.Win32 with SPARK_Mode => Off is
       if Status = 0 then
          Connect_Ex_Ptr := To_Connect (Connect_Slot);
       end if;
+
+      --  Nothing came back, and nothing will.  Stop asking.
+      if Accept_Ex_Ptr = null and then Connect_Ex_Ptr = null then
+         Extensions_Missing := True;
+      end if;
    end Load_Socket_Extensions;
 
    function Accept_Ex return Accept_Ex_Fn is (Accept_Ex_Ptr);
    function Connect_Ex return Connect_Ex_Fn is (Connect_Ex_Ptr);
-
-   ---------------------------------------------------------------------------
-   --  IoRing
-   ---------------------------------------------------------------------------
-
-   function Load_Library (Name : Interfaces.C.char_array) return Handle
-     with Import, Convention => Stdcall, External_Name => "LoadLibraryA";
-
-   function Get_Proc_Address
-     (Module : Handle; Name : Interfaces.C.char_array) return System.Address
-     with Import, Convention => Stdcall, External_Name => "GetProcAddress";
-
-   Loaded    : Boolean := False;
-   Available : Boolean := False;
-   Version   : Unsigned_32 := 0;
-   Features  : Unsigned_32 := 0;
-
-   Create_Ptr : Create_Io_Ring_Fn := null;
-   Close_Ptr  : Close_Io_Ring_Fn := null;
-   Submit_Ptr : Submit_Io_Ring_Fn := null;
-   Pop_Ptr    : Pop_Completion_Fn := null;
-   Event_Ptr  : Set_Completion_Event_Fn := null;
-   Read_Ptr   : Build_Read_Fn := null;
-   Write_Ptr  : Build_Write_Fn := null;
-
-   procedure Load_Ioring is
-      use Interfaces.C;
-
-      function To_Create is new Ada.Unchecked_Conversion
-        (System.Address, Create_Io_Ring_Fn);
-      function To_Close is new Ada.Unchecked_Conversion
-        (System.Address, Close_Io_Ring_Fn);
-      function To_Submit is new Ada.Unchecked_Conversion
-        (System.Address, Submit_Io_Ring_Fn);
-      function To_Pop is new Ada.Unchecked_Conversion
-        (System.Address, Pop_Completion_Fn);
-      function To_Event is new Ada.Unchecked_Conversion
-        (System.Address, Set_Completion_Event_Fn);
-      function To_Query is new Ada.Unchecked_Conversion
-        (System.Address, Query_Capabilities_Fn);
-      function To_Read is new Ada.Unchecked_Conversion
-        (System.Address, Build_Read_Fn);
-      function To_Write is new Ada.Unchecked_Conversion
-        (System.Address, Build_Write_Fn);
-
-      Module : Handle;
-      Query  : Query_Capabilities_Fn;
-      Caps   : aliased Ioring_Capabilities;
-      Status : Hresult;
-
-      function Resolve (Name : String) return System.Address is
-        (Get_Proc_Address (Module, To_C (Name)));
-
-   begin
-      if Loaded then
-         return;
-      end if;
-      Loaded := True;
-
-      --  The IoRing API set is implemented in KernelBase, and the API-set
-      --  stub forwards there.  Ask for the real module: it is present on
-      --  every Windows this could run on, and only the entry points inside
-      --  it are new.
-      Module := Load_Library (To_C ("kernelbase.dll"));
-      if Module = Null_Handle then
-         return;
-      end if;
-
-      Create_Ptr := To_Create (Resolve ("CreateIoRing"));
-      Close_Ptr  := To_Close  (Resolve ("CloseIoRing"));
-      Submit_Ptr := To_Submit (Resolve ("SubmitIoRing"));
-      Pop_Ptr    := To_Pop    (Resolve ("PopIoRingCompletion"));
-      Event_Ptr  := To_Event  (Resolve ("SetIoRingCompletionEvent"));
-      Read_Ptr   := To_Read   (Resolve ("BuildIoRingReadFile"));
-      Write_Ptr  := To_Write  (Resolve ("BuildIoRingWriteFile"));
-      Query      := To_Query  (Resolve ("QueryIoRingCapabilities"));
-
-      --  Read and write are both required.  Write arrived one version
-      --  after read, and a ring that can only read is no use to a server.
-      if Create_Ptr = null or else Submit_Ptr = null
-        or else Pop_Ptr = null or else Read_Ptr = null
-        or else Write_Ptr = null or else Query = null
-      then
-         return;
-      end if;
-
-      Status := Query (Caps'Access);
-      if Status < 0 or else Caps.Max_Version = 0 then
-         return;
-      end if;
-
-      Version   := Caps.Max_Version;
-      Features  := Caps.Features;
-      Available := True;
-   end Load_Ioring;
-
-   function Ioring_Available return Boolean is (Available);
-   function Ioring_Version return Unsigned_32 is (Version);
-   function Ioring_Features return Unsigned_32 is (Features);
-
-   function Create_Io_Ring return Create_Io_Ring_Fn is (Create_Ptr);
-   function Close_Io_Ring return Close_Io_Ring_Fn is (Close_Ptr);
-   function Submit_Io_Ring return Submit_Io_Ring_Fn is (Submit_Ptr);
-   function Pop_Completion return Pop_Completion_Fn is (Pop_Ptr);
-   function Set_Completion_Event return Set_Completion_Event_Fn is (Event_Ptr);
-   function Build_Read return Build_Read_Fn is (Read_Ptr);
-   function Build_Write return Build_Write_Fn is (Write_Ptr);
 
 end Iour.Ffi.Win32;

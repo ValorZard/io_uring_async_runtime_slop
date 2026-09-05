@@ -125,8 +125,8 @@ begin
    begin
       Reactor.Ring_Carries_Sockets (Active_Shard'First, On_Ring);
       Put_Line ("echo_server: " & Reactor.Backend_Name
-                & (if On_Ring then ", carrying connections"
-                   else ", NOT carrying connections -- fallback path")
+                & (if On_Ring then ", ring carries connections"
+                   else ", no ring")
                 & (if Shared_Port
                    then ", one listener per core"
                    else ", one listener, connections dealt round the cores"));
@@ -138,24 +138,32 @@ begin
       Put_Line ("echo_server: serving until killed");
    end if;
 
-   --  One acceptor per core, each on its own listener.  Placed rather
-   --  than published: an acceptor that landed on the same core as another
-   --  would leave a core with no accept queue of its own, and the
-   --  connections it accepts are served where it runs.
+   --  Acceptors on each core that has a listener.  Placed rather than
+   --  published: an acceptor that landed on the same core as another would
+   --  leave a core with no accept queue of its own, and the connections it
+   --  accepts are served where it runs.
+   --
+   --  Several per listener, not one.  A single acceptor leaves the
+   --  listener with nothing outstanding for as long as it takes one
+   --  completion to be dispatched and the fiber resumed, and a client that
+   --  opens hundreds of connections at once fills the accept queue in that
+   --  gap.  Echo_Server_App.Concurrent_Acceptors says how many and why.
    for S in Active_Shard loop
       exit when not Shared_Port and then S /= Active_Shard'First;
 
-      Fibers.Spawn_On
-        (S,
-         Echo_Server_App.Acceptor'Access,
-         Fiber_Argument (Listeners (S)),
-         Started);
+      for I in 1 .. Echo_Server_App.Concurrent_Acceptors loop
+         Fibers.Spawn_On
+           (S,
+            Echo_Server_App.Acceptor'Access,
+            Fiber_Argument (Listeners (S)),
+            Started);
 
-      if not Started then
-         Put_Line ("echo_server: could not start the acceptor for shard"
-                   & S'Image);
-         Ffi.Sys.Exit_Process (1);
-      end if;
+         if not Started then
+            Put_Line ("echo_server: could not start acceptor" & I'Image
+                      & " for shard" & S'Image);
+            Ffi.Sys.Exit_Process (1);
+         end if;
+      end loop;
    end loop;
 
    Scheduler.Wait_For_Shutdown;

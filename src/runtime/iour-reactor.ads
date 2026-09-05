@@ -16,18 +16,19 @@
 --    inline helpers; only io_uring_setup, io_uring_enter, io_uring_register
 --    and mmap leave Ada.
 --
---    Windows, src/os/windows: one IoRing per shard for the data plane,
---    with a completion port beside it for the operations IoRing has no
---    opcode for -- accept and connect -- and for shard-to-shard wakeups.
---    The port is also the single place the shard sleeps, which is what
---    keeps one loop rather than two.
+--    Windows, src/os/windows: one I/O completion port per shard.  Every
+--    operation either is an overlapped Win32 call the kernel completes
+--    onto that port, or is finished in the body and announced on the port
+--    with PostQueuedCompletionStatus -- shard-to-shard wakeups included.
+--    So the port is the only place a completion arrives and the only place
+--    a shard sleeps, which is what keeps one loop rather than two.
 --
 --  A shard's engine is owned outright by that shard.  No other task
 --  submits to it or reaps from it.  On Linux that is exactly what
---  IORING_SETUP_SINGLE_ISSUER wants; on Windows it is what makes the
---  IoRing submission queue, which is not thread-safe, safe to build
---  without a lock.  It is the same invariant either way, and it is why
---  submission needs no cross-core synchronisation at all.
+--  IORING_SETUP_SINGLE_ISSUER wants; on Windows it is what lets the port
+--  be created with a concurrency of one and every per-shard structure
+--  behind it be a plain variable.  It is the same invariant either way,
+--  and it is why submission needs no cross-core synchronisation at all.
 --
 --  The operation constructors below are plain functions returning a filled
 --  in Op_Spec, so what each operation asks for is visible and checkable
@@ -89,7 +90,7 @@ is
    --  used to be a flattened io_uring SQE; it is now the union of what the
    --  nine operations below actually need, which is smaller and says more.
    --  Each backend translates it: on Linux into an SQE, on Windows into an
-   --  IoRing builder call, an overlapped Winsock call or a posted
+   --  overlapped Winsock call, a thread-pool request or a posted
    --  completion, depending on the kind.
    type Op_Kind is
      (Kind_Nop,
@@ -330,17 +331,13 @@ is
    --  start-up.  A compile-time fact, so a plain function.
    function Backend_Name return String with Global => null;
 
-   --  Whether this shard's data plane is actually going through the
-   --  system's ring, as opposed to a fallback beside it.
+   --  Whether this shard's data plane goes through a submission ring.
    --
-   --  On Linux this is true from the moment the ring opens: io_uring has an
-   --  opcode for every operation the runtime submits.  On Windows it starts
-   --  true and turns false for good the first time the IoRing refuses a
-   --  socket -- IoRing has read and write but no accept, connect, recv or
-   --  send of its own, so whether a socket handle can be read through it at
-   --  all is something only the running system can answer.  Once it has
-   --  answered no, that shard's socket traffic goes through overlapped
-   --  Winsock on the completion port instead, and this says so.
+   --  True on Linux from the moment the ring opens: io_uring has an opcode
+   --  for every operation the runtime submits.  False on Windows, and now
+   --  unconditionally so -- there was an IoRing carrying the data plane
+   --  there, and measurement did not justify keeping it beside the
+   --  completion port that has to exist anyway.  See the Windows body.
    --
    --  Reads state the owning shard publishes, so ask after Wait_Until_Ready.
    procedure Ring_Carries_Sockets (Shard : Shard_Id; Yes : out Boolean)

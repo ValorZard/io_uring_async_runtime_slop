@@ -226,8 +226,22 @@ as_user() {
 build_variant() {
     local name=$1 shards=$2 first_cpu=$3 client_cpu=${4:-}
     local dir=$BUILD/$name
+    # Reuse the existing build only if nothing it was built from has changed
+    # since.  It used to reuse whatever was there, which is a cache keyed on
+    # the directory existing and on nothing else: a run after any source
+    # change measured the previous run's binaries and said nothing about it.
+    # That is not a small error -- every variant in the scaling stage and
+    # the Ada client used by the whole matrix come from here, so a stale
+    # tree quietly turns the report into a report on yesterday's code.  It
+    # cost one wrong conclusion already; see CLAUDE.md.
     if [[ -x $dir/bin/echo_server$EXE && -x $dir/bin/echo_client$EXE ]]; then
-        return 0
+        local newer
+        newer=$(find src examples tests *.gpr gnat.adc                      -newer "$dir/bin/echo_server$EXE" -print -quit 2>/dev/null)
+        if [[ -z $newer ]]; then
+            log "  reusing $name (unchanged since it was built)"
+            return 0
+        fi
+        log "  rebuilding $name ($newer is newer than it)"
     fi
     # Both tables are banked per shard and both insist on exact division.
     if (( MAX_FUTURES % shards != 0 || MAX_FIBERS % shards != 0 )); then

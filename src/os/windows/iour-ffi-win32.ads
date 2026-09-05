@@ -18,12 +18,10 @@
 --    below fetches them once and the reactor calls them through the access
 --    values it left behind.
 --
---    The IoRing entry points are resolved with GetProcAddress rather than
---    linked.  Two reasons.  They arrived in Windows 11, so a binary that
---    imported them would refuse to start on Windows 10 instead of falling
---    back to overlapped Winsock, which is what this runtime does.  And the
---    GNAT toolchain ships a Kernel32 import library that predates them, so
---    there is nothing to link against even where they exist.
+--    Nothing else needs resolving at run time any more.  The IoRing entry
+--    points did -- they arrived in Windows 11, and the GNAT toolchain's
+--    Kernel32 import library predates them -- and they went with the ring.
+--    Everything imported below is old enough to link against directly.
 --
 --  Every binding takes and returns scalars, addresses or access values,
 --  never raw pointers of its own.
@@ -54,7 +52,6 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
    subtype Hresult is Integer_32;
 
    S_Ok    : constant Hresult := 0;
-   S_False : constant Hresult := 1;
 
    ---------------------------------------------------------------------------
    --  Error codes
@@ -96,8 +93,7 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
      with Post => As_Failure'Result < 0
                   and then As_Failure'Result > Io_Result'First;
 
-   --  An NTSTATUS-shaped HRESULT -- which is what an IoRing completion
-   --  reports -- as a failed Io_Result.
+   --  An NTSTATUS-shaped HRESULT as a failed Io_Result.
    function Hresult_Failure (Code : Hresult) return Io_Result
      with Post => Hresult_Failure'Result < 0
                   and then Hresult_Failure'Result > Io_Result'First;
@@ -107,12 +103,6 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
    function Status_Failure (Status : Unsigned_64) return Io_Result
      with Post => Status_Failure'Result < 0
                   and then Status_Failure'Result > Io_Result'First;
-
-   --  Whether an IoRing completion code means "this handle is not something
-   --  an IoRing can read or write", as opposed to an ordinary I/O failure.
-   --  A socket that has been associated with a completion port is the case
-   --  that matters: the ring refuses it with E_INVALIDARG.
-   function Means_Unsupported (Code : Hresult) return Boolean;
 
    ---------------------------------------------------------------------------
    --  Process, processor, memory
@@ -150,6 +140,15 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
 
    function Close_Handle (H : Handle) return Bool
      with Import, Convention => Stdcall, External_Name => "CloseHandle";
+
+   --  Cancel outstanding overlapped I/O on a handle.  With Overlap null it
+   --  cancels every request on that handle whichever thread issued it,
+   --  which is the difference from CancelIo and the reason this is the one
+   --  to use here: the accept was submitted by a shard and the cancel comes
+   --  from the environment task.
+   function Cancel_Io
+     (H : Handle; Overlap : System.Address) return Bool
+     with Import, Convention => Stdcall, External_Name => "CancelIoEx";
 
    function Write_File
      (H         : Handle;
@@ -203,56 +202,20 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
      with Import, Convention => Stdcall, External_Name => "GetSystemInfo";
 
    ---------------------------------------------------------------------------
-   --  Events and the thread pool
+   --  The thread pool
    ---------------------------------------------------------------------------
 
-   function Create_Event
-     (Attributes    : System.Address;
-      Manual_Reset  : Bool;
-      Initial_State : Bool;
-      Name          : System.Address) return Handle
-     with Import, Convention => Stdcall, External_Name => "CreateEventW";
-
-   --  RegisterWaitForSingleObject's callback: void (*)(PVOID, BOOLEAN).
-   type Wait_Callback is access procedure
-     (Context : System.Address; Timed_Out : Unsigned_8)
-     with Convention => Stdcall;
-
-   Wt_Execute_In_Wait_Thread : constant := 16#0000_0004#;
-   Infinite                  : constant Dword := 16#FFFF_FFFF#;
-
-   function Set_Event (Event : Handle) return Bool
-     with Import, Convention => Stdcall, External_Name => "SetEvent";
-
-   --  WaitForMultipleObjects over a small, fixed set: a shard waits on its
-   --  ring's completion event and on its own wake event, and on nothing
-   --  else.
-   type Handle_Array is array (Natural range <>) of Handle
-     with Convention => C;
-
-   Wait_Object_0 : constant Dword := 0;
-
-   function Wait_For_Objects
-     (Count        : Dword;
-      Handles      : System.Address;
-      Wait_All     : Bool;
-      Milliseconds : Dword) return Dword
-     with Import, Convention => Stdcall,
-          External_Name => "WaitForMultipleObjects";
-
-   function Register_Wait
-     (Wait_Object : access Handle;
-      Object      : Handle;
-      Callback    : Wait_Callback;
-      Context     : System.Address;
-      Milliseconds : Dword;
-      Flags       : Dword) return Bool
-     with Import, Convention => Stdcall,
-          External_Name => "RegisterWaitForSingleObject";
-
-   function Unregister_Wait
-     (Wait_Object : Handle; Completion : Handle) return Bool
-     with Import, Convention => Stdcall, External_Name => "UnregisterWaitEx";
+   --  What is NOT here any more is as informative as what is.  There were
+   --  events, WaitForMultipleObjects and RegisterWaitForSingleObject, and
+   --  every one of them existed to bridge an IoRing's completion event onto
+   --  a completion port so that a shard had one place to sleep.  With the
+   --  ring gone the port is the only place a completion can arrive, so it
+   --  is also the only place a shard sleeps and the only thing that has to
+   --  wake it -- and PostQueuedCompletionStatus already does that.
+   --
+   --  What remains of the thread pool is the two things the port genuinely
+   --  cannot do: a timer, because there is no timeout completion; and a
+   --  work item, because there is no asynchronous connect being used yet.
 
    --  CreateThreadpoolTimer's callback:
    --    void (*)(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER)
@@ -513,150 +476,5 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
 
    function Accept_Ex return Accept_Ex_Fn;
    function Connect_Ex return Connect_Ex_Fn;
-
-   ---------------------------------------------------------------------------
-   --  IoRing
-   ---------------------------------------------------------------------------
-
-   --  IORING_OP_CODE, of which the runtime submits two.
-   Ioring_Op_Read  : constant Unsigned_32 := 1;
-   Ioring_Op_Write : constant Unsigned_32 := 5;
-
-   --  IORING_FEATURE_FLAGS
-   Feature_Um_Emulation : constant Unsigned_32 := 1;
-   Feature_Set_Event    : constant Unsigned_32 := 2;
-
-   --  IORING_CREATE_ADVISORY_FLAGS.  Advisory means an implementation that
-   --  does not recognise it ignores it, so this is safe to ask for
-   --  everywhere.
-   Skip_Builder_Checks : constant Unsigned_32 := 1;
-
-   --  The constant SubmitIoRing takes to mean "wait for everything
-   --  submitted so far".
-   Submit_Wait_All : constant Unsigned_32 := 16#FFFF_FFFF#;
-
-   type Ioring_Capabilities is record
-      Max_Version : Unsigned_32 := 0;
-      Max_Sq      : Unsigned_32 := 0;
-      Max_Cq      : Unsigned_32 := 0;
-      Features    : Unsigned_32 := 0;
-   end record
-     with Convention => C;
-
-   type Ioring_Cqe is record
-      User_Data   : Unsigned_64 := 0;
-      Result      : Hresult     := 0;
-      Information : Unsigned_64 := 0;
-   end record
-     with Convention => C;
-
-   --  IORING_REF_KIND
-   Ref_Raw : constant Unsigned_32 := 0;
-
-   --  IORING_HANDLE_REF and IORING_BUFFER_REF are sixteen-byte structures
-   --  that the Win64 ABI passes by address rather than by value, so the
-   --  builders below take the address of one of these and the caller keeps
-   --  it alive for the length of the call.
-   type Handle_Ref is record
-      Kind  : Unsigned_32 := Ref_Raw;
-      Pad   : Unsigned_32 := 0;
-      Value : Handle      := 0;
-   end record
-     with Convention => C;
-
-   type Buffer_Ref is record
-      Kind    : Unsigned_32    := Ref_Raw;
-      Pad     : Unsigned_32    := 0;
-      Address : System.Address := System.Null_Address;
-   end record
-     with Convention => C;
-
-   pragma Compile_Time_Error
-     (Handle_Ref'Size /= 16 * 8, "IORING_HANDLE_REF must be 16 bytes");
-   pragma Compile_Time_Error
-     (Buffer_Ref'Size /= 16 * 8, "IORING_BUFFER_REF must be 16 bytes");
-   pragma Compile_Time_Error
-     (Ioring_Cqe'Size /= 24 * 8, "IORING_CQE must be 24 bytes");
-   pragma Compile_Time_Error
-     (Overlapped'Size /= 32 * 8, "OVERLAPPED must be 32 bytes");
-   pragma Compile_Time_Error
-     (Overlapped_Entry'Size /= 32 * 8, "OVERLAPPED_ENTRY must be 32 bytes");
-
-   --  IORING_CREATE_FLAGS is two 32-bit enums in an eight-byte structure,
-   --  which the Win64 ABI passes in a single register exactly as it passes
-   --  a 64-bit integer.  Declaring the parameter as one is what makes the
-   --  call correct without asking the compiler to reason about aggregate
-   --  passing rules.
-   type Create_Io_Ring_Fn is access function
-     (Version : Unsigned_32;
-      Flags   : Unsigned_64;
-      Sq_Size : Unsigned_32;
-      Cq_Size : Unsigned_32;
-      Ring    : access Handle) return Hresult
-     with Convention => Stdcall;
-
-   type Close_Io_Ring_Fn is access function (Ring : Handle) return Hresult
-     with Convention => Stdcall;
-
-   type Submit_Io_Ring_Fn is access function
-     (Ring         : Handle;
-      Wait_For     : Unsigned_32;
-      Milliseconds : Unsigned_32;
-      Submitted    : access Unsigned_32) return Hresult
-     with Convention => Stdcall;
-
-   type Pop_Completion_Fn is access function
-     (Ring : Handle; Cqe : access Ioring_Cqe) return Hresult
-     with Convention => Stdcall;
-
-   type Set_Completion_Event_Fn is access function
-     (Ring : Handle; Event : Handle) return Hresult
-     with Convention => Stdcall;
-
-   type Query_Capabilities_Fn is access function
-     (Capabilities : access Ioring_Capabilities) return Hresult
-     with Convention => Stdcall;
-
-   type Op_Supported_Fn is access function
-     (Ring : Handle; Op : Unsigned_32) return Bool
-     with Convention => Stdcall;
-
-   type Build_Read_Fn is access function
-     (Ring      : Handle;
-      File_Ref  : System.Address;
-      Data_Ref  : System.Address;
-      Bytes     : Unsigned_32;
-      Offset    : Unsigned_64;
-      User_Data : Unsigned_64;
-      Sqe_Flags : Unsigned_32) return Hresult
-     with Convention => Stdcall;
-
-   type Build_Write_Fn is access function
-     (Ring        : Handle;
-      File_Ref    : System.Address;
-      Buffer_Ref  : System.Address;
-      Bytes       : Unsigned_32;
-      Offset      : Unsigned_64;
-      Write_Flags : Unsigned_32;
-      User_Data   : Unsigned_64;
-      Sqe_Flags   : Unsigned_32) return Hresult
-     with Convention => Stdcall;
-
-   --  Resolve the IoRing entry points once.  Idempotent, and safe to call
-   --  on a system that has none: Available then stays False and the
-   --  reactor uses overlapped Winsock throughout.
-   procedure Load_Ioring;
-
-   function Ioring_Available return Boolean;
-   function Ioring_Version return Unsigned_32;
-   function Ioring_Features return Unsigned_32;
-
-   function Create_Io_Ring return Create_Io_Ring_Fn;
-   function Close_Io_Ring return Close_Io_Ring_Fn;
-   function Submit_Io_Ring return Submit_Io_Ring_Fn;
-   function Pop_Completion return Pop_Completion_Fn;
-   function Set_Completion_Event return Set_Completion_Event_Fn;
-   function Build_Read return Build_Read_Fn;
-   function Build_Write return Build_Write_Fn;
 
 end Iour.Ffi.Win32;

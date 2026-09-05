@@ -12,11 +12,13 @@
 --      served by the core that accepted it: the core whose ring already
 --      carries its socket.
 --
---      Where the port cannot be shared there is one acceptor, on one core,
---      and it deals the connections it accepts round the other cores
---      instead.  Accepting is cheap and echoing is not, so one core can
---      keep the rest fed; what is lost is the locality, not the
---      parallelism.
+--      Where the port cannot be shared there is one accepting core, and it
+--      deals the connections it accepts round the other cores instead.
+--      Accepting is cheap and echoing is not, so one core can keep the
+--      rest fed; what is lost is the locality, not the parallelism.
+--
+--      That core runs Concurrent_Acceptors acceptor fibers rather than
+--      one.  See the constant below for why one is not enough.
 --
 --    * one handler per connection, which reads a frame, answers it, and
 --      repeats until the client says goodbye.  It is written as ordinary
@@ -45,8 +47,41 @@ package Echo_Server_App with SPARK_Mode => On is
       Target   : Natural;
       Spread   : Boolean := False);
 
+   --  How many accepts to keep outstanding on one listener.
+   --
+   --  One is not enough, and the reason is specific to how accept is
+   --  spelled on each system.  An acceptor fiber submits one accept and
+   --  suspends; the next accept is not submitted until the completion has
+   --  come back, been dispatched and resumed the fiber.  Between those two
+   --  points the listener has nothing pending, and every connection that
+   --  arrives in the gap waits in the kernel's accept queue -- or, once
+   --  that fills, is refused.  With a client that opens hundreds of
+   --  connections at once the gap is the whole story: measured here, a Go
+   --  client offering 500 simultaneous connections to a single acceptor
+   --  lost 239 of them.
+   --
+   --  Several fibers on the same listener close the gap without any of
+   --  them doing anything differently: while one is between completion and
+   --  resubmission, the others' accepts are still outstanding.  On Windows
+   --  each is a separate AcceptEx with its own socket made in advance,
+   --  which is exactly the shape the kernel wants; on Linux each is an
+   --  IORING_OP_ACCEPT on the same listener.
+   --
+   --  Thirty-two, by measurement rather than by argument.  With a Go
+   --  client offering 500 simultaneous connections to a four-shard server
+   --  on this machine, one acceptor lost 239 of them; eight lost between
+   --  none and 225, depending on the run; sixteen still lost one run in
+   --  four; thirty-two and sixty-four lost none across eight runs each,
+   --  and neither changed throughput.  The number that matters is how many
+   --  connections arrive while one acceptor is between its completion and
+   --  its next submission, and it is set by how fast a client can call
+   --  connect -- so the right answer is "comfortably more than enough",
+   --  and one more costs a fiber stack and an accept slot.
+   Concurrent_Acceptors : constant := 32;
+
    --  Fiber body: accept connections on the listener passed as Arg and run
-   --  each one on this core.
+   --  each one on this core, or deal it round the cores when Configure was
+   --  told to spread.  Several of these may share one listener.
    procedure Acceptor (Arg : Fiber_Argument);
 
    procedure Snapshot

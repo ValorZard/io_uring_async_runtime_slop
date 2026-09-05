@@ -1,39 +1,47 @@
 ------------------------------------------------------------------------------
---  Iour.Reactor body -- Windows, on IoRing with a completion port beside it.
+--  Iour.Reactor body -- Windows, on a completion port.
 --
---  Windows has a ring, and it is a real one: CreateIoRing gives a
---  submission queue the process fills without a system call per operation,
---  and SubmitIoRing hands the batch over in one.  What it does not have is
---  an opcode for anything but read, write, flush and cancel.  There is no
---  IORING_OP_ACCEPT, no connect, no timeout, and nothing like MSG_RING.
+--  One port per shard.  Every operation this backend performs either is an
+--  overlapped Win32 call whose completion the kernel delivers to that port,
+--  or is finished by the runtime itself and announced on the port with
+--  PostQueuedCompletionStatus.  Either way a shard has exactly one place to
+--  look and exactly one place to sleep, which is what
+--  GetQueuedCompletionStatusEx gives it: a batch of completions and a
+--  bounded wait, in one system call.
 --
---  So each shard runs two things that behave as one.
+--  There used to be an IoRing here as well, carrying the data plane while
+--  the port carried everything the ring had no opcode for.  It was removed,
+--  and the reason is worth keeping because the conclusion is not the one
+--  the Linux side would suggest.
 --
---    The IoRing carries the data plane.  Every byte a connection sends or
---    receives is a BuildIoRingReadFile or BuildIoRingWriteFile on the
---    socket handle, submitted in batches exactly as on Linux.
+--  Windows' IoRing has opcodes for read, write, register-files,
+--  register-buffers, cancel and flush.  That is the whole list: no accept,
+--  no connect, no timeout, nothing like MSG_RING.  So the completion port
+--  had to exist anyway, and the ring's only real saving was one system call
+--  per *batch* of submissions.  Against that it cost a wakeup: a ring
+--  completion signals an event that a shard waits on, where a port
+--  completion is handed to a waiting thread by the I/O manager directly.
+--  It also cost a rule -- a socket associated with a completion port cannot
+--  be read or written through an IoRing -- that shaped the whole backend
+--  around keeping data sockets off the port.
 --
---    A completion port carries what the ring has no opcode for -- accept,
---    connect, timeouts -- and is also the single place the shard sleeps.
---    The ring's completion event is bridged onto it with one registered
---    wait, so a shard waits in GetQueuedCompletionStatusEx and is woken
---    equally by a ring completion, a port completion or a sibling's
---    PostQueuedCompletionStatus.  One loop, one wait, one wakeup path.
+--  Measured, with both paths built from one binary and run alternately:
+--  a tie or slightly behind at high connection counts, and clearly behind
+--  on the single-connection latency path, where there is no batch to
+--  amortise and only the wakeup is left.  The port won 26 of 28 paired
+--  runs there at 25-40% more round trips a second and half the CPU.  See
+--  the README for the table.
 --
---  The rule that makes it work, and the one thing to remember when
---  changing any of this: A SOCKET THAT HAS BEEN ASSOCIATED WITH A
---  COMPLETION PORT CANNOT BE READ OR WRITTEN THROUGH AN IORING.  The
---  builders refuse it with E_INVALIDARG.  So the listener -- which carries
---  no data -- goes on the port for AcceptEx, and no other socket ever does.
---  That is also why connect is a blocking connect(2) handed to a thread
---  pool rather than ConnectEx: ConnectEx would need the port, and the
---  socket would spend the rest of its life off the ring for the sake of
---  one call at the start of it.
+--  What that removal bought, beyond the deletion: data sockets may now be
+--  associated with a port freely, so the accept path has no rule to keep;
+--  a shard has one sleep rather than two and needs no thread-pool bridge
+--  between them; and nothing has to be told, by an event, that a wakeup
+--  has been posted -- the post is the wakeup.
 --
---  Where CreateIoRing is not available at all -- Windows 10, which has the
---  completion port but not the ring -- Use_Ring is False and the data
---  plane falls back to overlapped WSARecv and WSASend on the port.  Then
---  and only then are data sockets associated with it.
+--  What it did not buy, and should: connect is still a blocking connect(2)
+--  handed to a thread pool.  That was forced by the ring -- ConnectEx needs
+--  the socket on a port, which would have cost that connection the ring for
+--  the rest of its life -- and nothing forces it now.  See *Open work*.
 --
 --  SPARK_Mode is Off throughout.  This body hands addresses to the kernel,
 --  overlays records on completion-port pointers and is re-entered from
@@ -58,10 +66,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
    use type System.Address;
    use type Win.Handle;
    use type Win.Accept_Ex_Fn;
-   use type Win.Set_Completion_Event_Fn;
-   use type Win.Close_Io_Ring_Fn;
-   use type Win.Submit_Io_Ring_Fn;
-   use type Win.Pop_Completion_Fn;
    use type Interfaces.C.int;
 
    ---------------------------------------------------------------------------
@@ -72,7 +76,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
    Key_Socket : constant Unsigned_64 := 0;  --  overlapped op finished
    Key_Done   : constant Unsigned_64 := 1;  --  result already in the slot
    Key_Wake   : constant Unsigned_64 := 2;  --  the pointer IS the token
-   Key_Ring    : constant Unsigned_64 := 3;  --  the IoRing has completions
 
    ---------------------------------------------------------------------------
    --  Operation slots
@@ -126,19 +129,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
       --  slot, so a sleeping fiber costs no object churn.
       Timer  : System.Address := System.Null_Address;
 
-      --  The shard's wake event, kept here for the same reason as Port:
-      --  a thread-pool callback must be able to announce a completion
-      --  without reaching into another shard's engine record.
-      Waker  : Win.Handle := Win.Null_Handle;
-
-      --  Whether the kernel is the one that will deliver this operation's
-      --  completion to the port.  True for AcceptEx and for overlapped
-      --  Winsock; false for everything this runtime finishes itself and
-      --  announces with Post_Done, which sets the wake event as it goes.
-      --  It is the difference between a shard that must sleep on the port
-      --  and one that can sleep on the ring.
-      From_Kernel : Boolean := False;
-
       --  Scratch the overlapped Winsock calls write through.
       Wsa    : aliased Win.Wsabuf;
       Bytes  : aliased Win.Dword := 0;
@@ -173,52 +163,65 @@ package body Iour.Reactor with SPARK_Mode => Off is
    Drain_Batch : constant := 128;
 
    ---------------------------------------------------------------------------
+   --  Sockets already on a shard's completion port
+   ---------------------------------------------------------------------------
+
+   --  Winsock delivers an overlapped completion only to a port the socket
+   --  has been associated with, so something has to associate it -- and
+   --  the only place that knows both the socket and the shard that will
+   --  serve it is the first operation that shard issues on it.
+   --
+   --  Associating on every operation is correct, and was what this did:
+   --  CreateIoCompletionPort on an already associated socket simply fails.
+   --  It is also a system call per read and per write, which on this
+   --  backend is the whole of the data plane.
+   --
+   --  So: remember what has been associated.  A direct-mapped table, one
+   --  per shard, touched only by that shard.
+   --
+   --  It is a cache and not a register, which is what makes it safe to
+   --  keep small.  Two sockets whose handles collide evict each other, and
+   --  an evicted socket pays one redundant call on its next operation --
+   --  exactly what every operation used to pay.  The entry is written
+   --  whether the call succeeded or not, because either it is on this
+   --  shard's port now or it is on another's and repeating the call will
+   --  never change that.
+   --
+   --  The one thing it does rest on: a socket that has had an operation
+   --  issued on it is closed through the reactor, so that Kind_Close can
+   --  forget it before Windows hands the same handle value to something
+   --  else.  Iour.Net.Close_Now closes without telling the reactor, and is
+   --  used only for sockets that were never operated on -- a connection
+   --  refused before its handler started.
+   Port_Cache_Size : constant := 4096;
+   type Cache_Index is mod Port_Cache_Size;
+   type Handle_Cache is array (Cache_Index) of Win.Handle;
+
+   --  Windows hands out socket handles in multiples of four, so the low two
+   --  bits carry nothing and dropping them is what makes consecutive
+   --  sockets land in consecutive entries.
+   function Cache_Slot (H : Win.Handle) return Cache_Index is
+     (Cache_Index (Shift_Right (Unsigned_64 (H), 2) mod Port_Cache_Size));
+
+   ---------------------------------------------------------------------------
    --  One shard's engine
    ---------------------------------------------------------------------------
 
    type Engine is record
-      Ring      : Win.Handle := Win.Null_Handle;
       Port      : Win.Handle := Win.Null_Handle;
-      Ring_Evt  : Win.Handle := Win.Null_Handle;
-      Ring_Wait : Win.Handle := Win.Null_Handle;
-
-      --  Set by anything of ours that puts an entry on the port, so that a
-      --  shard asleep on the ring's event still hears about it.
-      Wake_Evt  : Win.Handle := Win.Null_Handle;
 
       Started   : Boolean := False;
 
-      --  Whether the data plane is on the IoRing.  False on a system with
-      --  no CreateIoRing, and then socket reads and writes are overlapped
-      --  Winsock calls on the port instead.
-      Use_Ring  : Boolean := False;
-
-      --  Whether the ring can tell us it has completions.  Without
-      --  IORING_FEATURE_SET_COMPLETION_EVENT there is nothing to bridge
-      --  onto the port, and a shard with ring operations in flight has to
-      --  bound how long it sleeps.
-      Ring_Signals : Boolean := False;
-
-      --  Built into the submission queue, not yet handed over.
-      Unsent    : Natural := 0;
-
-      --  Submitted, completion not yet seen; and how those split between
-      --  the ring and the port.  Ring_Live decides whether a sleep has to
-      --  be bounded; Port_Live decides whether the port is worth asking.
+      --  Submitted, completion not yet seen.  Live is what In_Flight
+      --  reports and what the scheduler's shutdown drain waits on;
+      --  Port_Live is the same count restricted to operations that will
+      --  arrive as an entry on the port, which is what decides whether a
+      --  non-blocking drain is worth a system call at all.
+      --
+      --  The two differ only in that a cross-shard wakeup is counted in
+      --  neither: it is a sibling's work, not ours.
       Live      : Natural := 0;
-      Ring_Live : Natural := 0;
       Port_Live : Natural := 0;
-
-      --  Of those port operations, the ones the kernel will complete on
-      --  its own.  A shard with none of these never has to sleep on the
-      --  port, and so never has to pay for the bridge.
-      Kernel_Live : Natural := 0;
-
-      --  Whether the ring's completion event has been bridged onto the
-      --  port for this shard.  Sticky once set: the bridge and a direct
-      --  wait cannot both have the event, because it is auto-reset and
-      --  whichever waiter arrives first consumes it.
-      Bridged   : Boolean := False;
 
       --  How long the next blocking wait may last, in milliseconds.  Set
       --  by Arm_Idle_Timer and consumed by the wait that follows it.
@@ -227,6 +230,10 @@ package body Iour.Reactor with SPARK_Mode => Off is
 
       Free      : Slot_Ref := No_Slot;
       Slots     : Slot_Array;
+
+      --  Sockets this shard has already put on its port; see above.  Only
+      --  the no-ring path writes it.
+      On_Port   : Handle_Cache := [others => Win.Null_Handle];
 
       Pend      : Pending_Ring := [others => (others => <>)];
       Pend_Head : Natural := 0;
@@ -429,7 +436,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
          E.Slots (I).Me    := I;
          E.Slots (I).Shard := Shard;
          E.Slots (I).Port  := E.Port;
-         E.Slots (I).Waker := E.Wake_Evt;
          E.Slots (I).Busy  := False;
          E.Slots (I).Next  := E.Free;
          E.Free := I;
@@ -450,7 +456,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
       E.Slots (Got).Flags := 0;
       E.Slots (Got).Accepted := Win.Invalid_Socket;
       E.Slots (Got).Listener := Win.Invalid_Socket;
-      E.Slots (Got).From_Kernel := False;
       return Got;
    end Take_Slot;
 
@@ -465,13 +470,14 @@ package body Iour.Reactor with SPARK_Mode => Off is
    end Give_Slot;
 
    --  Hand a finished operation back to the shard through the port, so it
-   --  arrives in the same stream as everything else and can wake a shard
-   --  that has already gone to sleep.
+   --  arrives in the same stream as everything else and wakes a shard that
+   --  has already gone to sleep.
    --
-   --  The event afterwards is what lets that shard be asleep on the ring
-   --  rather than on the port.  It costs a system call on a path that is
-   --  never the hot one -- a timer expiring, a connect finishing, a close
-   --  -- and it is what takes the thread-pool bridge off the path that is.
+   --  The post IS the wakeup, and that is the whole of it.  While there was
+   --  a ring here this had to set an event afterwards as well, because a
+   --  shard with nothing on the port slept on the ring's completion event
+   --  instead and would not have heard the post.  With one place to sleep
+   --  there is nothing to tell.
    procedure Post_Done (Slot : access Op_Slot; Res : Io_Result) is
       Ignored : Win.Bool;
    begin
@@ -481,9 +487,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
          Bytes   => 0,
          Key     => Key_Done,
          Overlap => Slot.Ov'Address);
-      if Slot.Waker /= Win.Null_Handle then
-         Ignored := Win.Set_Event (Slot.Waker);
-      end if;
    end Post_Done;
 
    ---------------------------------------------------------------------------
@@ -493,25 +496,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
    --  These run on thread-pool threads, not on any Ada task.  Each one
    --  touches exactly one slot and makes exactly one Win32 call, so
    --  nothing here needs the Ada runtime and nothing can raise.
-
-   procedure Ring_Ready (Context : System.Address; Timed_Out : Unsigned_8)
-     with Convention => Stdcall;
-
-   procedure Ring_Ready (Context : System.Address; Timed_Out : Unsigned_8) is
-      pragma Unreferenced (Timed_Out);
-      Which   : constant Integer_Address := To_Integer (Context);
-      Ignored : Win.Bool;
-   begin
-      --  The ring's completion queue has gone from empty to non-empty.
-      --  Say so on the port, which is where the shard is asleep.
-      if Which in 0 .. Integer_Address (Shard_Id'Last) then
-         Ignored := Win.Post_Completion
-           (Port    => Engines_Data (Shard_Id (Which)).Port,
-            Bytes   => 0,
-            Key     => Key_Ring,
-            Overlap => System.Null_Address);
-      end if;
-   end Ring_Ready;
 
    procedure Timer_Fired
      (Instance : System.Address;
@@ -560,12 +544,16 @@ package body Iour.Reactor with SPARK_Mode => Off is
          return;
       end if;
 
-      --  A blocking connect on a thread that is not a shard.  ConnectEx
-      --  would be the asynchronous spelling, but it needs the socket on a
-      --  completion port, and a socket that has been on a port can never
-      --  be read through the IoRing again -- so the whole connection's
-      --  data plane would be the price of one call.  This way the socket
-      --  stays untouched and no shard blocks.
+      --  A blocking connect on a thread that is not a shard.  ConnectEx is
+      --  the asynchronous spelling and this should now be using it: it
+      --  needs the socket on a completion port, which was disqualifying
+      --  while an IoRing carried the data plane -- a socket that has been
+      --  on a port can never be read through a ring again, so one call at
+      --  the start of a connection would have cost it the ring for the
+      --  rest of its life -- and is exactly what every data socket does
+      --  here anyway now.  Until then this blocks a thread-pool thread
+      --  rather than a shard, which is correct and costs a thread hop per
+      --  connect.  See *Open work* in CLAUDE.md.
       Status := Win.C_Connect
         (Slot.Sock, Where'Access, Inet.Sockaddr_In'Size / 8);
 
@@ -578,9 +566,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
 
    procedure Open (Shard : Shard_Id; Status : out Io_Result) is
       E : Engine renames Engines_Data (Shard);
-
-      Ring   : aliased Win.Handle := Win.Null_Handle;
-      Result : Win.Hresult;
    begin
       Status := 0;
 
@@ -600,15 +585,8 @@ package body Iour.Reactor with SPARK_Mode => Off is
 
       --  One port per shard, and exactly one thread allowed to service it:
       --  its own.  That is the same promise IORING_SETUP_SINGLE_ISSUER
-      --  makes on the other backend.
-      --  The event anything of ours sets after putting an entry on the
-      --  port.  Auto-reset, so a shard that is awake does not spin on it.
-      E.Wake_Evt := Win.Create_Event
-        (Attributes    => System.Null_Address,
-         Manual_Reset  => 0,
-         Initial_State => 0,
-         Name          => System.Null_Address);
-
+      --  makes on the other backend, and it is what lets everything below
+      --  this line be plain per-shard state with no lock on it.
       E.Port := Win.Create_Completion_Port
         (File     => Win.Invalid_Handle,
          Existing => Win.Null_Handle,
@@ -619,54 +597,10 @@ package body Iour.Reactor with SPARK_Mode => Off is
          return;
       end if;
 
-      --  The ring.  A completion queue twice the submission queue, as the
-      --  API recommends, so a burst of completions is never dropped.
-      Win.Load_Ioring;
-      if Win.Ioring_Available then
-         --  IORING_CREATE_FLAGS is two words: required flags in the low
-         --  one, advisory in the high.  The advisory bit asked for here is
-         --  SKIP_BUILDER_PARAM_CHECKS, which drops the argument validation
-         --  every BuildIoRing* call would otherwise repeat.  Advisory means
-         --  an implementation that does not know it ignores it, and the
-         --  kernel checks the arguments regardless -- a bad one still comes
-         --  back as a failed completion.  What is given up is catching a
-         --  programming error at the builder rather than at the
-         --  completion, which is a debug-build concern.
-         Result := Win.Create_Io_Ring.all
-           (Version => Win.Ioring_Version,
-            Flags   => Shift_Left (Unsigned_64 (Win.Skip_Builder_Checks), 32),
-            Sq_Size => Ring_Entries,
-            Cq_Size => 2 * Ring_Entries,
-            Ring    => Ring'Access);
-         if Result >= 0 and then Ring /= Win.Null_Handle then
-            E.Ring := Ring;
-            E.Use_Ring := True;
-         end if;
-      end if;
-
-      if E.Use_Ring
-        and then (Win.Ioring_Features and Win.Feature_Set_Event) /= 0
-        and then Win.Set_Completion_Event /= null
-      then
-         E.Ring_Evt := Win.Create_Event
-           (Attributes    => System.Null_Address,
-            Manual_Reset  => 0,     --  auto-reset
-            Initial_State => 0,
-            Name          => System.Null_Address);
-         if E.Ring_Evt /= Win.Null_Handle
-           and then Win.Set_Completion_Event.all (E.Ring, E.Ring_Evt) >= 0
-         then
-            E.Ring_Signals := True;
-         end if;
-      end if;
-
       Build_Free_List (E, Shard);
+      E.On_Port := [others => Win.Null_Handle];
       Wake_Flags (Shard) := False;
-      E.Kernel_Live := 0;
-      E.Bridged := False;
-      E.Unsent := 0;
       E.Live := 0;
-      E.Ring_Live := 0;
       E.Port_Live := 0;
       E.Pend_Head := 0;
       E.Pend_Tail := 0;
@@ -683,17 +617,12 @@ package body Iour.Reactor with SPARK_Mode => Off is
    procedure Shut (Shard : Shard_Id) is
       E       : Engine renames Engines_Data (Shard);
       Ignored : Win.Bool;
-      Discard : Win.Hresult;
    begin
       E.Started := False;
 
-      if E.Ring_Wait /= Win.Null_Handle then
-         --  Wait for the bridge to stop before the port goes: a callback
-         --  still in flight would post to a closed handle.
-         Ignored := Win.Unregister_Wait (E.Ring_Wait, Win.Invalid_Handle);
-         E.Ring_Wait := Win.Null_Handle;
-      end if;
-
+      --  Timers before the port.  A thread-pool timer that fired while the
+      --  port was closing would post to a closed handle, so each one is
+      --  cancelled and then waited for.
       for I in Slot_Index loop
          if E.Slots (I).Timer /= System.Null_Address then
             Win.Set_Threadpool_Timer
@@ -704,98 +633,46 @@ package body Iour.Reactor with SPARK_Mode => Off is
          end if;
       end loop;
 
-      if E.Ring /= Win.Null_Handle and then Win.Close_Io_Ring /= null then
-         Discard := Win.Close_Io_Ring.all (E.Ring);
-         E.Ring := Win.Null_Handle;
-      end if;
-
-      if E.Ring_Evt /= Win.Null_Handle then
-         Ignored := Win.Close_Handle (E.Ring_Evt);
-         E.Ring_Evt := Win.Null_Handle;
-      end if;
-
-      if E.Wake_Evt /= Win.Null_Handle then
-         Ignored := Win.Close_Handle (E.Wake_Evt);
-         E.Wake_Evt := Win.Null_Handle;
-      end if;
-
       if E.Port /= Win.Null_Handle then
          Ignored := Win.Close_Handle (E.Port);
          E.Port := Win.Null_Handle;
       end if;
 
-      E.Use_Ring := False;
-      E.Ring_Signals := False;
-      E.Bridged := False;
       E.Live := 0;
-      E.Ring_Live := 0;
       E.Port_Live := 0;
-      E.Kernel_Live := 0;
-      E.Unsent := 0;
    end Shut;
 
    ---------------------------------------------------------------------------
    --  Submitting one operation
    ---------------------------------------------------------------------------
 
-   --  A read or a write through the ring.  Both builders take their two
-   --  reference structures by address, which is what the Win64 ABI does
-   --  with a sixteen-byte aggregate anyway; the builder copies them into
-   --  the submission queue entry before returning, so locals are enough.
-   function Build_Ring_Io
-     (E : in out Engine; Slot : Op_Slot; Writing : Boolean) return Boolean
-   is
-      File : aliased Win.Handle_Ref :=
-        (Kind => Win.Ref_Raw, Pad => 0, Value => Slot.Sock);
-      Data : aliased Win.Buffer_Ref :=
-        (Kind => Win.Ref_Raw, Pad => 0, Address => Slot.Buffer);
-      Result : Win.Hresult;
-   begin
-      if Writing then
-         Result := Win.Build_Write.all
-           (Ring        => E.Ring,
-            File_Ref    => File'Address,
-            Buffer_Ref  => Data'Address,
-            Bytes       => Capped (Slot.Length),
-            Offset      => 0,
-            Write_Flags => 0,
-            User_Data   => Slot.Token,
-            Sqe_Flags   => 0);
-      else
-         Result := Win.Build_Read.all
-           (Ring      => E.Ring,
-            File_Ref  => File'Address,
-            Data_Ref  => Data'Address,
-            Bytes     => Capped (Slot.Length),
-            Offset    => 0,
-            User_Data => Slot.Token,
-            Sqe_Flags => 0);
-      end if;
-      return Result >= 0;
-   end Build_Ring_Io;
-
-   --  Overlapped Winsock, for the systems with no ring.  The socket has to
-   --  be on the port for this, which is why it only happens here.
+   --  A socket read or write: the data plane, and the only operation here
+   --  that runs at a per-round-trip rate.  WSARecv and WSASend with an
+   --  OVERLAPPED, which the kernel completes onto this shard's port.
    function Start_Overlapped_Io
      (E : in out Engine; Slot : access Op_Slot; Writing : Boolean)
       return Io_Result
    is
       Status : Ffi.C_Int;
       Err    : Win.Dword;
+      Where  : constant Cache_Index := Cache_Slot (Slot.Sock);
+      Ignored_Port : Win.Handle;
    begin
       Slot.Wsa := (Len => Unsigned_32 (Capped (Slot.Length)),
                    Buf => Slot.Buffer);
       Slot.Flags := 0;
 
-      if Win.Create_Completion_Port
+      --  The socket has to be on this shard's port before the completion
+      --  can arrive, and this is the first place that knows both.  Once is
+      --  enough; the cache is what makes it once rather than once per
+      --  operation.
+      if E.On_Port (Where) /= Slot.Sock then
+         Ignored_Port := Win.Create_Completion_Port
            (File     => Slot.Sock,
             Existing => E.Port,
             Key      => Key_Socket,
-            Threads  => 0) = Win.Null_Handle
-      then
-         --  Already associated is not an error worth failing on; anything
-         --  else is.
-         null;
+            Threads  => 0);
+         E.On_Port (Where) := Slot.Sock;
       end if;
 
       if Writing then
@@ -916,14 +793,14 @@ package body Iour.Reactor with SPARK_Mode => Off is
 
    --  A write to something that is not a socket: stdout, stderr, a file.
    --
-   --  This one is synchronous, and deliberately.  IoRing will only take a
+   --  This one is synchronous, and deliberately.  Overlapped I/O needs a
    --  handle opened for asynchronous access, and the standard streams --
    --  which is what every caller of this actually passes, through
    --  Iour.Text -- are not: a console handle has no overlapped mode to ask
    --  for.  Writing the line here and posting the completion costs the
    --  shard a few microseconds and keeps Iour.Text working the same way on
-   --  both systems, which is better than a ring submission that would fail
-   --  and have to be redone.
+   --  both systems, which is better than a submission that would fail and
+   --  have to be redone.
    function Write_Now (Slot : access Op_Slot) return Io_Result is
       Written : aliased Win.Dword := 0;
       Ok      : Win.Bool;
@@ -980,53 +857,19 @@ package body Iour.Reactor with SPARK_Mode => Off is
                --  flag set ahead of the thing it announces could be
                --  cleared by a drain that then found nothing.
                Wake_Flags (Shard_Id (Spec.Target)) := True;
-
-               --  And the event, for a sibling that is asleep on its ring
-               --  rather than on its port.
-               if Engines_Data (Shard_Id (Spec.Target)).Wake_Evt
-                  /= Win.Null_Handle
-               then
-                  Ignored := Win.Set_Event
-                    (Engines_Data (Shard_Id (Spec.Target)).Wake_Evt);
-               end if;
             end;
          end if;
          return;
       end if;
 
-      --  A ring operation carries its token in the submission and needs
-      --  nothing that outlives the call, so it never touches the pool.
-      --  Only the port's operations need an OVERLAPPED to stay put.
-      if E.Use_Ring and then Spec.Kind in Kind_Recv | Kind_Send then
-         declare
-            Ring_Op : constant Op_Slot :=
-              (Ov     => <>,
-               Kind   => Spec.Kind,
-               Token  => Spec.Token,
-               Sock   => As_Handle (Spec.Fd),
-               Buffer => Spec.Buffer,
-               Length => Spec.Length,
-               others => <>);
-         begin
-            if not Build_Ring_Io (E, Ring_Op,
-                                  Writing => Spec.Kind = Kind_Send)
-            then
-               --  The submission queue is full.  The caller flushes and
-               --  tries again, which is the same contract as a full
-               --  io_uring submission queue.
-               return;
-            end if;
-         end;
-         E.Unsent := E.Unsent + 1;
-         E.Live := E.Live + 1;
-         E.Ring_Live := E.Ring_Live + 1;
-         Queued := True;
-         return;
-      end if;
-
+      --  Everything else needs an OVERLAPPED that stays put from here
+      --  until the completion comes back, so everything else takes a slot.
+      --  A pool momentarily empty is not an error: the caller flushes what
+      --  is outstanding, lets sibling fibers run, and tries again, which is
+      --  the same contract a full io_uring submission queue has.
       Which := Take_Slot (E);
       if Which = No_Slot then
-         return;   --  pool momentarily empty; the caller flushes and retries
+         return;
       end if;
 
       declare
@@ -1047,20 +890,12 @@ package body Iour.Reactor with SPARK_Mode => Off is
                Post_Done (Slot, 0);
 
             when Kind_Recv | Kind_Send =>
-               --  The ring path returned above; this is the fallback, and
-               --  overlapped Winsock does need the OVERLAPPED to stay put.
-               if False then
-                  null;
-               else
-                  E.Live := E.Live + 1;
-                  E.Port_Live := E.Port_Live + 1;
-                  E.Kernel_Live := E.Kernel_Live + 1;
-                  Slot.From_Kernel := True;
-                  Res := Start_Overlapped_Io
-                    (E, Slot, Writing => Spec.Kind = Kind_Send);
-                  if Res < 0 then
-                     Post_Done (Slot, Res);
-                  end if;
+               E.Live := E.Live + 1;
+               E.Port_Live := E.Port_Live + 1;
+               Res := Start_Overlapped_Io
+                 (E, Slot, Writing => Spec.Kind = Kind_Send);
+               if Res < 0 then
+                  Post_Done (Slot, Res);
                end if;
 
             when Kind_Write =>
@@ -1071,8 +906,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
             when Kind_Accept =>
                E.Live := E.Live + 1;
                E.Port_Live := E.Port_Live + 1;
-               E.Kernel_Live := E.Kernel_Live + 1;
-               Slot.From_Kernel := True;
                Res := Start_Accept (E, Slot);
                if Res < 0 then
                   Post_Done (Slot, Res);
@@ -1094,6 +927,19 @@ package body Iour.Reactor with SPARK_Mode => Off is
             when Kind_Close =>
                E.Live := E.Live + 1;
                E.Port_Live := E.Port_Live + 1;
+
+               --  Forget it before the handle goes back to Windows to be
+               --  handed out again, or the next socket to be given this
+               --  number would be taken for one already on the port and
+               --  would never be associated with it.
+               declare
+                  Where : constant Cache_Index := Cache_Slot (Slot.Sock);
+               begin
+                  if E.On_Port (Where) = Slot.Sock then
+                     E.On_Port (Where) := Win.Null_Handle;
+                  end if;
+               end;
+
                Post_Done (Slot, Ffi.Net.Close (Spec.Fd));
 
             when Kind_Timeout =>
@@ -1116,48 +962,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
    --  Draining
    ---------------------------------------------------------------------------
 
-   --  Everything the ring has finished.  Cheap when there is nothing:
-   --  PopIoRingCompletion answers S_FALSE without a system call.
-   procedure Drain_Ring (E : in out Engine) is
-      Cqe    : aliased Win.Ioring_Cqe;
-      Result : Win.Hresult;
-      Res    : Io_Result;
-   begin
-      if not E.Use_Ring or else Win.Pop_Completion = null then
-         return;
-      end if;
-
-      loop
-         exit when E.Pend_Count >= Pending_Capacity;
-         Cqe := (others => <>);
-         Result := Win.Pop_Completion.all (E.Ring, Cqe'Access);
-         exit when Result /= Win.S_Ok;
-
-         if Cqe.Result >= 0 then
-            --  Information is the byte count, which is what every caller
-            --  of a read or a write is waiting for.  A read of zero is the
-            --  peer closing, exactly as it is on Linux.
-            Res := (if Cqe.Information > Unsigned_64 (Io_Result'Last)
-                    then Io_Result'Last
-                    else Io_Result (Cqe.Information));
-         elsif Win.Means_Unsupported (Cqe.Result) then
-            --  The ring refused the handle.  The design is meant to make
-            --  this impossible -- no data socket is ever put on a
-            --  completion port -- so it means an invariant broke rather
-            --  than that the peer did something.  Report it as EINVAL,
-            --  which is what the fiber will see and pass on.
-            Res := -E_Invalid;
-         else
-            Res := Win.Hresult_Failure (Cqe.Result);
-         end if;
-
-         Post_Pending (E, Cqe.User_Data, Res);
-         if E.Ring_Live > 0 then
-            E.Ring_Live := E.Ring_Live - 1;
-         end if;
-      end loop;
-   end Drain_Ring;
-
    --  What one completion-port entry means.
    procedure Absorb (E : in out Engine; Item : Win.Overlapped_Entry) is
       Res : Io_Result;
@@ -1169,11 +973,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
             --  nothing to dereference, and nothing to retire: a wakeup was
             --  never counted as this shard's own work.
             Post_Wakeup (E, Unsigned_64 (To_Integer (Item.Overlap)));
-
-         when Key_Ring =>
-            --  The bridge saying the ring has something.  Drain_Ring, which
-            --  every pass calls anyway, is what actually collects it.
-            null;
 
          when Key_Done | Key_Socket =>
             if Item.Overlap = System.Null_Address then
@@ -1218,19 +1017,27 @@ package body Iour.Reactor with SPARK_Mode => Off is
                            Len   => Win.Handle'Size / 8);
                      end;
 
-                     --  Without a ring the data plane is overlapped
-                     --  Winsock, and only then may the accepted socket go
-                     --  on the port.
-                     if not E.Use_Ring then
-                        if Win.Create_Completion_Port
-                             (File     => Slot.Accepted,
-                              Existing => E.Port,
-                              Key      => Key_Socket,
-                              Threads  => 0) = Win.Null_Handle
-                        then
-                           null;
-                        end if;
-                     end if;
+                     --  Deliberately NOT associated with a port here,
+                     --  although it must be on one before its first read.
+                     --
+                     --  A socket may be associated with exactly one port
+                     --  for as long as it is open, and it is the shard
+                     --  that SERVES the connection that has to own it --
+                     --  not the shard that accepted it.  Where the port
+                     --  cannot be shared there is one acceptor dealing
+                     --  connections round the cores, so those two are
+                     --  usually different, and associating here sent three
+                     --  quarters of every server's completions to a shard
+                     --  that had no fiber waiting for them: the entry was
+                     --  resolved against the wrong shard's slot table and
+                     --  woke whichever fiber happened to hold that index.
+                     --  Measured as 500 connections managing 2158 frames
+                     --  between them before every one of them failed.
+                     --
+                     --  Start_Overlapped_Io associates it instead, on the
+                     --  shard that issues the first read -- which is the
+                     --  shard the connection was dealt to, and the one
+                     --  that will hold it for its whole life.
 
                      Res := Io_Result (Slot.Accepted);
                   elsif Slot.Accepted /= Win.Invalid_Socket then
@@ -1258,9 +1065,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
                if E.Port_Live > 0 then
                   E.Port_Live := E.Port_Live - 1;
                end if;
-               if Slot.From_Kernel and then E.Kernel_Live > 0 then
-                  E.Kernel_Live := E.Kernel_Live - 1;
-               end if;
                Give_Slot (E, Slot.Me);
             end;
 
@@ -1269,47 +1073,22 @@ package body Iour.Reactor with SPARK_Mode => Off is
       end case;
    end Absorb;
 
-   --  Turn "the ring has something" into an entry on the port, for a
-   --  shard that has to sleep on the port anyway.  One registered wait,
-   --  never taken down: without WT_EXECUTEONLYONCE it re-arms itself, and
-   --  the event is auto-reset, so this is a standing subscription.
-   procedure Arm_Bridge (E : in out Engine; Shard : Shard_Id) is
-      Wait : aliased Win.Handle := Win.Null_Handle;
-      Ok   : Win.Bool;
-   begin
-      E.Bridged := True;   --  set first: one attempt is enough either way
-      if E.Ring_Evt = Win.Null_Handle then
-         return;
-      end if;
-      Ok := Win.Register_Wait
-        (Wait_Object  => Wait'Access,
-         Object       => E.Ring_Evt,
-         Callback     => Ring_Ready'Access,
-         Context      => To_Address (Integer_Address (Shard)),
-         Milliseconds => Win.Infinite,
-         Flags        => Win.Wt_Execute_In_Wait_Thread);
-      if Ok /= 0 then
-         E.Ring_Wait := Wait;
-      end if;
-   end Arm_Bridge;
-
-   --  Everything both halves have finished, waiting no longer than
-   --  Timeout_Ms for the port.  This is the only place a shard blocks.
+   --  Everything the port has finished, waiting no longer than Timeout_Ms
+   --  for it.  This is the only place a shard blocks.
    --
-   --  The ring goes first, and the port is skipped entirely when it cannot
-   --  have anything.  That second part is worth more than it looks.  A
-   --  shard serving connections has every one of its completions in the
-   --  ring; the port carries accepts, connects, timers and wakeups, and on
-   --  every core except the one accepting there are usually none of those.
-   --  Asking the port anyway costs a system call, the scheduler asks twice
-   --  a pass, and at a hundred thousand round trips a second that is the
-   --  largest avoidable cost in this backend.
+   --  GetQueuedCompletionStatusEx is doing three jobs in one system call:
+   --  it is the wait, it is the batch collection, and -- because a
+   --  sibling's PostQueuedCompletionStatus lands in the same queue -- it is
+   --  the cross-shard wakeup.  That is why there is nothing else here.
    --
-   --  A blocking drain always asks: the wait is the point, and the port is
-   --  where it happens.
-   procedure Drain (Shard : Shard_Id; Timeout_Ms_In : Win.Dword) is
+   --  The one thing worth keeping is the early return.  A non-blocking
+   --  drain on a shard that has nothing outstanding and no wakeup pending
+   --  cannot find anything, and the scheduler asks twice a pass; at a
+   --  hundred thousand round trips a second a system call that can only
+   --  answer "nothing" is worth not making.  A blocking drain always asks,
+   --  because the wait is the point.
+   procedure Drain (Shard : Shard_Id; Timeout_Ms : Win.Dword) is
       E       : Engine renames Engines_Data (Shard);
-      Timeout_Ms : Win.Dword := Timeout_Ms_In;
       Room    : Natural;
       Wanted  : Natural;
       Items   : Win.Entry_Array (0 .. Drain_Batch - 1);
@@ -1321,8 +1100,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
          return;
       end if;
 
-      Drain_Ring (E);
-
       --  Read the flag and clear it before looking, so a wakeup that lands
       --  during the look is seen on the next pass rather than lost.
       Woken := Wake_Flags (Shard);
@@ -1332,58 +1109,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
 
       if Timeout_Ms = 0 and then E.Port_Live = 0 and then not Woken then
          return;
-      end if;
-
-      --  A blocking wait on a shard with nothing the kernel will deliver
-      --  to the port sleeps on the ring's own event instead.
-      --
-      --  This is the difference between one wakeup and three.  Going
-      --  through the port means the ring signals its event, a thread-pool
-      --  thread wakes to notice, that thread posts to the port, and only
-      --  then does this shard's wait return -- two extra thread wakeups per
-      --  completion, on a path that runs twice per round trip.  Measured
-      --  on one idle connection it was most of the difference between this
-      --  runtime and the two it is compared against.
-      --
-      --  Bridged is sticky because the bridge and this wait cannot share
-      --  the event: it is auto-reset, so whichever waiter reaches it first
-      --  consumes it, and the other sleeps through the completion.  A shard
-      --  that has ever needed the port keeps it.
-      if Timeout_Ms > 0
-        and then E.Ring_Signals
-        and then not E.Bridged
-        and then E.Kernel_Live = 0
-      then
-         declare
-            Handles : aliased Win.Handle_Array (0 .. 1) :=
-              [E.Ring_Evt, E.Wake_Evt];
-            Ignored : Win.Dword;
-         begin
-            Ignored := Win.Wait_For_Objects
-              (Count        => 2,
-               Handles      => Handles'Address,
-               Wait_All     => 0,
-               Milliseconds => Timeout_Ms);
-         end;
-
-         Drain_Ring (E);
-         if Wake_Flags (Shard) then
-            Wake_Flags (Shard) := False;
-            Woken := True;
-         end if;
-         if E.Port_Live = 0 and then not Woken then
-            return;
-         end if;
-         --  Something of ours is on the port; take it without waiting
-         --  again.
-         Timeout_Ms := 0;
-      end if;
-
-      --  About to sleep on the port with the kernel owing us something.
-      --  Bridge the ring onto it, once, so a ring completion arriving
-      --  during that sleep still wakes this shard.
-      if Timeout_Ms > 0 and then E.Ring_Signals and then not E.Bridged then
-         Arm_Bridge (E, Shard);
       end if;
 
       Room := Pending_Capacity - E.Pend_Count;
@@ -1401,9 +1126,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
                exit when I > Items'Last;
                Absorb (E, Items (I));
             end loop;
-            --  A blocking wait may have slept through ring completions
-            --  that arrived alongside; take them now rather than next pass.
-            Drain_Ring (E);
          end if;
       end if;
    end Drain;
@@ -1417,45 +1139,24 @@ package body Iour.Reactor with SPARK_Mode => Off is
    --  enough that nothing can be stranded by it.
    Default_Sleep_Ms : constant Win.Dword := 1000;
 
-   --  A ring that cannot signal has to be looked at rather than waited on,
-   --  so a sleep with ring operations outstanding is kept short.
-   Poll_Sleep_Ms : constant Win.Dword := 1;
-
+   --  There is nothing to hand over.  Every operation this backend takes is
+   --  already with the kernel by the time Push returns -- WSARecv, WSASend
+   --  and AcceptEx are submitted where they are built -- so Flush is only
+   --  ever the sleep half of what its name suggests.  It keeps the name
+   --  because the spec is shared with a backend where it is both.
    procedure Flush
      (Shard    : Shard_Id;
       Wait_For : Natural;
       Status   : out Io_Result)
    is
-      E         : Engine renames Engines_Data (Shard);
-      Submitted : aliased Unsigned_32 := 0;
-      Result    : Win.Hresult;
-      Timeout   : Win.Dword;
+      E       : Engine renames Engines_Data (Shard);
+      Timeout : Win.Dword;
    begin
       Status := 0;
 
       if not E.Started then
          Status := -E_Again;
          return;
-      end if;
-
-      --  Hand over everything built into the submission queue.  Asking for
-      --  no completions and no wait makes this the exact counterpart of an
-      --  io_uring_enter that only submits.
-      if E.Use_Ring and then E.Unsent > 0 and then Win.Submit_Io_Ring /= null
-      then
-         Result := Win.Submit_Io_Ring.all
-           (Ring         => E.Ring,
-            Wait_For     => 0,
-            Milliseconds => 0,
-            Submitted    => Submitted'Access);
-         if Result >= 0 then
-            E.Unsent :=
-              (if Natural (Submitted) >= E.Unsent
-               then 0 else E.Unsent - Natural (Submitted));
-         else
-            Status := Win.Hresult_Failure (Result);
-            return;
-         end if;
       end if;
 
       if Wait_For = 0 then
@@ -1468,10 +1169,6 @@ package body Iour.Reactor with SPARK_Mode => Off is
       end if;
 
       Timeout := (if E.Armed then E.Idle_Ms else Default_Sleep_Ms);
-      if E.Ring_Live > 0 and then not E.Ring_Signals then
-         Timeout := (if Timeout > Poll_Sleep_Ms then Poll_Sleep_Ms
-                     else Timeout);
-      end if;
       E.Armed := False;
 
       Drain (Shard, Timeout);
@@ -1526,11 +1223,12 @@ package body Iour.Reactor with SPARK_Mode => Off is
    --  Registered files
    ---------------------------------------------------------------------------
 
-   --  Windows has nothing corresponding.  IoRing does have
-   --  IORING_OP_REGISTER_FILES, but what it registers is handles for read
-   --  and write, and it is accept -- which the ring has no opcode for --
-   --  that would have to fill the table.  So every descriptor here is an
-   --  ordinary one, which is a path the whole runtime already supports.
+   --  Windows has nothing corresponding.  Registered files are an
+   --  io_uring idea: a table the kernel indexes instead of looking a
+   --  descriptor up, filled by accept and referenced by everything after
+   --  it.  Nothing on the completion port takes an index in place of a
+   --  handle, so every descriptor here is an ordinary one -- which is a
+   --  path the whole runtime already supports.
    procedure Has_Fixed_Files (Shard : Shard_Id; Yes : out Boolean) is
       pragma Unreferenced (Shard);
    begin
@@ -1572,11 +1270,15 @@ package body Iour.Reactor with SPARK_Mode => Off is
    --  Reporting
    ---------------------------------------------------------------------------
 
-   function Backend_Name return String is ("Windows IoRing");
+   function Backend_Name return String is ("Windows IOCP");
 
+   --  There is no ring here, so no ring carries anything.  The question the
+   --  spec asks is whether the backend has a submission ring that the data
+   --  plane goes through, and on Windows the answer is now simply no.
    procedure Ring_Carries_Sockets (Shard : Shard_Id; Yes : out Boolean) is
+      pragma Unreferenced (Shard);
    begin
-      Yes := Engines_Data (Shard).Use_Ring;
+      Yes := False;
    end Ring_Carries_Sockets;
 
 end Iour.Reactor;

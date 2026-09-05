@@ -66,11 +66,12 @@ demo: examples
 
 # The runtime's echo demo against the Tokio and Go equivalents: every
 # server against every client, then each server alone across core counts,
-# then latency.  Needs cargo and go, and Linux -- the controls that make
-# the numbers comparable are taskset, ip_local_port_range and
-# ListenOverflows, none of which Windows has.  See the header of
-# scripts/bench.sh for the knobs, and for why running it as root and
-# unprivileged gives different answers.
+# then latency.  Needs cargo and go.  Runs on both systems, but Windows
+# lacks the controls that make the numbers strictly comparable -- taskset,
+# ip_local_port_range and ListenOverflows -- so read the Windows caveats in
+# the header of scripts/bench.sh before comparing across systems.  That
+# header also has the knobs, and why running it as root and unprivileged
+# gives different answers on Linux.
 bench: examples
 	./scripts/bench.sh
 

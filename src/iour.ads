@@ -8,14 +8,15 @@
 --      assignment and task hierarchies, so the shards are single task
 --      declarations in Iour.Shards, not an array of task objects.
 --
---    * Each shard owns one submission ring -- io_uring on Linux, IoRing on
---      Windows.  Nothing about a ring is shared: only the shard that
---      created one ever submits to it or reaps from it, which is what lets
---      the design use IORING_SETUP_SINGLE_ISSUER on Linux, is what makes an
---      IoRing submission queue safe to build without a lock on Windows, and
---      is why submission needs no locking either way.  Everything the ring
---      cannot express lives behind Iour.Reactor, which is the one package
---      with two bodies.
+--    * Each shard owns its completion machinery outright -- one io_uring
+--      on Linux, one I/O completion port on Windows.  Nothing about it is
+--      shared: only the shard that created one ever submits to it or reaps
+--      from it, which is what lets the design use
+--      IORING_SETUP_SINGLE_ISSUER on Linux, is what lets a port be created
+--      with a concurrency of one on Windows, and is why submission needs no
+--      locking either way.  Everything the two systems spell differently
+--      lives behind Iour.Reactor, which is the one package with two
+--      bodies.
 --
 --    * Work is carried by stackful fibers.  A fiber has its own stack, so
 --      Await is an ordinary function call that happens to suspend: when it

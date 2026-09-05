@@ -11,7 +11,12 @@ package body Iour.Scheduler with SPARK_Mode => On is
    --  come back after shutdown is requested.  Draining is the normal path;
    --  this bound is what stops one operation that never completes -- a
    --  pending accept nobody connects to, say -- from hanging the process.
-   Drain_Passes : constant := 64;
+   --
+   --  A pass on this path is one armed idle sleep, so this is roughly a
+   --  second of grace.  It is a count rather than a deadline because a
+   --  shard has no clock of its own here, and it is a bound on time only
+   --  because Run arms that timer once shutdown has been requested.
+   Drain_Passes : constant := 1024;
 
    type Counter_Array is array (Shard_Id) of Natural;
 
@@ -332,6 +337,11 @@ package body Iour.Scheduler with SPARK_Mode => On is
       loop
          Progress := False;
 
+         --  Read once, at the top of the pass rather than at the bottom of
+         --  it: the sleep in step 4 is the long thing this pass does, and
+         --  a shard that is shutting down must not settle in for it.
+         Stop_Requested := Control.Stopping;
+
          --  0. Wakeups posted by threads that own no ring -------------
          --  The environment task fulfilling a promise lands here.  They are
          --  converted to ordinary local wakeups on this shard, which is the
@@ -440,6 +450,17 @@ package body Iour.Scheduler with SPARK_Mode => On is
                     (Shard,
                      (if Idle_Streak > Reactor.Max_Backoff
                       then Reactor.Max_Backoff else Idle_Streak));
+               elsif Stop_Requested then
+                  --  Shutting down with operations still outstanding, some
+                  --  of which may be ones the kernel will never complete.
+                  --  That is what the drain bound below is for, and the
+                  --  bound is counted in passes -- so it is a bound on
+                  --  time only if a pass is short.  An unarmed sleep here
+                  --  lasts Default_Sleep_Ms, and sixty-four of those made
+                  --  shutting a server down with pending accepts take a
+                  --  minute.  Arming it makes the pass a millisecond and
+                  --  the bound mean what it says.
+                  Reactor.Arm_Idle_Timer (Shard);
                end if;
                if Idle_Streak <= Reactor.Max_Backoff then
                   Idle_Streak := Idle_Streak + 1;
@@ -455,7 +476,6 @@ package body Iour.Scheduler with SPARK_Mode => On is
          end if;
 
          --  Stop once asked to, and only after the work in hand is done.
-         Stop_Requested := Control.Stopping;
          if Stop_Requested then
             Run_Queue.Depth (Queued);
             Fibers.Ready_Depth (Shard, Ready);

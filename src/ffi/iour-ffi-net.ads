@@ -9,8 +9,8 @@
 --  The spec is portable and the body is not.  Underneath, Linux calls
 --  socket/bind/listen/setsockopt/getsockname/close and Windows calls the
 --  Winsock spellings of the same six, with WSA_FLAG_OVERLAPPED on the
---  socket because an overlapped handle is what both the completion port
---  and the IoRing require.  Neither of those vocabularies appears here.
+--  socket because an overlapped handle is what the completion port
+--  requires.  Neither of those vocabularies appears here.
 --
 --  All of these follow the runtime's reporting convention rather than
 --  either system's, so a caller never has to switch between "-1 plus
