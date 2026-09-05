@@ -7,20 +7,21 @@
 //! frame, answers PONG, and stops on BYE.  A connections-to-serve of 0 means
 //! run until killed.
 //!
-//! Worker threads are pinned by IOUR_BENCH_CPUS ("1,2,3,4"), one thread per
-//! listed CPU, which is what the Ada shards do with their static CPU aspects.
+//! Nothing here is configured for the benchmark.  It is `#[tokio::main]` on
+//! the default multi-thread runtime -- as many workers as tokio thinks the
+//! machine has, scheduled wherever the OS puts them -- and
+//! `TcpListener::bind`, with the backlog the standard library asks for.
+//! That is the point: this is what the comparison is against, not a tuned
+//! copy of the Ada server's thread-per-core arrangement.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
-use tokio_echo::{
-    arg_or, build, cpu_list, listener_with_backlog, parse, pin_to,
-    raise_descriptor_limit, Frame, Kind, FRAME_SIZE,
-};
+use tokio_echo::{arg_or, build, parse, Frame, Kind, FRAME_SIZE};
 
 struct Stats {
     accepted: AtomicUsize,
@@ -99,38 +100,18 @@ async fn serve(mut conn: TcpStream, stats: Arc<Stats>, goal: usize, shutdown: Ar
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let port = arg_or(&args, 0, 9099) as u16;
     let goal = arg_or(&args, 1, 0) as usize;
 
-    let cpus = cpu_list("IOUR_BENCH_CPUS");
-    let main_cpu = cpu_list("IOUR_BENCH_MAIN_CPU");
-    if let Some(&c) = main_cpu.first() {
-        pin_to(c);
-    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
-    let workers = if cpus.is_empty() { 4 } else { cpus.len() };
-    let next = Arc::new(AtomicUsize::new(0));
-    let pin_set = cpus.clone();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(workers).enable_all();
-    if !pin_set.is_empty() {
-        let next = next.clone();
-        builder.on_thread_start(move || {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            if i < pin_set.len() {
-                pin_to(pin_set[i]);
-            }
-        });
-    }
-    let rt = builder.build().expect("runtime");
-
-    let fd_limit = raise_descriptor_limit();
-
-    rt.block_on(async move {
-        let listener = match listener_with_backlog(port, 4096) {
+    {
+        let listener = match TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
             Err(e) => {
                 println!("tokio_echo_server: cannot listen on port {port} ({e})");
@@ -139,10 +120,7 @@ fn main() {
         };
         let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
 
-        println!(
-            "tokio_echo_server: listening on port {bound} with {workers} workers, \
-             descriptor limit {fd_limit}"
-        );
+        println!("tokio_echo_server: listening on port {bound} with {workers} workers");
         if goal > 0 {
             println!("tokio_echo_server: will serve {goal} connections, then stop");
         } else {
@@ -196,5 +174,5 @@ fn main() {
         );
 
         std::process::exit(if errors == 0 { 0 } else { 1 });
-    });
+    }
 }

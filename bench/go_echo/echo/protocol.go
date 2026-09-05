@@ -1,13 +1,14 @@
 // Package echo holds the shared pieces for the Go side of the comparison:
-// the same 32-byte wire format the Ada demo and bench/tokio_echo speak, and
-// the same CPU pinning the Ada runtime does with `CPU =>` aspects.
+// the 32-byte wire format the Ada demo and bench/tokio_echo speak, and the
+// argument parsing the two binaries have in common.
+//
+// It used to hold CPU pinning and an rlimit raise as well, in a pair of
+// build-tagged files that reached for syscall and kernel32.  Those existed
+// so the Go binaries met the Ada ones on the Ada ones' terms; they are gone,
+// and nothing here is platform-dependent any more.
 package echo
 
-import (
-	"os"
-	"strconv"
-	"strings"
-)
+import "strconv"
 
 const (
 	FrameSize   = 32
@@ -81,25 +82,6 @@ func Parse(from *Frame) (Kind, uint32) {
 		value = value*10 + uint32(d-'0')
 	}
 	return kind, value
-}
-
-// CPUList parses a "1,2,3,4" CPU list out of an environment variable.
-func CPUList(name string) []int {
-	raw, ok := os.LookupEnv(name)
-	if !ok || strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	var out []int
-	for _, piece := range strings.Split(raw, ",") {
-		piece = strings.TrimSpace(piece)
-		if piece == "" {
-			continue
-		}
-		if n, err := strconv.Atoi(piece); err == nil && n >= 0 {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 // ArgOr reads a positional argument (0-indexed, after the program name),

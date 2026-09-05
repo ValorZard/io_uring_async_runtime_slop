@@ -44,15 +44,32 @@ Measured on this machine, 4 shards, loopback, `make demo`:
 | Frames exchanged | 20000 | 20000 |
 | Errors | 0 | 0 |
 
-And against the Tokio and Go equivalents in `bench/`, on Windows — one
-connection, thousands of sequential round trips, idle server:
+And against the Tokio and Go equivalents in `bench/`, on Windows. Those two
+are ordinary programs — `net.Listen` and default `GOMAXPROCS`,
+`#[tokio::main]` and `TcpListener::bind` — so on this 32-CPU machine they use
+all of it while the Ada server uses the four cores its `Shard_Count` names.
+That asymmetry is deliberate: thread-per-core pinning is what this runtime
+*is*, not a benchmark setting. It also means **CPU per round trip is the
+column to read**, since it does not depend on how many cores a runtime helped
+itself to.
 
-| | Ada | Tokio | Go |
+| 2000 connections × 100 rounds, same client | Ada | Go | Tokio |
 |---|---|---|---|
-| µs per round trip | 22.0 | 21.5 | 23.2 |
-| server µs of CPU per round trip, 1 core | 8.9 | 11.9 | 8.8 |
+| round trips per second | **243,673** | 207,365 | 115,772 |
+| server µs of CPU per round trip | **11.4** | 47.0 | 41.9 |
+| peak RSS, MB | 27 | 21 | 8 |
 
-`make bench` runs the whole matrix; `bench/results/` has the CSVs.
+| one connection, sequential | Ada | Go | Tokio |
+|---|---|---|---|
+| µs per round trip | **12.8** | 13.0 | 14.0 |
+
+Spreading a latency-bound loopback workload over 32 cores costs Go and Tokio
+two to four times the CPU per round trip: every wakeup becomes a cross-core
+interrupt onto a cold cache. The memory goes the other way — one 64 KiB fiber
+stack per live connection is what this runtime pays.
+
+`make bench` runs the whole matrix; `bench/results/` has the CSVs, and the
+header of `scripts/bench.sh` says exactly what is and is not held equal.
 
 Run it yourself with `make demo`, which shows a small traced run first so you
 can watch the scheduler work, then the full 2000-connection run for the

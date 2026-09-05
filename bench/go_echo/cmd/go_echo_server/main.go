@@ -8,11 +8,13 @@
 // reads a 32-byte frame, answers PONG, and stops on BYE.  A
 // connections-to-serve of 0 means run until killed.
 //
-// IOUR_BENCH_CPUS ("1,2,3,4") is read the same way the tokio binaries read
-// it, restricting the process to that CPU set before any goroutine does
-// real work and setting GOMAXPROCS to match -- see echo.PinCPUSet for why
-// that is the Go equivalent of tokio's per-worker pinning, not the same
-// thing.
+// Nothing here is configured for the benchmark.  It is net.Listen and
+// goroutines on the default GOMAXPROCS -- what a Go program does unless it
+// is told otherwise -- and that is the point: the comparison is against
+// what someone would deploy, not against a tuned copy of the Ada server's
+// thread-per-core arrangement.  There used to be process affinity, a
+// GOMAXPROCS override and a hand-rolled listen backlog here, all of it so
+// this binary met the Ada one on the Ada one's terms.
 package main
 
 import (
@@ -107,15 +109,7 @@ func main() {
 	port := echo.ArgOr(args, 0, 9099)
 	goal := uint64(echo.ArgOr(args, 1, 0))
 
-	cpus := echo.CPUList("IOUR_BENCH_CPUS")
-	echo.PinCPUSet(cpus)
-	if len(cpus) > 0 {
-		runtime.GOMAXPROCS(len(cpus))
-	}
-
-	fdLimit := echo.RaiseDescriptorLimit()
-
-	listener, err := listenWithBacklog(int(port), 4096)
+	listener, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		fmt.Printf("go_echo_server: cannot listen on port %d (%v)\n", port, err)
 		os.Exit(1)
@@ -126,8 +120,8 @@ func main() {
 	}
 
 	fmt.Printf(
-		"go_echo_server: listening on port %d with %d GOMAXPROCS, descriptor limit %d\n",
-		bound, runtime.GOMAXPROCS(0), fdLimit,
+		"go_echo_server: listening on port %d with %d GOMAXPROCS\n",
+		bound, runtime.GOMAXPROCS(0),
 	)
 	if goal > 0 {
 		fmt.Printf("go_echo_server: will serve %d connections, then stop\n", goal)

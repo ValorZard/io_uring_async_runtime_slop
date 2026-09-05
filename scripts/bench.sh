@@ -11,29 +11,62 @@
 #   matrix    every server against every client -- Ada, Tokio, and Go --
 #             at several connection counts.  The cross pairings are what
 #             separate the server's ceiling from the client's.
-#   scaling   each server alone, driven by the same tokio load generator,
-#             with 1, 2, 4 and 8 cores.  The Ada server's core count is
-#             Shard_Count, which is compile-time, so this builds one copy of
-#             the runtime per count under bench/build/.
+#   scaling   the Ada server alone across 1, 2, 4 and 8 shards, driven by
+#             the same tokio load generator, with Go and Tokio once each as
+#             the reference line.  Shard_Count is compile-time, so this
+#             builds one copy of the runtime per count under bench/build/;
+#             the other two have no core count to sweep now that nothing
+#             pins them.
 #   latency   one connection, thousands of sequential round trips, against
 #             an otherwise idle server.
 #
-# How it keeps the comparison fair
+# What is and is not held equal -- READ THIS BEFORE QUOTING A NUMBER
 #
-#   * Servers are pinned to the CPUs the Ada shards use (First_Shard_Cpu
-#     onward, in the system's own numbering); the tokio server pins its
-#     workers to the same set and the Go server restricts its process to
-#     it.  Clients run on a disjoint set, so the load generator never
-#     competes with the server under test.  The Ada client is a rebuild
-#     with First_Shard_Cpu moved, since its pinning is compile-time too.
-#   * Listen backlog is the largest the system will give: 4096 asked for
-#     explicitly on Linux, SOMAXCONN on Windows.  A short accept queue
-#     turns a connect into a one-second SYN retransmit when a thousand
-#     clients arrive at once, which measures the kernel and not a runtime.
+# The Go and Tokio programs are ordinary programs.  They were not always:
+# they used to pin their worker threads to the same cores as the Ada
+# shards, raise RLIMIT_NOFILE, and ask for a 4096 listen backlog through
+# hand-written syscall bindings -- three things neither of them would
+# otherwise contain, all of it there so the three servers met on the Ada
+# server's terms.  That scaffolding is gone.  `bench/go_echo` and
+# `bench/tokio_echo` are now plain safe Go and Rust with no libc, no
+# kernel32 and no build tags, doing what `net.Listen`, `#[tokio::main]` and
+# `TcpListener::bind` do by default.
+#
+# So the comparison is no longer "the same cores each".  It is:
+#
+#   * The Ada server on Shard_Count cores, because thread-per-core with a
+#     static CPU per shard is what that runtime *is*; its pinning is the
+#     thing under test, not a benchmark setting.
+#   * Go and Tokio on the whole machine, as many threads as they choose.
+#     On a 32-CPU host that is 32 against 4, and the wall-clock numbers
+#     should be read knowing it.
+#
+# Which makes **server CPU per round trip the honest column**, not round
+# trips per second: it is the one figure that does not depend on how many
+# cores a runtime helped itself to.  The summary prints it as `srv us/rt`.
+#
+# Two consequences worth expecting rather than discovering:
+#
+#   * Listen backlog is now whatever each runtime asks for by default.  Go
+#     passes SOMAXCONN and the Ada demo asks for it explicitly; Rust's
+#     std -- and so tokio -- asks for 128.  A short accept queue is the
+#     difference between a connect and a one-second SYN retransmit when a
+#     thousand clients arrive at once, so a tokio row that loses sessions
+#     at high connection counts is measuring that default, not the tokio
+#     scheduler.
+#   * Nothing raises RLIMIT_NOFILE for the Rust binaries any more.  Go's
+#     runtime raises it for itself; on Linux a large run may need the
+#     shell's ulimit raised before starting.
+#
+# Still held equal, because these are about the measurement and not about
+# the runtimes:
+#
 #   * Every run records whether any session failed to complete, and on
 #     Linux the change in the kernel's ListenOverflows counter as well.
 #   * Runs wait for TIME_WAIT to drain below a threshold before starting,
 #     so one run's litter is not the next run's connect latency.
+#   * Every server is measured by the same wrapper for CPU and peak RSS,
+#     and driven by the same clients.
 #
 # Runs on Linux and on Windows.  Everything that differs between them is in
 # the "Platform" section below and nowhere else; the stages are the same
@@ -59,9 +92,8 @@
 #   BENCH_REPS          repetitions per cell                      (3)
 #   BENCH_SCALES        matrix "connections:rounds" list          ("100:1000 1000:100 2000:100 5000:40")
 #   BENCH_CONNS/ROUNDS  scaling and latency load                  (2000 / 100)
-#   BENCH_SHARDS        scaling core counts                       ("1 2 4 8")
+#   BENCH_SHARDS        Ada core counts for the scaling sweep     ("1 2 4 8")
 #   BENCH_CLIENT_FIRST_CPU  Ada CPU number for the client's shard 0 (10, i.e. Linux CPU 9)
-#   BENCH_LOAD_CPUS     Linux CPUs for the scaling load generator (upper half of the machine)
 #   BENCH_UNPRIVILEGED  1 to run Ada servers as BENCH_USER          (0)
 #   BENCH_OUT           results directory                         (bench/results/<timestamp>)
 #
@@ -128,10 +160,9 @@ linux)
     time_wait_count() { ss -tan state time-wait 2>/dev/null | wc -l; }
     ;;
 esac
-LOAD_CPUS=${BENCH_LOAD_CPUS:-$(seq -s, $((NCPU / 2)) $((NCPU - 1)))}
-
-# The runtime's own pinning, read from the source so the tokio server can
-# be put on exactly the same cores.
+# The runtime's own pinning, read from the source.  It is reported rather
+# than imposed: the Ada binaries pin themselves because thread-per-core is
+# what they are, and nothing else here is pinned at all.
 SHARD_COUNT=$(sed -n 's/^ *Shard_Count *: *constant *:= *\([0-9]*\);.*/\1/p' src/iour.ads)
 FIRST_CPU=$(sed -n 's/^ *First_Shard_Cpu *: *constant *:= *\([0-9]*\);.*/\1/p' src/iour.ads)
 MAX_FUTURES=$(sed -n 's/^ *Max_Futures *: *constant *:= *\([0-9_]*\);.*/\1/p' src/iour.ads | tr -d _)
@@ -140,9 +171,7 @@ MAX_FIBERS=$(sed -n 's/^ *Max_Fibers *: *constant *:= *\([0-9_]*\);.*/\1/p' src/
 # Ada CPU 1 is the system's CPU 0, on both.
 cpus_from() { local first=$1 count=$2; seq -s, $((first - 1)) $((first - 2 + count)); }
 SERVER_CPUS=$(cpus_from "$FIRST_CPU" "$SHARD_COUNT")
-SERVER_MAIN=0
 CLIENT_CPUS=$(cpus_from "$CLIENT_FIRST_CPU" "$SHARD_COUNT")
-CLIENT_MAIN=$((CLIENT_FIRST_CPU - 2))
 
 TOKIO=bench/tokio_echo/target/release
 GO_ECHO=bench/go_echo
@@ -389,14 +418,14 @@ csv_header() {
 # ---------------------------------------------------------------------------
 
 stage_matrix() {
-    log "=== matrix: server on CPUs $SERVER_CPUS, client on CPUs $CLIENT_CPUS ==="
+    log "=== matrix: Ada server on CPUs $SERVER_CPUS, Ada client on CPUs"         "$CLIENT_CPUS; Go and Tokio unpinned on all $NCPU ==="
     local csv=$OUT/matrix.csv; csv_header "$csv"
     local ada_srv; ada_srv=$(as_user "bin/echo_server$EXE")
     local ada_cli=$BUILD/client/bin/echo_client$EXE
-    local tok_srv="IOUR_BENCH_CPUS=$SERVER_CPUS IOUR_BENCH_MAIN_CPU=$SERVER_MAIN $TOKIO/tokio_echo_server$EXE"
-    local tok_cli="IOUR_BENCH_CPUS=$CLIENT_CPUS IOUR_BENCH_MAIN_CPU=$CLIENT_MAIN $TOKIO/tokio_echo_client$EXE"
-    local go_srv="IOUR_BENCH_CPUS=$SERVER_CPUS $GO"
-    local go_cli="IOUR_BENCH_CPUS=$CLIENT_CPUS $GO_CLIENT"
+    local tok_srv="$TOKIO/tokio_echo_server$EXE"
+    local tok_cli="$TOKIO/tokio_echo_client$EXE"
+    local go_srv="$GO"
+    local go_cli="$GO_CLIENT"
     for scale in $SCALES; do
         local conns=${scale%%:*} rounds=${scale##*:}
         for rep in $(seq 1 "$REPS"); do
@@ -422,39 +451,41 @@ stage_matrix() {
     done
 }
 
+# Only the Ada server has a core count to sweep.  Go and Tokio decide for
+# themselves how many threads to run, and the OS decides where -- which is
+# the point of running them unconfigured -- so they appear once each, as the
+# reference line the sweep is read against, rather than once per core count.
 stage_scaling() {
-    log "=== scaling: load generator on CPUs $LOAD_CPUS, $CONNS x $ROUNDS ==="
+    log "=== scaling: Ada across core counts, $CONNS x $ROUNDS ==="
     local csv=$OUT/scaling.csv; csv_header "$csv"
-    local load="IOUR_BENCH_CPUS=$LOAD_CPUS IOUR_BENCH_MAIN_CPU=0 $TOKIO/tokio_echo_client$EXE"
+    local load="$TOKIO/tokio_echo_client$EXE"
     for rep in $(seq 1 "$REPS"); do
         for n in $SHARDS; do
             local srv; srv=$(server_bin "$n")
-            local cpus; cpus=$(cpus_from "$FIRST_CPU" "$n")
             if [[ -x $srv ]]; then
                 # shellcheck disable=SC2086
                 run_pair "$csv" "ada/$n-cores"   "$CONNS" "$ROUNDS" "$rep" $(as_user "$srv") -- $load
             fi
-            # shellcheck disable=SC2086
-            run_pair "$csv" "tokio/$n-cores" "$CONNS" "$ROUNDS" "$rep" \
-                IOUR_BENCH_CPUS="$cpus" IOUR_BENCH_MAIN_CPU=$SERVER_MAIN $TOKIO/tokio_echo_server$EXE -- $load
-            run_pair "$csv" "go/$n-cores" "$CONNS" "$ROUNDS" "$rep" \
-                "IOUR_BENCH_CPUS=$cpus" "$GO" -- $load
         done
+        # shellcheck disable=SC2086
+        run_pair "$csv" "tokio/default" "$CONNS" "$ROUNDS" "$rep" \
+            "$TOKIO/tokio_echo_server$EXE" -- $load
+        # shellcheck disable=SC2086
+        run_pair "$csv" "go/default" "$CONNS" "$ROUNDS" "$rep" "$GO" -- $load
     done
 }
 
 stage_latency() {
     log "=== latency: one connection, 5000 sequential round trips ==="
     local csv=$OUT/latency.csv; csv_header "$csv"
-    local load="IOUR_BENCH_CPUS=${LOAD_CPUS%%,*} IOUR_BENCH_MAIN_CPU=0 $TOKIO/tokio_echo_client$EXE"
+    local load="$TOKIO/tokio_echo_client$EXE"
     for rep in $(seq 1 "$REPS"); do
         # shellcheck disable=SC2086
         run_pair "$csv" "ada"   1 5000 "$rep" $(as_user "bin/echo_server$EXE") -- $load
         # shellcheck disable=SC2086
-        run_pair "$csv" "tokio" 1 5000 "$rep" \
-            IOUR_BENCH_CPUS="$SERVER_CPUS" IOUR_BENCH_MAIN_CPU=$SERVER_MAIN $TOKIO/tokio_echo_server$EXE -- $load
-        run_pair "$csv" "go" 1 5000 "$rep" \
-            "IOUR_BENCH_CPUS=$SERVER_CPUS" "$GO" -- $load
+        run_pair "$csv" "tokio" 1 5000 "$rep" "$TOKIO/tokio_echo_server$EXE" -- $load
+        # shellcheck disable=SC2086
+        run_pair "$csv" "go"    1 5000 "$rep" "$GO" -- $load
     done
 }
 
@@ -503,9 +534,18 @@ table("matrix -- round trips/s, median over repetitions",
       lambda g: sorted(g, key=lambda k: (int(k.split('x')[0]), k)))
 
 s = load("scaling.csv")
+
+# "ada/4-cores" sorts by its core count; "go/default" has none, and used to
+# raise straight out of the script -- taking the latency table and the
+# footnote with it, since one exception ends the whole summary.  Anything
+# without a number sorts last within its runtime.
+def scaling_key(k):
+    runtime, _, rest = k.partition('/')
+    head = rest.split('-')[0]
+    return (runtime, int(head) if head.isdigit() else 1 << 30, rest)
+
 table("scaling -- same tokio load generator, server alone",
-      s, lambda r: r["pairing"],
-      lambda g: sorted(g, key=lambda k: (k.split('/')[0], int(k.split('/')[1].split('-')[0]))))
+      s, lambda r: r["pairing"], lambda g: sorted(g, key=scaling_key))
 
 l = load("latency.csv")
 if l:

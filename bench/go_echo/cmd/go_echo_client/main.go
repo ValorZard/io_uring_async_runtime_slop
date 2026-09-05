@@ -7,6 +7,8 @@
 // PING/PONG round trips, says BYE, and closes.  The reported figure is the
 // Ada client's: total frames divided by wall time, where wall time covers
 // connect, the rounds, and teardown.
+//
+// Default GOMAXPROCS, no affinity: an ordinary Go program.
 package main
 
 import (
@@ -114,19 +116,11 @@ func main() {
 	connections := echo.ArgOr(args, 2, 1000)
 	rounds := echo.ArgOr(args, 3, 8)
 
-	cpus := echo.CPUList("IOUR_BENCH_CPUS")
-	echo.PinCPUSet(cpus)
-	if len(cpus) > 0 {
-		runtime.GOMAXPROCS(len(cpus))
-	}
-
-	fdLimit := echo.RaiseDescriptorLimit()
-
 	fmt.Printf(
 		"go_echo_client: %s port %d, %d connections, %d rounds each\n",
 		host, port, connections, rounds,
 	)
-	fmt.Printf("go_echo_client: %d GOMAXPROCS, descriptor limit %d\n", runtime.GOMAXPROCS(0), fdLimit)
+	fmt.Printf("go_echo_client: %d GOMAXPROCS\n", runtime.GOMAXPROCS(0))
 
 	st := &stats{}
 	start := time.Now()

@@ -6,6 +6,9 @@
 //! PING/PONG round trips, says BYE, and closes.  The reported figure is the
 //! Ada client's: total frames divided by wall time, where wall time covers
 //! connect, the rounds, and teardown.
+//!
+//! Plain `#[tokio::main]`: the default multi-thread runtime, on as many
+//! workers as tokio thinks the machine has, wherever the OS schedules them.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -14,10 +17,7 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use tokio_echo::{
-    arg_or, build, cpu_list, parse, pin_to, raise_descriptor_limit, Frame, Kind,
-    FRAME_SIZE,
-};
+use tokio_echo::{arg_or, build, parse, Frame, Kind, FRAME_SIZE};
 
 struct Stats {
     started: AtomicUsize,
@@ -112,43 +112,23 @@ async fn session(host: String, port: u16, rounds: u32, stats: Arc<Stats>) {
 }
 
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let host = args.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
     let port = arg_or(&args, 1, 9099) as u16;
     let connections = arg_or(&args, 2, 1000) as usize;
     let rounds = arg_or(&args, 3, 8);
 
-    let cpus = cpu_list("IOUR_BENCH_CPUS");
-    if let Some(&c) = cpu_list("IOUR_BENCH_MAIN_CPU").first() {
-        pin_to(c);
-    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
-    let workers = if cpus.is_empty() { 4 } else { cpus.len() };
-    let next = Arc::new(AtomicUsize::new(0));
-    let pin_set = cpus.clone();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(workers).enable_all();
-    if !pin_set.is_empty() {
-        let next = next.clone();
-        builder.on_thread_start(move || {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            if i < pin_set.len() {
-                pin_to(pin_set[i]);
-            }
-        });
-    }
-    let rt = builder.build().expect("runtime");
-
-    let fd_limit = raise_descriptor_limit();
-
-    rt.block_on(async move {
+    {
         println!(
-            "tokio_echo_client: {host} port {port}, {connections} connections, \
-             {rounds} rounds each"
+            "tokio_echo_client: {host} port {port}, {connections} connections,              {rounds} rounds each"
         );
-        println!("tokio_echo_client: {workers} workers, descriptor limit {fd_limit}");
+        println!("tokio_echo_client: {workers} workers");
 
         let stats = Arc::new(Stats::new());
         let start = Instant::now();
@@ -195,5 +175,5 @@ fn main() {
         } else {
             1
         });
-    });
+    }
 }

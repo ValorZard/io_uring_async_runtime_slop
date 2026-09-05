@@ -416,6 +416,12 @@ and a half-done version claims more than it proves.
 controls (`taskset`, `ip_local_port_range`, `ListenOverflows`), so read its
 Windows caveats before comparing numbers across systems.
 
+**Read the "What is and is not held equal" block at the top of the script
+before quoting any figure from it.** The Ada server is pinned to
+`Shard_Count` cores and Go and Tokio are not pinned at all, which is
+deliberate and which makes round trips per second an asymmetric measure. The
+`srv us/rt` column is the one that survives it.
+
 `bench/runwait` is a small Go program that replaces `/usr/bin/time -f '%U %S
 %M'`. It exists because of two traps:
 
@@ -579,10 +585,95 @@ So the removal is a simplification, not a speedup, and should be described
 that way. The throughput came from the start-up race, the acceptors and the
 shutdown path; the latency came from choosing the port over the ring.
 
-### The full suite, 2026-09-05 (`bench/results/20260905-noring`)
+### Go and Tokio run unconfigured now, and that changed the question
 
-`BENCH_REPS=2`, scales 500x200 and 2000x100, everything rebuilt. Medians;
-a row that lost sessions is marked and is not a throughput figure.
+Until 2026-09-05 the two comparison programs pinned their worker threads to
+the Ada shards' cores, raised `RLIMIT_NOFILE`, and asked for a 4096 listen
+backlog through hand-written `syscall` and `kernel32` bindings. None of that
+is anything a Go or Rust program would ordinarily contain; all of it was
+there so the three servers met on the Ada server's terms.
+
+It is gone. `bench/go_echo` and `bench/tokio_echo` are now plain safe Go and
+Rust -- no libc, no kernel32, no build tags, no `unsafe` -- doing what
+`net.Listen`, `#[tokio::main]` and `TcpListener::bind` do by default. 438
+lines came out.
+
+**So the comparison is no longer "the same cores each."** On this 32-CPU
+machine it is the Ada server on 4 pinned cores against Go and Tokio on all
+32. The Ada side keeps its pinning because thread-per-core with a static CPU
+per shard is what that runtime *is* -- it is the thing under test, not a
+benchmark setting.
+
+That makes **`srv us/rt` the honest column**, not round trips per second: it
+is the one figure that does not depend on how many cores a runtime helped
+itself to.
+
+Two things that were expected to bite and did not: Rust's `TcpListener::bind`
+asks for a backlog of 128 where Go passes `SOMAXCONN`, and nothing raises
+`RLIMIT_NOFILE` for the Rust binaries any more. Neither produced a failed
+session on Windows at 2000 connections. Every failure row in the run below is
+the Go *client* bursting connects, which it does against every server
+including its own.
+
+**Do not compare that run's numbers with the pinned one's.** The load
+generator changed too -- the Tokio client is now unpinned, and in the latency
+stage it used to be pinned to a single CPU -- which is why every latency
+figure roughly halved. Within-run comparisons only.
+
+### The full suite, 2026-09-05 unpinned (`bench/results/20260905-unpinned`)
+
+Holding the client constant, median of two repetitions:
+
+| load | client | Ada srv | Go srv | Tokio srv |
+|---|---|---|---|---|
+| 500x200 | Ada | 143,378 | **146,490** | 130,857 |
+| 500x200 | Go | **293,989** | lost 353 | lost 523 |
+| 500x200 | Tokio | **157,791** | 93,721 | 89,500 |
+| 2000x100 | Ada | **243,673** | 207,365 | 115,772 |
+| 2000x100 | Go | lost 2389 | lost 3497 | lost 3505 |
+| 2000x100 | Tokio | **122,652** | 102,649 | 93,303 |
+
+And the column that survives the asymmetry -- server CPU microseconds per
+round trip:
+
+| load | client | Ada | Go | Tokio |
+|---|---|---|---|---|
+| 500x200 | Ada | **10.2** | 32.7 | 20.6 |
+| 500x200 | Tokio | **10.3** | 25.9 | 28.1 |
+| 2000x100 | Ada | **11.4** | 47.0 | 41.9 |
+| 2000x100 | Tokio | **14.0** | 38.1 | 51.2 |
+
+**Unpinned Go and Tokio burn two to four times the CPU per round trip.**
+That is the cost of letting a work-stealing scheduler spread a latency-bound
+loopback workload across 32 cores: every wakeup becomes a cross-core IPI onto
+a cold cache. It is also the argument for thread-per-core stated as a
+measurement rather than as a preference.
+
+The scaling stage now sweeps only the Ada shard count, with the other two
+appearing once each as the reference line:
+
+```
+ada/1-cores  110,631 rt/s   8.71 us/rt
+ada/2-cores  134,014 rt/s   9.42
+ada/4-cores  133,398 rt/s  12.31
+ada/8-cores  133,132 rt/s  17.31
+go/default   111,188 rt/s  33.67
+tokio/default 100,927 rt/s 39.06
+```
+
+Two shards is where the Ada server stops gaining throughput on this load and
+starts only spending more CPU. Latency, one connection and 5000 sequential
+round trips: **Ada 12.8 us**, Go 13.0, Tokio 14.0.
+
+### Kept for contrast: the same suite with everything pinned (`bench/results/20260905-noring`)
+
+The last run before the scaffolding came out, with Go and Tokio pinned to
+the Ada shards' four cores. It is not superseded so much as answering a
+different question -- "same cores each" rather than "as deployed" -- and the
+pair is more useful than either alone. Read it against the unpinned tables
+above and the CPU column is the story: pinned, all three sit between 9.8 and
+15.5 us per round trip; unpinned, Ada stays at 10-14 and the other two go to
+21-51.
 
 Holding the client constant, which is what the cross pairings are for:
 
@@ -598,10 +689,12 @@ Holding the client constant, which is what the cross pairings are for:
 The Ada server leads every valid comparison, and under the Go client it is
 the only one of the three that completes every session.
 
-Server CPU per round trip is the number to watch rather than throughput:
-Ada 11.2-12.5 us, Go 9.8-12.6, Tokio 13.7-15.5. Peak RSS is where this
-runtime pays -- Ada 25-32 MB against Go's 11-30 and Tokio's 6-9, which is one
-64 KiB fiber stack per live connection.
+Server CPU per round trip, all three on the same four cores: Ada 11.2-12.5
+us, Go 9.8-12.6, Tokio 13.7-15.5 -- which is the point of keeping this run.
+Given the same cores, Go is as cheap per round trip as this runtime is;
+given the whole machine it is three times dearer. Peak RSS is where this
+runtime pays either way -- Ada 25-32 MB against Go's 11-30 and Tokio's 6-9,
+one 64 KiB fiber stack per live connection.
 
 Latency, one connection and 5000 sequential round trips against an idle
 server, all three driven by the Tokio client: **Ada 22.0 us**, Tokio 21.5,

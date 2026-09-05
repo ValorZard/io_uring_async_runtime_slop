@@ -60,19 +60,18 @@ pub fn parse(from: &Frame) -> (Kind, u32) {
     (kind, value)
 }
 
-pub mod platform;
-pub use platform::{listener_with_backlog, pin_to, raise_descriptor_limit};
-
-/// Parse a "1,2,3,4" CPU list out of an environment variable.
-pub fn cpu_list(var: &str) -> Vec<usize> {
-    match std::env::var(var) {
-        Ok(s) if !s.trim().is_empty() => s
-            .split(',')
-            .filter_map(|p| p.trim().parse::<usize>().ok())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
+//  There was a `platform` module here: CPU pinning, an rlimit raise, and a
+//  hand-rolled socket/bind/listen that asked for a 4096 backlog.  All three
+//  existed to hold this binary to the same conditions as the Ada one, and
+//  none of them is anything a tokio program would ordinarily contain -- they
+//  were `unsafe`, they were `libc` on one system and `kernel32` on the other,
+//  and between them they were the only reason this crate was not portable
+//  safe Rust.
+//
+//  They are gone, and what is measured now is what someone would actually
+//  deploy: `#[tokio::main]`, `TcpListener::bind`, and whatever the runtime
+//  decides to do with the machine.  See scripts/bench.sh for what that does
+//  and does not make comparable.
 
 pub fn arg_or(args: &[String], index: usize, default: u32) -> u32 {
     args.get(index)
