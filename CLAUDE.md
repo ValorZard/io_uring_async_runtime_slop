@@ -234,6 +234,107 @@ second overrun through silently.
 
 ---
 
+## SPARK_Mode is On unless it cannot be
+
+**Everything that CAN be proven with `SPARK_Mode => On` SHOULD be set to
+`SPARK_Mode => On`.** This is the rule the rest of this section serves.
+
+`Off` is not a convenience, and it is not the default for "code that talks to
+the kernel" — the Linux `Ffi.Sys`, `Ffi.Net` and `Iour.Reactor` are all `On`
+and all talk to the kernel. `Off` is a claim that the *language* cannot
+express what a body does, and each one enlarges the trusted base that the
+other 961 checks rest on. A new body starts `On`. If it will not prove, the
+thing to change is the body, not the aspect.
+
+Before writing `Off` anywhere, establish that `On` is impossible, and do it by
+experiment rather than by expectation:
+
+```
+alr gnatprove -P io_uring_async_runtime.gpr --mode=check_all -j0 -U
+```
+
+`--mode=check_all` is the cheap question: SPARK legality only, seconds rather
+than the minutes `--mode=all` takes. If it passes, `Off` was not needed.
+
+Two outcomes look similar in the log and mean opposite things:
+
+- **A hard error** — `E0001`, `E0002` and friends — means the construct is
+  outside SPARK. That is a real reason for `Off`.
+- **`assumed-global-null` is not a pass.** It means gnatprove could not see
+  what a subprogram touches and assumed it touches nothing. Flipping a spec to
+  `On` and collecting these makes the proof claim *more* than it should:
+  everything above is then verified against a kernel call modelled as pure. An
+  import gets a truthful `Global` before its callers go `On`, the way all
+  twenty of `Ffi.Posix`'s do.
+
+`Off` goes on the **smallest unit that needs it**. A package body may be `On`
+with `SPARK_Mode => Off` on the individual subprograms that need it, and that
+is preferred whenever it leaves anything analysed. The four below are
+whole-body only because in each case every subprogram in the body fails.
+
+### Why the Linux trusted base is exactly these four
+
+Rechecked by flipping each to `On` and recording what came back. Do not retry
+them expecting a different answer:
+
+* `Ffi.Fiber` (per ABI) — inline `Asm` in `naked` subprograms, which is not
+  analysable code at all.
+* `Ffi.Memory` — `E0002`, `'Address` outside an attribute definition clause,
+  on three of its four subprograms.
+* `Ffi.Uring.Memory` — `E0002` again, and `E0001` effectively volatile object
+  not at library level for the atomic ring words.
+* `Ffi.Identity` — legality passes, and the result is wrong. See below.
+
+`Ffi.Memory.Advance` is the near miss, and it looks like a gap when it is not.
+It takes no address — it is `Base + Storage_Offset (By)` — and it is legal
+SPARK. Analysed, it yields exactly one *unprovable* check: its postcondition
+`Advance'Result /= System.Null_Address`. SPARK does not axiomatise
+`System.Address` arithmetic, so nothing constrains the result and nothing ever
+will. `On` buys a permanently unproved check or a third justification, so it
+stays with the other three, where that postcondition is a promise about memory
+rather than a proof obligation.
+
+`Ffi.Identity` is the one to be careful with, because `check_all` **passes**
+it. The body is legal SPARK. It is simply not the same program: SPARK ignores
+`pragma Thread_Local_Storage` (`ignored-pragma`) and models the one per-thread
+slot as one shared variable, so `On` would prove a single-slot runtime this is
+not. `Current` is declared `Global => null` because it is a question about the
+*calling thread*, and per-thread state is something SPARK has no model for.
+Legality is necessary and not sufficient; the question is always whether the
+analysed program is the one that runs.
+
+### Windows is not at this standard, and this is the gap
+
+`Ffi.Win32` (spec **and** body), `Ffi.Sys`, `Ffi.Net` and `Iour.Reactor` are
+all `Off` on Windows, where the Linux `Ffi.Sys` and `Ffi.Net` are `On`. Only
+the reactor has a reason of the Linux kind. Both checks run against the
+Windows configuration from Linux — neither generates code:
+
+```
+alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=Windows_NT \
+  --mode=check_all -j0 -U
+alr exec -- gprbuild -P examples.gpr -XIOUR_OS=Windows_NT \
+  --subdirs=wincheck -j0 -c -f -cargs -gnatc
+```
+
+Measured that way: with the `Ffi.Win32` spec flipped to `On`, legality passes,
+`Ffi.Net` is four errors from `On` (three `'Access`-with-ownership, one
+`'Address`) and `Ffi.Sys` two, one of each. That is the tempting version of
+this change and it is the unsound one — it also raises eight
+`assumed-global-null` warnings, because not one of Win32's thirty-eight
+imports carries a `Global`.
+
+Doing it properly is gated on a design change rather than an annotation pass.
+`Ffi.Win32`'s body holds nine mutable package-level access-to-subprogram
+variables — the `AcceptEx`/`ConnectEx` and IoRing entry points, resolved
+lazily through `GetProcAddress` — and five flags beside them recording what
+was resolved, read back through `Ioring_Available`, `Accept_Ex` and the rest.
+Sound `On` needs those declared as `Abstract_State`,
+`Load_Ioring` and `Load_Socket_Extensions` declared to write it, every
+accessor to read it, and a truthful `Global` on each import. Until that
+exists the four stay `Off` together, because the spec is what everything above
+would be verified against and a half-done version claims more than it proves.
+
 ## Ada / GNAT / SPARK things hit in this codebase
 
 - A `Side_Effects` function **may not be an expression function**.
@@ -342,5 +443,9 @@ Comments in this codebase explain **why**, at length, and are part of the
 deliverable — match that register rather than adding `-- increment I`. Lines
 stay within 79 columns. Handles are small integers into static tables; there are
 no access types and no dynamic allocation, and changes should keep it that way.
+**Everything that CAN be proven with `SPARK_Mode => On` SHOULD be set to
+`SPARK_Mode => On`** — see *SPARK_Mode is On unless it cannot be*, which is
+where the rule and the evidence for the current four `Off` bodies live.
 `SPARK_Mode => Off` is confined to the trusted base listed in the README's
-*SPARK status* table; adding a fifth one needs a reason of the same kind.
+*SPARK status* table; adding a fifth one needs a reason of the same kind, and
+needs `--mode=check_all` run to show that `On` was not possible.

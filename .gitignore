@@ -12,3 +12,4 @@ target
 /bench/build/
 /bench/results/
 __pycache__
+*.exe

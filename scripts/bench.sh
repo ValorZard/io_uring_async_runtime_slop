@@ -153,7 +153,14 @@ BUILD=bench/build
 # What /usr/bin/time -f '%U %S %M' used to do, in a form that exists on
 # both systems.  See bench/runwait for why bash's own `time` builtin is
 # not a substitute on Windows.
-RUNWAIT=bench/runwait$EXE
+#
+# The binary goes in $BUILD rather than next to its source, because
+# bench/runwait is the source directory and on Linux -- where $EXE is empty
+# -- "bench/runwait" would name both.  go build -o with an existing
+# directory does not fail; it writes the binary inside it, so the build
+# reported success and every run that followed tried to execute a
+# directory.  Windows never saw it, the .exe keeping the two names apart.
+RUNWAIT=$BUILD/runwait$EXE
 
 log()  { printf '%s\n' "$*" | tee -a "$OUT/bench.log"; }
 die()  { echo "bench: $*" >&2; exit 1; }
@@ -261,9 +268,10 @@ stage_build() {
         || die "go build failed; see $OUT/build-go.log"
     log "  built bench/go_echo"
 
-    ( cd bench/runwait && go build -o "../runwait$EXE" . ) > "$OUT/build-runwait.log" 2>&1 \
+    mkdir -p "$BUILD"
+    ( cd bench/runwait && go build -o "../build/runwait$EXE" . ) > "$OUT/build-runwait.log" 2>&1 \
         || die "runwait build failed; see $OUT/build-runwait.log"
-    log "  built bench/runwait"
+    log "  built $RUNWAIT"
 
     # The Ada client, moved off the server's cores.
     build_variant "client" "$SHARD_COUNT" "$CLIENT_FIRST_CPU" "$((CLIENT_FIRST_CPU - 1))" \
