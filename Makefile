@@ -1,13 +1,29 @@
-# io_uring async runtime for Ada/SPARK -- build, test and verification.
+# io_uring / IoRing async runtime for Ada/SPARK -- build, test and
+# verification.
+#
 # Pure Ada: the context switch is GNAT inline Asm.  gcc appears below only
-# to compile the ABI conformance test, which is C on purpose -- it checks the
-# Ada mirrors against the real headers.
+# to compile the ABI conformance test, which is C on purpose -- it checks
+# the Ada mirrors against the real Linux headers, and so only runs there.
 #
 # The GNAT toolchain comes from Alire; alr exec puts it on PATH.
+#
+# Both systems build with the same commands.  The project file picks the
+# backend from the OS environment variable, which Windows sets for every
+# process and no Unix does; override it with IOUR_OS if you need to.
 
 SHELL := /bin/bash
 
-.PHONY: all lib examples tests abi-check smoke multi-await demo bench prove prove-boundary clean help
+# Windows builds get a .exe on every binary.  Nothing else below cares.
+ifeq ($(OS),Windows_NT)
+  EXE := .exe
+  HOST := windows
+else
+  EXE :=
+  HOST := linux
+endif
+
+.PHONY: all lib examples tests abi-check smoke multi-await demo bench \
+        prove check-linux clean help
 
 all: examples abi-check
 
@@ -21,21 +37,27 @@ tests: lib
 	alr exec -- gprbuild -P tests.gpr -j0
 
 # Fails to compile if any Ada mirror of the kernel ABI ever drifts from the
-# system headers.
+# system headers.  Linux only: it is io_uring's UAPI that is being checked,
+# and the Windows backend mirrors no structure the kernel owns -- IoRing's
+# submission and completion queues are reached through calls, not memory.
 abi-check: | bin
+ifeq ($(HOST),linux)
 	gcc -O2 -Wall -Wextra -o bin/abi_check tests/abi_check.c -luring
 	./bin/abi_check
+else
+	@echo "abi-check: Linux only -- nothing to check against on $(HOST)"
+endif
 
 bin obj:
 	mkdir -p $@
 
 smoke: tests abi-check
-	./bin/smoke
+	./bin/smoke$(EXE)
 
 # Many futures and many awaits inside one procedure, and proof that the core
 # changes hands at every one of those await points.
 multi-await: tests
-	./bin/multi_await
+	./bin/multi_await$(EXE)
 
 # Two phases: a small traced run showing what the scheduler is doing, then
 # 2000 simultaneous connections for the throughput figure.
@@ -43,16 +65,27 @@ demo: examples
 	./scripts/run_demo.sh
 
 # The runtime's echo demo against the Tokio and Go equivalents: every
-# server against every client, then each server alone across core counts, then
-# latency.  Needs cargo and go.  See the header of scripts/bench.sh
-# for the knobs, and for why running it as root and unprivileged gives
-# different answers.
+# server against every client, then each server alone across core counts,
+# then latency.  Needs cargo and go, and Linux -- the controls that make
+# the numbers comparable are taskset, ip_local_port_range and
+# ListenOverflows, none of which Windows has.  See the header of
+# scripts/bench.sh for the knobs, and for why running it as root and
+# unprivileged gives different answers.
 bench: examples
 	./scripts/bench.sh
 
-# Full proof of everything
-prove: 
+# Full proof of everything.  The Linux backend is the one written in SPARK
+# throughout; the Windows reactor is a trusted body, like the context
+# switch, and is proved against its spec rather than through it.
+prove:
 	alr gnatprove -P io_uring_async_runtime.gpr --mode=all --level=3 -j0
+
+# Compile the other system's backend without running it: catches anything
+# that would only break over there, and needs no cross toolchain because
+# nothing is generated.  Run it before pushing a change to shared code.
+check-linux:
+	alr exec -- gprbuild -P examples.gpr -XIOUR_OS=linux \
+	  --subdirs=crosscheck -j0 -c -f -cargs -gnatc
 
 clean:
 	rm -rf obj lib bin
@@ -63,5 +96,8 @@ help:
 	@echo "make multi-await     many awaits in one procedure; check the handover"
 	@echo "make demo            traced walkthrough, then 2000 connections"
 	@echo "make bench           benchmark Ada, Tokio, and Go echo servers"
-	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
+	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers (Linux)"
+	@echo "make check-linux     compile the Linux backend from anywhere"
 	@echo "make prove           SPARK proof of everything"
+	@echo
+	@echo "host detected as $(HOST)"

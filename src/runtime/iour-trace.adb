@@ -36,7 +36,7 @@ is
       end loop;
       Line (N) := 10;   --  LF
       N := N + 1;
-      Ffi.Sys.Write_Blocking (Ffi.Sys.Stderr, Line, Ffi.C_Size (N));
+      Ffi.Sys.Write_Blocking (Ffi.Sys.Standard_Error, Line, Ffi.C_Size (N));
    end Emit;
 
    function Prefix (Shard : Shard_Ref) return String is

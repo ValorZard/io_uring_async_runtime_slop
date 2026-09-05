@@ -18,6 +18,10 @@ package body Echo_Server_App with SPARK_Mode => On is
    Listeners : Listener_Table := [others => Invalid_Descriptor];
    Goal      : Natural := 0 with Atomic;
 
+   --  Whether an acceptor deals its connections round the cores instead of
+   --  keeping them.  Set before any shard runs, read by acceptors after.
+   Distribute : Boolean := False with Atomic;
+
    protected Stats
      with Priority => Runtime_Priority
    is
@@ -104,10 +108,14 @@ package body Echo_Server_App with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Configure
-     (Shard : Active_Shard; Listener : Descriptor; Target : Natural) is
+     (Shard    : Active_Shard;
+      Listener : Descriptor;
+      Target   : Natural;
+      Spread   : Boolean := False) is
    begin
       Listeners (Shard) := Listener;
       Goal := Target;
+      Distribute := Spread;
    end Configure;
 
    ---------------------------------------------------------------------------
@@ -205,6 +213,11 @@ package body Echo_Server_App with SPARK_Mode => On is
       Listener : constant Net.Socket := Net.Socket (Arg);
       Incoming : Io_Result;
       Started  : Boolean;
+
+      --  Where the next connection goes when this is the only acceptor.
+      --  Plain round robin: the work per connection is much the same, so
+      --  anything cleverer would only be a guess with a counter behind it.
+      Next : Active_Shard := Active_Shard'First;
    begin
       loop
          exit when Stats.Accept_Limit_Reached;
@@ -218,13 +231,29 @@ package body Echo_Server_App with SPARK_Mode => On is
          else
             Stats.Accepted_One;
 
-            --  Run the handler on this core.  The socket was accepted
-            --  here, so its reads and writes will go through this core's
-            --  ring; sending it to the global queue would only mean
-            --  another core doing the same work with a colder cache and a
-            --  shared lock on the way.
-            Fibers.Spawn_Here
-              (Serve'Access, Fiber_Argument (Incoming), Started);
+            if Distribute then
+               --  One acceptor for the whole server, so the connections
+               --  have to be dealt out or every other core sits idle.
+               --  Spawn_On rather than Spawn: it names the core, and it
+               --  needs no future, which matters for a fiber that nothing
+               --  will ever await.
+               Fibers.Spawn_On
+                 (Next, Serve'Access, Fiber_Argument (Incoming), Started);
+
+               --  Counted in the base type and wrapped, rather than
+               --  compared against Active_Shard'Last and incremented: with
+               --  Shard_Count of one the increment is statically outside
+               --  the subtype, and the compiler rejects it even on the
+               --  branch that never runs.
+               Next := Active_Shard ((Integer (Next) + 1) mod Shard_Count);
+            else
+               --  Run the handler on this core.  The socket was accepted
+               --  here, so its reads and writes will go through this
+               --  core's ring; sending it elsewhere would only mean
+               --  another core doing the same work with a colder cache.
+               Fibers.Spawn_Here
+                 (Serve'Access, Fiber_Argument (Incoming), Started);
+            end if;
 
             if not Started then
                --  Runtime at capacity: refuse cleanly rather than leak the

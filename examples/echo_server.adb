@@ -5,13 +5,15 @@
 --
 --  A connections-to-serve of 0 means run until killed.
 --
---  Every core gets its own SO_REUSEPORT listener and its own acceptor, and
---  serves the connections it accepted.  Nothing about a connection crosses
---  cores.
+--  Where the system can share a listening port -- SO_REUSEPORT on Linux --
+--  every core gets its own listener and its own acceptor and serves the
+--  connections it accepted, and nothing about a connection crosses cores.
+--  Windows has no equivalent, so there is one listener, one acceptor, and
+--  the connections are dealt round the cores as they arrive.
 --
---  The environment task is pinned to Ada CPU 1 (Linux CPU 0); the shards
---  take First_Shard_Cpu upward.  Keeping them apart matters, because a
---  shard's identity is derived from the core it is running on.
+--  The environment task asks for Ada CPU 1 and the shards take
+--  First_Shard_Cpu upward, so that start-up and reporting stay off the
+--  cores that are serving traffic.
 ------------------------------------------------------------------------------
 
 with Ada.Command_Line;  use Ada.Command_Line;
@@ -20,6 +22,7 @@ with Iour;              use Iour;
 with Iour.Ffi.Sys;
 with Iour.Fibers;
 with Iour.Net;
+with Iour.Reactor;
 with Iour.Scheduler;
 with Iour.Shards;
 with Iour.Trace;
@@ -50,6 +53,9 @@ procedure Echo_Server with SPARK_Mode => On, CPU => 1 is
 
    type Listener_Table is array (Active_Shard) of Io_Result;
 
+   --  Whether every core can have a listener of its own on one port.
+   Shared_Port : constant Boolean := Net.Port_Sharing_Available;
+
    Listeners : Listener_Table := [others => 0];
    Opened    : Io_Result;
    Bound     : Io_Result;
@@ -70,7 +76,7 @@ begin
    --  arriving connections between them.  The first one binds the port --
    --  which matters when Port is zero and the kernel chooses -- and the
    --  rest join the port it settled on.
-   Opened := Net.Listen (Port => Port, Reuseport => True);
+   Opened := Net.Listen (Port => Port, Reuseport => Shared_Port);
    if Failed (Opened) then
       Put_Line ("echo_server: cannot listen on port" & Port'Image
                 & " (errno" & Errno (Opened)'Image & ")");
@@ -84,20 +90,29 @@ begin
       Ffi.Sys.Exit_Process (1);
    end if;
 
-   for S in Active_Shard loop
-      if S /= Active_Shard'First then
-         Opened := Net.Listen (Port      => Natural (Bound),
-                               Reuseport => True);
-         if Failed (Opened) then
-            Put_Line ("echo_server: cannot add a listener for shard"
-                      & S'Image & " (errno" & Errno (Opened)'Image & ")");
-            Ffi.Sys.Exit_Process (1);
+   if Shared_Port then
+      for S in Active_Shard loop
+         if S /= Active_Shard'First then
+            Opened := Net.Listen (Port      => Natural (Bound),
+                                  Reuseport => True);
+            if Failed (Opened) then
+               Put_Line ("echo_server: cannot add a listener for shard"
+                         & S'Image & " (errno" & Errno (Opened)'Image & ")");
+               Ffi.Sys.Exit_Process (1);
+            end if;
+            Listeners (S) := Opened;
          end if;
-         Listeners (S) := Opened;
-      end if;
 
-      Echo_Server_App.Configure (S, Descriptor (Listeners (S)), Target);
-   end loop;
+         Echo_Server_App.Configure (S, Descriptor (Listeners (S)), Target);
+      end loop;
+   else
+      --  One listener, and the acceptor on it deals its connections round
+      --  the cores.  The remaining entries stay Invalid_Descriptor, which
+      --  is what Stop_Listening skips over.
+      Echo_Server_App.Configure
+        (Active_Shard'First, Descriptor (Listeners (Active_Shard'First)),
+         Target, Spread => True);
+   end if;
 
    Shards.Activate;
    Scheduler.Wait_Until_Ready;
@@ -105,6 +120,17 @@ begin
    Put_Line ("echo_server: listening on port" & Bound'Image
              & " with" & Shard_Count'Image & " shards"
              & ", descriptor limit" & Fd_Limit'Image);
+   declare
+      On_Ring : Boolean;
+   begin
+      Reactor.Ring_Carries_Sockets (Active_Shard'First, On_Ring);
+      Put_Line ("echo_server: " & Reactor.Backend_Name
+                & (if On_Ring then ", carrying connections"
+                   else ", NOT carrying connections -- fallback path")
+                & (if Shared_Port
+                   then ", one listener per core"
+                   else ", one listener, connections dealt round the cores"));
+   end;
    if Target > 0 then
       Put_Line ("echo_server: will serve" & Target'Image
                 & " connections, then stop");
@@ -117,6 +143,8 @@ begin
    --  would leave a core with no accept queue of its own, and the
    --  connections it accepts are served where it runs.
    for S in Active_Shard loop
+      exit when not Shared_Port and then S /= Active_Shard'First;
+
       Fibers.Spawn_On
         (S,
          Echo_Server_App.Acceptor'Access,

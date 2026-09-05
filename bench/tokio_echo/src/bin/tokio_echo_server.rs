@@ -14,10 +14,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
-use tokio_echo::{arg_or, build, cpu_list, parse, pin_to, Frame, Kind, FRAME_SIZE};
+use tokio_echo::{
+    arg_or, build, cpu_list, listener_with_backlog, parse, pin_to,
+    raise_descriptor_limit, Frame, Kind, FRAME_SIZE,
+};
 
 struct Stats {
     accepted: AtomicUsize,
@@ -93,66 +96,6 @@ async fn serve(mut conn: TcpStream, stats: Arc<Stats>, goal: usize, shutdown: Ar
 
     if stats.completed_one(frames, failed, goal) {
         shutdown.notify_waiters();
-    }
-}
-
-fn raise_descriptor_limit() -> u64 {
-    unsafe {
-        let mut lim: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
-            lim.rlim_cur = lim.rlim_max;
-            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
-            return lim.rlim_max as u64;
-        }
-        0
-    }
-}
-
-/// A listener with the same backlog the Ada demo uses (Tcp_Listener's 4096).
-/// tokio's `TcpListener::bind` would give us socket2's default of 1024, and a
-/// short accept queue is the difference between a connect and a one-second
-/// SYN retransmit when a thousand clients arrive at once.
-fn listener_with_backlog(port: u16, backlog: i32) -> std::io::Result<TcpListener> {
-    use std::os::fd::FromRawFd;
-    unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let on: libc::c_int = 1;
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            &on as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-
-        let addr = libc::sockaddr_in {
-            sin_family: libc::AF_INET as libc::sa_family_t,
-            sin_port: port.to_be(),
-            sin_addr: libc::in_addr { s_addr: 0 },
-            sin_zero: [0; 8],
-        };
-        if libc::bind(
-            fd,
-            &addr as *const _ as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        ) < 0
-        {
-            let e = std::io::Error::last_os_error();
-            libc::close(fd);
-            return Err(e);
-        }
-        if libc::listen(fd, backlog) < 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(fd);
-            return Err(e);
-        }
-
-        let std_listener = std::net::TcpListener::from_raw_fd(fd);
-        std_listener.set_nonblocking(true)?;
-        TcpListener::from_std(std_listener)
     }
 }
 

@@ -8,10 +8,17 @@
 --  thread-to-core assignment checkable at compile time instead of at run
 --  time.
 --
---  Shard N is pinned to Ada CPU First_Shard_Cpu + N.  Ada numbers CPUs from
---  one, so with First_Shard_Cpu = 2 the shards occupy Linux CPUs 1 upward
---  and leave CPU 0 to the environment task, which does startup, reporting
+--  Shard N asks for Ada CPU First_Shard_Cpu + N.  Ada numbers CPUs from one,
+--  so with First_Shard_Cpu = 2 the shards occupy the system's CPUs 1 upward
+--  and leave CPU 0 to the environment task, which does start-up, reporting
 --  and teardown.
+--
+--  Asks, rather than gets.  GNAT for Linux implements the CPU aspect with
+--  sched_setaffinity before the task body runs; GNAT for Windows accepts the
+--  aspect and does nothing with it, so a shard there binds itself in
+--  Iour.Fibers.Claim_Core.  Either way the binding is a performance measure:
+--  a shard knows which shard it is from Iour.Ffi.Identity, not from the core
+--  it happens to be on.
 --
 --  Tasks beyond Shard_Count park forever instead of terminating: under
 --  Jorvik a task that ends is a bounded error.

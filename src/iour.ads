@@ -1,5 +1,5 @@
 ------------------------------------------------------------------------------
---  Iour -- an io_uring async runtime for Ada 2022 / SPARK, on Jorvik.
+--  Iour -- a ring-based async runtime for Ada 2022 / SPARK, on Jorvik.
 --
 --  Shape of the system, top down:
 --
@@ -8,10 +8,14 @@
 --      assignment and task hierarchies, so the shards are single task
 --      declarations in Iour.Shards, not an array of task objects.
 --
---    * Each shard owns one io_uring instance.  Nothing about a ring is
---      shared: only the shard that created a ring ever submits to it or
---      reaps from it, which is what lets the design use
---      IORING_SETUP_SINGLE_ISSUER and avoid submission locking entirely.
+--    * Each shard owns one submission ring -- io_uring on Linux, IoRing on
+--      Windows.  Nothing about a ring is shared: only the shard that
+--      created one ever submits to it or reaps from it, which is what lets
+--      the design use IORING_SETUP_SINGLE_ISSUER on Linux, is what makes an
+--      IoRing submission queue safe to build without a lock on Windows, and
+--      is why submission needs no locking either way.  Everything the ring
+--      cannot express lives behind Iour.Reactor, which is the one package
+--      with two bodies.
 --
 --    * Work is carried by stackful fibers.  A fiber has its own stack, so
 --      Await is an ordinary function call that happens to suspend: when it
@@ -21,7 +25,7 @@
 --
 --    * Futures live in a global, shard-agnostic table.  Any shard can
 --      resolve any future, and the shard that owns the waiting fiber is
---      woken through the ring-to-ring message path (IORING_OP_MSG_RING).
+--      woken by a completion put straight into its stream.
 --
 --    * Newly spawned fibers go onto one globally accessible run queue that
 --      every shard pops from, so load spreads across cores on its own.
@@ -48,10 +52,10 @@ package Iour with SPARK_Mode => On is
    --  Must be in 1 .. Max_Shards.
    Shard_Count : constant := 4;
 
-   --  Ada CPU number (1-based; Linux CPU 0 is Ada CPU 1) that shard 0 is
-   --  pinned to.  Shard N takes First_Shard_Cpu + N.  Leaving CPU 1 free
-   --  keeps the environment task, which does startup and teardown, off the
-   --  shard cores.
+   --  Ada CPU number (1-based; the system's CPU 0 is Ada CPU 1) that
+   --  shard 0 is pinned to.  Shard N takes First_Shard_Cpu + N.  Leaving
+   --  CPU 1 free keeps the environment task, which does start-up and
+   --  teardown, off the shard cores.
    First_Shard_Cpu : constant := 2;
 
    --  Concurrent fibers.  Each live fiber costs one stack (allocated lazily,
@@ -88,7 +92,7 @@ package Iour with SPARK_Mode => On is
    Reap_Batch : constant := 256;
 
    --  How long an idle shard sleeps before re-checking the global run queue.
-   --  Shard-to-shard handoffs are signalled immediately over MSG_RING; this
+   --  Shard-to-shard handoffs are signalled immediately; this
    --  bound only covers work published by a thread that owns no ring, such
    --  as the environment task during startup.
    Idle_Poll_Nanos : constant := 1_000_000;  --  1 ms
@@ -175,7 +179,7 @@ package Iour with SPARK_Mode => On is
      (Fixed_File_Base + Max_Shards * Fixed_File_Span > Descriptor'Last,
       "fixed-file descriptors must fit below Descriptor'Last");
 
-   --  Largest buffer one operation accepts.  io_uring carries a 32-bit
+   --  Largest buffer one operation accepts.  A submission carries a 32-bit
    --  length; this stays comfortably inside it and inside Natural, so the
    --  conversions along the way are provable rather than checked.
    Max_Transfer : constant := 2 ** 30;
@@ -193,6 +197,12 @@ package Iour with SPARK_Mode => On is
    --  descriptor); below zero it is the negated errno.  The runtime carries
    --  that convention through unchanged rather than inventing a status type,
    --  so nothing is lost in translation.
+   --
+   --  The Windows backend reports the same way, translating the Win32 and
+   --  Winsock codes into the errno-shaped numbers named below.  That is what
+   --  lets everything above this layer reason about one vocabulary; a code
+   --  with no name here keeps its own number, which is unambiguous because
+   --  the two ranges do not overlap where either side actually uses them.
    subtype Io_Result is Integer;
 
    function Failed (R : Io_Result) return Boolean is (R < 0);

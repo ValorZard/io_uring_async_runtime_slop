@@ -1,8 +1,8 @@
 ------------------------------------------------------------------------------
 --  Iour.Net -- asynchronous sockets that read like synchronous ones.
 --
---  Every operation below submits to the calling shard's ring, suspends the
---  fiber, and returns when the completion arrives.  Written out, a
+--  Every operation below submits to the calling shard's reactor, suspends
+--  the fiber, and returns when the completion arrives.  Written out, a
 --  connection handler looks like this:
 --
 --     procedure Handle (Conn : Fiber_Argument) is
@@ -28,16 +28,16 @@
 --  call -- a slice of something being reused, say -- is not safe, and the
 --  kernel will happily write into whatever now occupies that memory.
 --
---  Every operation reports io_uring's own result convention: at or above
+--  Every operation reports the runtime's result convention: at or above
 --  zero is the value (bytes moved, accepted descriptor), below zero is the
---  negated errno.
+--  negated error code.  See Iour.Io_Result.
 ------------------------------------------------------------------------------
 
 with Iour.Ffi;
 with Iour.Fibers;
 with Iour.Reactor;
 
---  A suspending operation touches the ring (Reactor.Rings), the fiber
+--  A suspending operation touches the ring (Reactor.Engines), the fiber
 --  table it suspends through (Fibers.Registry), and the kernel.  It does
 --  not touch the future table: an ordinary operation is awaited by the
 --  fiber that submitted it, and the shard that reaps the completion hands
@@ -69,6 +69,19 @@ package Iour.Net with SPARK_Mode => On is
    function New_Socket return Io_Result
      with Side_Effects, Global => (In_Out => Ffi.Kernel);
 
+   --  Whether Listen with Reuseport can really give every core a listener
+   --  of its own on one port.
+   --
+   --  True on Linux, where SO_REUSEPORT makes the kernel hash arriving
+   --  connections across the listeners.  False on Windows, which has no
+   --  equivalent: its SO_REUSEADDR lets a second bind take the port over
+   --  rather than share it, so a server that assumed otherwise would run
+   --  on one core and look like it was running on all of them.
+   --
+   --  A server asks this rather than assuming, and puts a single acceptor
+   --  on one core when the answer is no.
+   function Port_Sharing_Available return Boolean with Global => null;
+
    function Port_Of (S : Socket) return Io_Result
      with Global => null;
 
@@ -76,7 +89,7 @@ package Iour.Net with SPARK_Mode => On is
    --  starts, and for a fixed file whose owning shard needs it gone at
    --  once -- which only that shard's own thread can do.
    function Close_Now (S : Socket) return Io_Result
-     with Side_Effects, Global => (In_Out => (Ffi.Kernel, Reactor.Rings));
+     with Side_Effects, Global => (In_Out => (Ffi.Kernel, Reactor.Engines));
 
    Shut_Read  : constant := 0;
    Shut_Write : constant := 1;
@@ -102,21 +115,21 @@ package Iour.Net with SPARK_Mode => On is
    --  (Iour.Fixed_File): usable by this shard's fibers exactly like an fd,
    --  but cheaper per operation, and meaningless on any other core.
    procedure Accept_Connection (Listener : Socket; Result : out Io_Result)
-     with Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+     with Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    --  Read once.  A result of zero means the peer closed cleanly.
    procedure Receive
      (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+          Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    --  Write once; may transfer fewer bytes than offered.
    procedure Send
      (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+          Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    --  Read until Buffer is full, resubmitting for short reads.  Result is
@@ -126,7 +139,7 @@ package Iour.Net with SPARK_Mode => On is
    procedure Receive_Exact
      (S : Socket; Buffer : out Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+          Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    --  Write everything, resubmitting until it is all gone.  Result is the
@@ -134,7 +147,7 @@ package Iour.Net with SPARK_Mode => On is
    procedure Send_All
      (S : Socket; Buffer : Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+          Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    --  Write everything to a non-socket descriptor: stdout, stderr, a file.
@@ -142,7 +155,7 @@ package Iour.Net with SPARK_Mode => On is
    procedure Write_All
      (Fd : Descriptor; Buffer : Byte_Array; Result : out Io_Result)
      with Pre    => Buffer'Length <= Max_Transfer,
-          Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+          Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    procedure Connect
@@ -150,11 +163,11 @@ package Iour.Net with SPARK_Mode => On is
       Host   : String;
       Port   : Natural;
       Result : out Io_Result)
-     with Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+     with Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
    procedure Close (S : Socket; Result : out Io_Result)
-     with Global => (In_Out => (Reactor.Rings, Fibers.Registry,
+     with Global => (In_Out => (Reactor.Engines, Fibers.Registry,
                                 Ffi.Kernel));
 
 end Iour.Net;

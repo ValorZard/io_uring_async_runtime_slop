@@ -1,6 +1,9 @@
 //! Shared pieces for the tokio side of the comparison: the same 32-byte wire
-//! format the Ada demo speaks, and the same CPU pinning the Ada runtime does
-//! with `CPU =>` aspects.
+//! format the Ada demo speaks, and -- in `platform` -- the same CPU pinning,
+//! descriptor limit and listen backlog the Ada runtime arranges for itself.
+//! Everything platform-shaped is in that one module, which has a Linux half
+//! and a Windows half, so the rest of this crate is the protocol and nothing
+//! else.
 
 pub const FRAME_SIZE: usize = 32;
 pub const DIGITS_FIRST: usize = 6;
@@ -57,16 +60,8 @@ pub fn parse(from: &Frame) -> (Kind, u32) {
     (kind, value)
 }
 
-/// Pin the calling thread to one CPU, the way the Ada tasks' `CPU =>` aspect
-/// does.  Silently does nothing if the id is out of range for the set.
-pub fn pin_to(cpu: usize) {
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut set);
-        libc::CPU_SET(cpu, &mut set);
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-    }
-}
+pub mod platform;
+pub use platform::{listener_with_backlog, pin_to, raise_descriptor_limit};
 
 /// Parse a "1,2,3,4" CPU list out of an environment variable.
 pub fn cpu_list(var: &str) -> Vec<usize> {

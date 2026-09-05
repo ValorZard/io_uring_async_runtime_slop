@@ -15,6 +15,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Windows builds get a .exe; everything else does not.  Nothing else in
+# this script cares which system it is on.
+EXE=""
+[[ -f bin/echo_server.exe ]] && EXE=".exe"
+SERVER="bin/echo_server$EXE"
+CLIENT="bin/echo_client$EXE"
+
 CONNECTIONS=${1:-2000}
 ROUNDS=${2:-10}
 PORT=${3:-9099}
@@ -23,7 +30,7 @@ TRACE_CONNECTIONS=6
 TRACE_ROUNDS=2
 TRACE_PORT=$((PORT + 1))
 
-if [[ ! -x bin/echo_server || ! -x bin/echo_client ]]; then
+if [[ ! -x $SERVER || ! -x $CLIENT ]]; then
     echo "run_demo: build first with 'make examples'" >&2
     exit 1
 fi
@@ -83,7 +90,7 @@ echo
 echo "=== phase 2: $CONNECTIONS connections, untraced ==="
 echo
 
-./bin/echo_server "$PORT" "$CONNECTIONS" > "$SERVER_LOG" 2>&1 &
+"./$SERVER" "$PORT" "$CONNECTIONS" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 if ! wait_for_listener "$SERVER_LOG"; then
@@ -91,11 +98,14 @@ if ! wait_for_listener "$SERVER_LOG"; then
     kill "$SERVER_PID" 2>/dev/null
     exit 1
 fi
-head -2 "$SERVER_LOG"
+# The banner runs to the first blank line; the summary starts there.  How
+# many lines the banner has depends on the backend, so match rather than
+# count.
+sed -n '1,/^$/p' "$SERVER_LOG"
 
 echo
 echo "--- client ---"
-./bin/echo_client 127.0.0.1 "$PORT" "$CONNECTIONS" "$ROUNDS"
+"./$CLIENT" 127.0.0.1 "$PORT" "$CONNECTIONS" "$ROUNDS"
 CLIENT_STATUS=$?
 
 wait "$SERVER_PID"
@@ -103,7 +113,7 @@ SERVER_STATUS=$?
 
 echo
 echo "--- server ---"
-tail -n +3 "$SERVER_LOG"
+sed -n '/^$/,$p' "$SERVER_LOG"
 
 if [[ $CLIENT_STATUS -eq 0 && $SERVER_STATUS -eq 0 ]]; then
     echo

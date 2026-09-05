@@ -1,161 +1,117 @@
 ------------------------------------------------------------------------------
---  Iour.Ffi.Sys -- direct bindings to the libc entry points the runtime
---  needs.  Every one of these is a real exported symbol, so Ada binds to it
---  with Import/Convention => C and no wrapper in between.
+--  Iour.Ffi.Sys -- the handful of operating-system services the runtime
+--  needs that are not I/O.
+--
+--  This spec is the portable one: every declaration below means the same
+--  thing on Linux and on Windows, and the body that implements it lives
+--  under src/os/<system>.  Nothing here names a libc symbol or a Win32
+--  one; the raw imports are in Iour.Ffi.Posix and Iour.Ffi.Win32
+--  respectively, where each backend can see its own system and no other.
+--
+--  What "the same thing" means for each is written next to it, because two
+--  systems that both have a notion of, say, the descriptor limit do not
+--  necessarily mean the same by it.
 ------------------------------------------------------------------------------
-
-with System;
 
 package Iour.Ffi.Sys with SPARK_Mode => On is
 
    ---------------------------------------------------------------------------
-   --  errno
+   --  Errors
    ---------------------------------------------------------------------------
 
-   --  glibc's errno is a macro over this function, which is the symbol a
-   --  foreign caller is expected to use.  It is bound as returning a named
-   --  access type rather than an address: dereferencing an access value is
-   --  something SPARK can follow, whereas overlaying an object on an
-   --  address is not.
-   type Errno_Cell is access all C_Int;
-
-   function Errno_Location return Errno_Cell
-     with Import, Convention => C, External_Name => "__errno_location",
-          Global => null;
-
-   --  Read the calling thread's errno.
-   function Last_Error return C_Int;
-
-   --  errno as an Io_Result: always negative, so a failure can never be
-   --  mistaken for a count, and never Integer'First, so it can be negated.
+   --  The last failure this thread saw, in the runtime's own convention:
+   --  always negative, so it can never be mistaken for a count, and never
+   --  Io_Result'First, so it can be negated.
+   --
+   --  Both backends report the errno-shaped codes named in Iour (E_Again,
+   --  E_Pipe, E_Conn_Reset and the rest).  On Linux those are errno itself;
+   --  on Windows the WSA and Win32 codes are translated to the same
+   --  numbers, so everything above this layer reasons about one vocabulary.
    function Failure_Code return Io_Result
      with Post => Failure_Code'Result < 0
                   and then Failure_Code'Result > Io_Result'First;
 
    ---------------------------------------------------------------------------
-   --  Memory mapping (used for the io_uring shared rings)
+   --  Scheduling
    ---------------------------------------------------------------------------
 
-   Prot_None     : constant := 0;
-   Prot_Read     : constant := 1;
-   Prot_Write    : constant := 2;
-   Map_Shared    : constant := 1;
-   Map_Private   : constant := 2;
-   Map_Anonymous : constant := 16#20#;
-   Map_Populate  : constant := 16#8000#;
-
-   --  mmap reports failure as (void *) -1 rather than NULL.
-   function Map_Failed return System.Address;
-
-   function Mmap
-     (Addr   : System.Address;
-      Length : C_Size;
-      Prot   : C_Int;
-      Flags  : C_Int;
-      Fd     : C_Int;
-      Offset : C_Int64) return System.Address
-     with Import, Convention => C, External_Name => "mmap", Global => null;
-
-   function Munmap (Addr : System.Address; Length : C_Size) return C_Int
-     with Import, Convention => C, External_Name => "munmap", Global => null;
-
-   --  The same call for teardown, where the result carries nothing anyone
-   --  acts on.  Imported as a procedure with its effect declared.
-   procedure Unmap (Addr : System.Address; Length : C_Size)
-     with Import, Convention => C, External_Name => "munmap",
-          Global => (In_Out => Kernel), Always_Terminates;
-
-   function Mprotect
-     (Addr : System.Address; Length : C_Size; Prot : C_Int) return C_Int
-     with Import, Convention => C, External_Name => "mprotect",
-          Global => null;
-
-   function Getpagesize return C_Int
-     with Import, Convention => C, External_Name => "getpagesize",
-          Global => null;
-
-   ---------------------------------------------------------------------------
-   --  Scheduling and process control
-   ---------------------------------------------------------------------------
-
-   --  Which CPU the calling thread is on.  Because every shard is pinned to
-   --  a distinct core by a static CPU aspect, this doubles as a cheap,
-   --  allocation-free identity for the running shard.
-   function Sched_Getcpu return C_Int
-     with Import, Convention => C, External_Name => "sched_getcpu",
-          Global => null;
+   --  Bind the calling thread to one processor, counting from zero, and
+   --  report whether it is there.
+   --
+   --  Ada asks for this with the CPU aspect, and on Linux GNAT implements
+   --  it with sched_setaffinity before the task body runs, so the Linux
+   --  body only confirms.  GNAT for Windows accepts the aspect and ignores
+   --  it -- a task with CPU => 3 runs wherever the scheduler likes -- so
+   --  the Windows body does the binding itself and waits to be moved.
+   --
+   --  A shard that cannot be bound still works: identity comes from
+   --  Iour.Ffi.Identity, not from the core.  It just shares a processor
+   --  with a sibling, which the shard loop reports and the caller can act
+   --  on.
+   pragma Warnings
+     (GNATprove, Off, "*is not modified, could be INPUT*",
+      Reason => "The Windows body writes Kernel; the Linux one does not. The contract is the union, and narrowing it would be wrong for the other backend.");
+   function Bind_To_Cpu (Cpu : Natural) return Boolean
+     with Side_Effects, Global => (In_Out => Kernel);
+   pragma Warnings
+     (GNATprove, On, "*is not modified, could be INPUT*");
 
    --  A Jorvik partition never terminates on its own: the environment task
-   --  blocks forever once tasks are activated, and No_Task_Termination means
-   --  shards are not supposed to end.  Shutdown is therefore an explicit
-   --  _exit once the runtime has drained.
+   --  blocks forever once tasks are activated, and No_Task_Termination
+   --  means shards are not supposed to end.  Shutdown is therefore an
+   --  explicit process exit once the runtime has drained.
    procedure Exit_Process (Status : C_Int)
-     with Import, Convention => C, External_Name => "_exit",
-          No_Return, Global => null;
+     with No_Return, Global => null;
+
+   ---------------------------------------------------------------------------
+   --  Memory
+   ---------------------------------------------------------------------------
+
+   --  Bytes in a page, for sizing the fiber stacks and their guard pages.
+   --  On Windows this is the allocation granularity's page, not the 64 KiB
+   --  reservation granularity.
+   function Page_Size return Natural
+     with Post => Page_Size'Result >= 4096;
 
    ---------------------------------------------------------------------------
    --  Resource limits
    ---------------------------------------------------------------------------
 
-   --  struct rlimit: two 64-bit counts on every Linux ABI this targets.
-   type Rlimit is record
-      Soft : Interfaces.Unsigned_64 := 0;
-      Hard : Interfaces.Unsigned_64 := 0;
-   end record
-     with Convention => C;
-
-   Rlimit_Nofile : constant := 7;
-
-   --  Pointer parameters expressed as access types, so no caller has to
-   --  take the address of an Ada object.
-   function Getrlimit
-     (Resource : C_Int; Value : access Rlimit) return C_Int
-     with Import, Convention => C, External_Name => "getrlimit",
-          Global => null;
-
-   function Setrlimit
-     (Resource : C_Int; Value : access constant Rlimit) return C_Int
-     with Import, Convention => C, External_Name => "setrlimit",
-          Global => null;
-
-   --  Raise the open-descriptor limit to its hard ceiling and report the
-   --  result.  A server holding thousands of connections needs this; the
-   --  usual soft limit of 1024 would refuse them long before the runtime
-   --  ran out of anything.
+   --  Raise the open-descriptor limit to its ceiling and report the result.
+   --  A server holding thousands of connections needs this on Linux, where
+   --  the usual soft limit of 1024 would refuse them long before the
+   --  runtime ran out of anything.  Windows has no per-process handle
+   --  limit worth raising, so its body reports the ceiling it does have.
    function Raise_Descriptor_Limit return Natural;
 
    ---------------------------------------------------------------------------
    --  Blocking write
    ---------------------------------------------------------------------------
 
-   Stdout : constant := 1;
-   Stderr : constant := 2;
+   --  The standard streams, as descriptors this runtime can hand to
+   --  Write_Blocking or submit to a ring.  Functions rather than
+   --  constants: on Windows a standard stream is a HANDLE the process is
+   --  told at start-up, not a number fixed by the ABI.
+   function Standard_Output return Descriptor with Global => null;
+   function Standard_Error  return Descriptor with Global => null;
 
-   --  write(2), for the contexts where suspending is not an option: the
-   --  scheduler loop itself, the environment task, and tracing.  For C
-   --  convention GNAT passes an array as a pointer to its first element, so
-   --  no address is taken on the Ada side.  Imported as a procedure: a
-   --  short or failed write of a trace line is not something anyone acts on.
+   --  A write that does not suspend, for the contexts where suspending is
+   --  not an option: the scheduler loop itself, the environment task, and
+   --  tracing.  A short or failed write of a trace line is not something
+   --  anyone acts on, so nothing is reported.
    procedure Write_Blocking
-     (Fd : C_Int; Buffer : Byte_Array; Count : C_Size)
-     with Import, Convention => C, External_Name => "write",
-          Global => (In_Out => Kernel), Always_Terminates;
+     (Fd : Descriptor; Buffer : Byte_Array; Count : C_Size)
+     with Global => (In_Out => Kernel), Always_Terminates;
 
    ---------------------------------------------------------------------------
    --  Signals
    ---------------------------------------------------------------------------
 
-   Sig_Pipe : constant := 13;
-
-   --  signal(2) returns the previous handler, which nothing here wants.
-   --  Importing it as a procedure discards that and lets the binding say
-   --  what it is actually for: changing kernel state.
-   procedure Set_Signal (Sig : C_Int; Handler : System.Address)
-     with Import, Convention => C, External_Name => "signal",
-          Global => (In_Out => Kernel), Always_Terminates;
-
-   --  Writing to a socket whose peer has gone must surface as EPIPE on the
-   --  completion, not as a signal that kills the process.
-   procedure Ignore_Sigpipe;
+   --  Writing to a socket whose peer has gone must surface as an error on
+   --  the completion, not as a signal that kills the process.  On Linux
+   --  this ignores SIGPIPE; Windows has no such signal, so its body does
+   --  nothing and the guarantee holds for free.
+   procedure Ignore_Broken_Pipe
+     with Global => (In_Out => Kernel), Always_Terminates;
 
 end Iour.Ffi.Sys;

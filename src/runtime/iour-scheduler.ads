@@ -8,11 +8,12 @@
 --    2. Take new work off the global run queue and give it a stack.
 --    3. Run every fiber that is ready, one after another, until none is.
 --    4. Push submissions to the kernel; if there is genuinely nothing left
---       to do, sleep inside io_uring_enter until something arrives.
+--       to do, sleep there until something arrives.
 --
 --  Step 4 is the only place a shard blocks, and it blocks in the kernel on
---  its own ring rather than on a lock or a condition variable.  A sibling
---  with work to hand over wakes it with a ring message; nothing else can.
+--  state it owns rather than on a lock or a condition variable.  A sibling
+--  with work to hand over wakes it by putting a completion into its stream;
+--  nothing else can.
 ------------------------------------------------------------------------------
 
 package Iour.Scheduler with SPARK_Mode => On is

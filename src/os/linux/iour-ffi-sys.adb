@@ -1,27 +1,26 @@
+------------------------------------------------------------------------------
+--  Iour.Ffi.Sys body -- Linux.
+--
+--  Each of these is one libc call plus the translation into the runtime's
+--  own conventions.  The raw imports are next door in Iour.Ffi.Posix.
+------------------------------------------------------------------------------
+
 with System.Storage_Elements;
+with Iour.Ffi.Posix;
 
 package body Iour.Ffi.Sys with SPARK_Mode => On is
 
    use System.Storage_Elements;
+   use type C_Int;
+
+   package Posix renames Iour.Ffi.Posix;
 
    ---------------------------------------------------------------------------
-   --  Last_Error
+   --  Failure_Code
    ---------------------------------------------------------------------------
-
-   function Last_Error return C_Int is
-      Cell : constant Errno_Cell := Errno_Location;
-   begin
-      --  glibc always returns a valid pointer here; the guard is so this
-      --  function stays total rather than because it can happen.
-      if Cell = null then
-         return 0;
-      end if;
-      return Cell.all;
-   end Last_Error;
 
    function Failure_Code return Io_Result is
-      use type C_Int;
-      E : constant C_Int := Last_Error;
+      E : constant C_Int := Posix.Last_Error;
    begin
       --  A positive errno is negated; anything else -- errno already
       --  clear, or a value that would not survive negation -- is reported
@@ -33,11 +32,42 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
    end Failure_Code;
 
    ---------------------------------------------------------------------------
-   --  Map_Failed
+   --  Scheduling
    ---------------------------------------------------------------------------
 
-   function Map_Failed return System.Address is
-     (To_Address (Integer_Address'Last));
+   --  GNAT for Linux honours the CPU aspect, with sched_setaffinity,
+   --  before the task body starts running.  There is nothing left to do
+   --  but confirm it landed.
+   function Bind_To_Cpu (Cpu : Natural) return Boolean is
+   begin
+      return Posix.Sched_Getcpu = C_Int (Cpu);
+   end Bind_To_Cpu;
+   pragma Annotate
+     (GNATprove, Intentional, "unused global ""Ffi.Kernel""",
+      "The contract is the union of what the two backends do, and this is the"
+      & " one that does less: the Windows body binds the thread and changes"
+      & " kernel state, this one only confirms what the CPU aspect already"
+      & " arranged.  Narrowing the contract to match this body would make it"
+      & " wrong for the other.");
+
+   procedure Exit_Process (Status : C_Int) is
+   begin
+      Posix.Exit_Process (Status);
+   end Exit_Process;
+
+   ---------------------------------------------------------------------------
+   --  Page_Size
+   ---------------------------------------------------------------------------
+
+   function Page_Size return Natural is
+      P : constant C_Int := Posix.Getpagesize;
+   begin
+      --  The postcondition is a floor, not a guess: no Linux this runtime
+      --  targets has pages smaller than 4 KiB, and a smaller answer would
+      --  make the guard page below every fiber stack too thin to catch an
+      --  overrun.
+      return (if P >= 4096 then Natural (P) else 4096);
+   end Page_Size;
 
    ---------------------------------------------------------------------------
    --  Raise_Descriptor_Limit
@@ -45,23 +75,22 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
 
    function Raise_Descriptor_Limit return Natural is
       use type Interfaces.Unsigned_64;
-      use type C_Int;
-      Limit  : aliased Rlimit;
+      Limit  : aliased Posix.Rlimit;
       Status : C_Int;
 
       --  Each borrow is confined to its own block.  SPARK forbids reading
       --  or writing an object while something still points at it, and the
       --  code below has to inspect Limit between calls.
       procedure Read is
-         Cell : constant access Rlimit := Limit'Access;
+         Cell : constant access Posix.Rlimit := Limit'Access;
       begin
-         Status := Getrlimit (Rlimit_Nofile, Cell);
+         Status := Posix.Getrlimit (Posix.Rlimit_Nofile, Cell);
       end Read;
 
       procedure Write is
-         Cell : constant access constant Rlimit := Limit'Access;
+         Cell : constant access constant Posix.Rlimit := Limit'Access;
       begin
-         Status := Setrlimit (Rlimit_Nofile, Cell);
+         Status := Posix.Setrlimit (Posix.Rlimit_Nofile, Cell);
       end Write;
 
    begin
@@ -89,13 +118,26 @@ package body Iour.Ffi.Sys with SPARK_Mode => On is
    end Raise_Descriptor_Limit;
 
    ---------------------------------------------------------------------------
-   --  Ignore_Sigpipe
+   --  Standard streams
    ---------------------------------------------------------------------------
 
-   procedure Ignore_Sigpipe is
+   function Standard_Output return Descriptor is (Posix.Stdout_Fd);
+   function Standard_Error return Descriptor is (Posix.Stderr_Fd);
+
+   procedure Write_Blocking
+     (Fd : Descriptor; Buffer : Byte_Array; Count : C_Size) is
+   begin
+      Posix.Write_Blocking (C_Int (Fd), Buffer, Count);
+   end Write_Blocking;
+
+   ---------------------------------------------------------------------------
+   --  Ignore_Broken_Pipe
+   ---------------------------------------------------------------------------
+
+   procedure Ignore_Broken_Pipe is
    begin
       --  SIG_IGN is the constant 1 reinterpreted as a handler address.
-      Set_Signal (Sig_Pipe, To_Address (1));
-   end Ignore_Sigpipe;
+      Posix.Set_Signal (Posix.Sig_Pipe, To_Address (1));
+   end Ignore_Broken_Pipe;
 
 end Iour.Ffi.Sys;

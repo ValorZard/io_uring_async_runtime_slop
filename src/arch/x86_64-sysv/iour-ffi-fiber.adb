@@ -15,14 +15,15 @@
 with System.Machine_Code;    use System.Machine_Code;
 with System.Storage_Elements; use System.Storage_Elements;
 with Interfaces;
-with Iour.Ffi.Sys;
+with Iour.Ffi.Posix;
 
 package body Iour.Ffi.Fiber with SPARK_Mode => Off is
+
+   package Posix renames Iour.Ffi.Posix;
 
    use type System.Address;
    use type Interfaces.C.int;
    use type Interfaces.C.long;
-   use type Interfaces.C.size_t;
 
    LF : constant String := "" & ASCII.LF;
 
@@ -169,7 +170,7 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
    ---------------------------------------------------------------------------
 
    function Page_Size return Storage_Count is
-      P : constant C_Int := Sys.Getpagesize;
+      P : constant C_Int := Posix.Getpagesize;
    begin
       return (if P > 0 then Storage_Count (P) else 4096);
    end Page_Size;
@@ -194,20 +195,20 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       --  allocator maps the region the same way; the guard is our addition,
       --  so a fiber that overruns its stack takes SIGSEGV instead of
       --  silently trampling the neighbouring mapping.
-      Base := Sys.Mmap
+      Base := Posix.Mmap
         (Addr   => System.Null_Address,
          Length => C_Size (Usable + Page),
-         Prot   => Sys.Prot_Read + Sys.Prot_Write,
-         Flags  => Sys.Map_Private + Sys.Map_Anonymous,
+         Prot   => Posix.Prot_Read + Posix.Prot_Write,
+         Flags  => Posix.Map_Private + Posix.Map_Anonymous,
          Fd     => -1,
          Offset => 0);
-      if Base = Sys.Map_Failed then
+      if Base = Posix.Map_Failed then
          return System.Null_Address;
       end if;
 
-      Status := Sys.Mprotect (Base, C_Size (Page), Sys.Prot_None);
+      Status := Posix.Mprotect (Base, C_Size (Page), Posix.Prot_None);
       if Status /= 0 then
-         Status := Sys.Munmap (Base, C_Size (Usable + Page));
+         Status := Posix.Munmap (Base, C_Size (Usable + Page));
          return System.Null_Address;
       end if;
       return Base;
@@ -215,13 +216,14 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
 
    procedure Stack_Free (Base : System.Address; Size : C_Size) is
       Page    : constant Storage_Count := Page_Size;
-      Usable  : constant Storage_Count := Round_Up (Storage_Count (Size), Page);
+      Usable  : constant Storage_Count :=
+        Round_Up (Storage_Count (Size), Page);
       Ignored : C_Int;
    begin
       if Base = System.Null_Address then
          return;
       end if;
-      Ignored := Sys.Munmap (Base, C_Size (Usable + Page));
+      Ignored := Posix.Munmap (Base, C_Size (Usable + Page));
    end Stack_Free;
 
    ---------------------------------------------------------------------------

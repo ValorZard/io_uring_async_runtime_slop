@@ -1,25 +1,41 @@
+------------------------------------------------------------------------------
+--  Iour.Reactor body -- Linux, on io_uring.
+--
+--  This is the part liburing normally hides behind inline functions,
+--  written out in Ada instead: claiming a submission slot, filling in an
+--  operation, publishing the tail with a release store, and draining
+--  completions with an acquire load.  The kernel side of that protocol is
+--  UAPI, so nothing here depends on liburing's internal layout; the only
+--  calls that leave Ada are io_uring_setup, io_uring_enter,
+--  io_uring_register, mmap and munmap.
+--
+--  Encode is where the portable Op_Spec becomes an SQE.  The comments there
+--  record which union slot the kernel reads for each opcode, because the
+--  field names in a flattened SQE cannot say it on their own.
+------------------------------------------------------------------------------
+
 with Interfaces.C;
 with System.Storage_Elements;
-with Iour.Ffi.Memory;
+with Iour.Ffi.Posix;
 with Iour.Ffi.Sys;
-with Iour.Ffi.Net;
+with Iour.Ffi.Uring;
+with Iour.Ffi.Uring.Memory;
 with Iour.Per_Shard;
 
 package body Iour.Reactor with
   SPARK_Mode    => On,
   Refined_State =>
-    (Rings => (Cells,
-               Fds.Cells, Sq_Heads.Cells, Sq_Tails.Cells, Sqe_Arrays.Cells,
-               Sq_Sizes.Cells, Cq_Heads.Cells, Cq_Tails.Cells,
-               Cqe_Arrays.Cells, Cq_Sizes.Cells, Local_Tails.Cells,
-               Unsents.Cells, Live_Ops.Cells, Defers.Cells,
-               Fixed_Tables.Cells))
+    (Engines => (Cells,
+                 Fds.Cells, Sq_Heads.Cells, Sq_Tails.Cells, Sqe_Arrays.Cells,
+                 Sq_Sizes.Cells, Cq_Heads.Cells, Cq_Tails.Cells,
+                 Cqe_Arrays.Cells, Cq_Sizes.Cells, Local_Tails.Cells,
+                 Unsents.Cells, Live_Ops.Cells, Defers.Cells,
+                 Fixed_Tables.Cells))
 is
 
    package Uring renames Iour.Ffi.Uring;
-   package Sys renames Iour.Ffi.Sys;
-   package Net renames Iour.Ffi.Net;
-   package Mem renames Iour.Ffi.Memory;
+   package Posix renames Iour.Ffi.Posix;
+   package Mem renames Iour.Ffi.Uring.Memory;
 
    use System.Storage_Elements;
    use type System.Address;
@@ -91,8 +107,8 @@ is
    --
    --  The mapped addresses are held as Integer_Address because a cell has
    --  to be a discrete scalar; To_Address on the way out costs nothing.
-   --  The only cross-shard reader is Ring_Descriptor, which wants the fd of
-   --  a sibling's ring to message it, and that is written once at Open.
+   --  The only cross-shard reader is Ring_Fd, which wants the fd of a
+   --  sibling's ring to message it, and that is written once at Open.
    package Fds         is new Iour.Per_Shard (Ffi.C_Int, -1);
    package Sq_Heads    is new Iour.Per_Shard (Integer_Address, 0);
    package Sq_Tails    is new Iour.Per_Shard (Integer_Address, 0);
@@ -175,197 +191,106 @@ is
    --  Operation constructors
    ---------------------------------------------------------------------------
 
-   --  Each mirrors the corresponding io_uring_prep_* helper.  The comments
-   --  record which union slot the kernel reads for that opcode, because the
-   --  field names in a flattened SQE cannot say it on their own.
+   --  Which ring a descriptor belongs to.  A fixed file is a slot in one
+   --  ring's registered table and means nothing on any other; an ordinary
+   --  descriptor belongs to no ring in particular.  Recording it in the
+   --  Op_Spec is what lets Iour.Async refuse a submission that would take
+   --  a slot number to the wrong core.
+   function Owner (Fd : Descriptor) return Shard_Ref is
+     (if Is_Fixed_File (Fd)
+        and then Integer (Fd) - Fixed_File_Base < Max_Shards * Fixed_File_Span
+      then Fixed_File_Shard (Fd)
+      else No_Shard);
 
    function Op_Nop (Token : Unsigned_64) return Op_Spec is
-     (Opcode => Uring.Op_Nop, Token => Token, others => <>);
-
-   --  The one place a descriptor is taken apart.  An ordinary fd goes into
-   --  the Fd field as it is.  A fixed file becomes its slot number plus
-   --  IOSQE_FIXED_FILE, and the operation remembers which ring the slot
-   --  belongs to.
-   procedure Aim (Fd : Descriptor; Spec : in out Op_Spec)
-     with Global => null;
-
-   procedure Aim (Fd : Descriptor; Spec : in out Op_Spec) is
-   begin
-      if Is_Fixed_File (Fd)
-        and then Integer (Fd) - Fixed_File_Base
-                 < Max_Shards * Fixed_File_Span
-      then
-         Spec.Fd        := Integer_32 (Fixed_File_Slot (Fd));
-         Spec.Sqe_Flags := Spec.Sqe_Flags or Uring.Sqe_Fixed_File;
-         Spec.Ring      := Fixed_File_Shard (Fd);
-      else
-         Spec.Fd := Integer_32 (Fd);
-      end if;
-   end Aim;
+     (Kind => Kind_Nop, Token => Token, others => <>);
 
    function Op_Accept
      (Fd     : Descriptor;
       Token  : Unsigned_64;
       Direct : Boolean := False) return Op_Spec
-   is
-      --  addr = sockaddr (none), off = addrlen pointer (none), len unused;
-      --  file_index = "allocate me a slot" when the socket is to be
-      --  installed directly.
-      Spec : Op_Spec :=
-        (Opcode     => Uring.Op_Accept,
-         Token      => Token,
-         File_Index => (if Direct then Uring.File_Index_Alloc else 0),
-         others     => <>);
-   begin
-      Aim (Fd, Spec);
-      return Spec;
-   end Op_Accept;
+   is (Kind   => Kind_Accept,
+       Fd     => Fd,
+       Token  => Token,
+       Direct => Direct,
+       Ring   => Owner (Fd),
+       others => <>);
 
    function Op_Connect
      (Fd      : Descriptor;
       Address : System.Address;
       Length  : Natural;
       Token   : Unsigned_64) return Op_Spec
-   is
-      --  addr = sockaddr, off = the address length BY VALUE, not a pointer.
-      Spec : Op_Spec :=
-        (Opcode => Uring.Op_Connect,
-         Addr   => As_U64 (Address),
-         Off    => Unsigned_64 (Length),
-         Token  => Token,
-         others => <>);
-   begin
-      Aim (Fd, Spec);
-      return Spec;
-   end Op_Connect;
+   is (Kind   => Kind_Connect,
+       Fd     => Fd,
+       Buffer => Address,
+       Length => Length,
+       Token  => Token,
+       Ring   => Owner (Fd),
+       others => <>);
 
    function Op_Recv
      (Fd     : Descriptor;
       Buffer : System.Address;
       Length : Natural;
       Token  : Unsigned_64) return Op_Spec
-   is
-      Spec : Op_Spec :=
-        (Opcode => Uring.Op_Recv,
-         Addr   => As_U64 (Buffer),
-         Length => Unsigned_32 (Length),
-         Token  => Token,
-         others => <>);
-   begin
-      Aim (Fd, Spec);
-      return Spec;
-   end Op_Recv;
+   is (Kind   => Kind_Recv,
+       Fd     => Fd,
+       Buffer => Buffer,
+       Length => Length,
+       Token  => Token,
+       Ring   => Owner (Fd),
+       others => <>);
 
    function Op_Send
      (Fd     : Descriptor;
       Buffer : System.Address;
       Length : Natural;
       Token  : Unsigned_64) return Op_Spec
-   is
-      --  MSG_NOSIGNAL so a vanished peer is reported as EPIPE on the
-      --  completion rather than raised as a signal.
-      Spec : Op_Spec :=
-        (Opcode   => Uring.Op_Send,
-         Addr     => As_U64 (Buffer),
-         Length   => Unsigned_32 (Length),
-         Op_Flags => Uring.Msg_Nosignal,
-         Token    => Token,
-         others   => <>);
-   begin
-      Aim (Fd, Spec);
-      return Spec;
-   end Op_Send;
+   is (Kind   => Kind_Send,
+       Fd     => Fd,
+       Buffer => Buffer,
+       Length => Length,
+       Token  => Token,
+       Ring   => Owner (Fd),
+       others => <>);
 
    function Op_Write
      (Fd     : Descriptor;
       Buffer : System.Address;
       Length : Natural;
       Token  : Unsigned_64) return Op_Spec
-   is
-      --  off = -1 means "the file's current position", which is also what a
-      --  pipe or terminal wants.
-      Spec : Op_Spec :=
-        (Opcode => Uring.Op_Write,
-         Addr   => As_U64 (Buffer),
-         Off    => Unsigned_64'Last,
-         Length => Unsigned_32 (Length),
-         Token  => Token,
-         others => <>);
-   begin
-      Aim (Fd, Spec);
-      return Spec;
-   end Op_Write;
+   is (Kind   => Kind_Write,
+       Fd     => Fd,
+       Buffer => Buffer,
+       Length => Length,
+       Token  => Token,
+       Ring   => Owner (Fd),
+       others => <>);
 
    function Op_Close (Fd : Descriptor; Token : Unsigned_64) return Op_Spec is
-      Spec : Op_Spec := (Opcode => Uring.Op_Close, Token => Token,
-                         others => <>);
-   begin
-      --  Closing a fixed file is asked for by slot, through file_index,
-      --  and the kernel refuses IOSQE_FIXED_FILE on a close: so this does
-      --  not go through Aim.
-      if Is_Fixed_File (Fd)
-        and then Integer (Fd) - Fixed_File_Base
-                 < Max_Shards * Fixed_File_Span
-      then
-         Spec.Fd         := -1;
-         Spec.File_Index := Integer_32 (Fixed_File_Slot (Fd)) + 1;
-         Spec.Ring       := Fixed_File_Shard (Fd);
-      else
-         Spec.Fd := Integer_32 (Fd);
-      end if;
-      return Spec;
-   end Op_Close;
+     (Kind   => Kind_Close,
+      Fd     => Fd,
+      Token  => Token,
+      Ring   => Owner (Fd),
+      others => <>);
 
    function Op_Timeout
-     (Timespec : System.Address; Token : Unsigned_64) return Op_Spec
-   is
-     --  fd = -1, addr = timespec, len = 1 (one timespec), off = 0 meaning
-     --  "do not also wait for N completions".
-     (Opcode => Uring.Op_Timeout,
-      Fd     => -1,
-      Addr   => As_U64 (Timespec),
-      Length => 1,
-      Token  => Token,
-      others => <>);
+     (Nanoseconds : Unsigned_64; Token : Unsigned_64) return Op_Spec
+   is (Kind        => Kind_Timeout,
+       Nanoseconds => Nanoseconds,
+       Token       => Token,
+       others      => <>);
 
-   function Op_Msg_Ring
-     (Target_Ring  : Descriptor;
+   function Op_Wake
+     (Target       : Shard_Id;
       Target_Token : Unsigned_64;
       Token        : Unsigned_64) return Op_Spec
-   is
-     --  fd = the ring being messaged, off = the user_data the target will
-     --  see, len = the res the target will see.
-     (Opcode => Uring.Op_Msg_Ring,
-      Fd     => Integer_32 (Target_Ring),
-      Off    => Target_Token,
-      Length => 0,
-      Token  => Token,
-      others => <>);
-
-   ---------------------------------------------------------------------------
-   --  The idle timer's timespec
-   ---------------------------------------------------------------------------
-
-   --  One constant timespec per backoff level.  Constants because the
-   --  kernel only reads them, which sidesteps any question of one shard's
-   --  timer racing another's, and because a timeout's timespec has to stay
-   --  put until the operation completes.
-   type Backoff_Table is
-     array (Natural range 0 .. Max_Backoff) of aliased Uring.Kernel_Timespec;
-
-   function Backoff_Nanos (Level : Natural) return Long_Long_Integer is
-     (Long_Long_Integer (Idle_Poll_Nanos) * (2 ** Level))
-     with Pre  => Level <= Max_Backoff,
-          Post => Backoff_Nanos'Result >= 0
-                  and then Backoff_Nanos'Result
-                           <= Long_Long_Integer (Idle_Poll_Nanos)
-                              * (2 ** Max_Backoff);
-
-   Idle_Timespecs : constant Backoff_Table :=
-     [for L in 0 .. Max_Backoff =>
-        (Seconds     => Integer_64 (Backoff_Nanos (L) / 1_000_000_000),
-         Nanoseconds => Integer_64 (Backoff_Nanos (L) mod 1_000_000_000))];
-
+   is (Kind         => Kind_Wake,
+       Target       => Target,
+       Target_Token => Target_Token,
+       Token        => Token,
+       others       => <>);
 
    ---------------------------------------------------------------------------
    --  Ring_Cell body
@@ -412,15 +337,15 @@ is
          Sq_Bytes := Cq_Bytes;
       end if;
 
-      Base := Sys.Mmap
+      Base := Posix.Mmap
         (Addr   => System.Null_Address,
          Length => Sq_Bytes,
-         Prot   => Sys.Prot_Read + Sys.Prot_Write,
-         Flags  => Sys.Map_Shared + Sys.Map_Populate,
+         Prot   => Posix.Prot_Read + Posix.Prot_Write,
+         Flags  => Posix.Map_Shared + Posix.Map_Populate,
          Fd     => H.Fd,
          Offset => Uring.Off_Sq_Ring);
-      if Base = Sys.Map_Failed then
-         Status := Sys.Failure_Code;
+      if Base = Posix.Map_Failed then
+         Status := Ffi.Sys.Failure_Code;
          return;
       end if;
 
@@ -431,30 +356,30 @@ is
          H.Cq_Ring_Base := Base;
          H.Cq_Ring_Size := 0;  --  unmapped together with the SQ region
       else
-         H.Cq_Ring_Base := Sys.Mmap
+         H.Cq_Ring_Base := Posix.Mmap
            (Addr   => System.Null_Address,
             Length => Cq_Bytes,
-            Prot   => Sys.Prot_Read + Sys.Prot_Write,
-            Flags  => Sys.Map_Shared + Sys.Map_Populate,
+            Prot   => Posix.Prot_Read + Posix.Prot_Write,
+            Flags  => Posix.Map_Shared + Posix.Map_Populate,
             Fd     => H.Fd,
             Offset => Uring.Off_Cq_Ring);
-         if H.Cq_Ring_Base = Sys.Map_Failed then
-            Status := Sys.Failure_Code;
+         if H.Cq_Ring_Base = Posix.Map_Failed then
+            Status := Ffi.Sys.Failure_Code;
             return;
          end if;
          H.Cq_Ring_Size := Cq_Bytes;
       end if;
 
       H.Sqes_Size := Ffi.C_Size (P.Sq_Entries) * (Uring.Sqe'Size / 8);
-      H.Sqes_Base := Sys.Mmap
+      H.Sqes_Base := Posix.Mmap
         (Addr   => System.Null_Address,
          Length => H.Sqes_Size,
-         Prot   => Sys.Prot_Read + Sys.Prot_Write,
-         Flags  => Sys.Map_Shared + Sys.Map_Populate,
+         Prot   => Posix.Prot_Read + Posix.Prot_Write,
+         Flags  => Posix.Map_Shared + Posix.Map_Populate,
          Fd     => H.Fd,
          Offset => Uring.Off_Sqes);
-      if H.Sqes_Base = Sys.Map_Failed then
-         Status := Sys.Failure_Code;
+      if H.Sqes_Base = Posix.Map_Failed then
+         Status := Ffi.Sys.Failure_Code;
          return;
       end if;
 
@@ -498,6 +423,14 @@ is
          Mem.Load_Word (Cq_Mask_Addr, Cq_Mask);
          if Sq_Mask /= P.Sq_Entries - 1 or else Cq_Mask /= P.Cq_Entries - 1
          then
+            Status := -E_Invalid;
+            return;
+         end if;
+
+         --  The timespec ring is indexed by submission slot, so a ring
+         --  bigger than the table would let one slot's timeout be written
+         --  over another's backing store.
+         if P.Sq_Entries > Ring_Entries then
             Status := -E_Invalid;
             return;
          end if;
@@ -651,18 +584,193 @@ is
       Cells (Shard).Take (H);
 
       if H.Sqes_Base /= System.Null_Address then
-         Sys.Unmap (H.Sqes_Base, H.Sqes_Size);
+         Posix.Unmap (H.Sqes_Base, H.Sqes_Size);
       end if;
       if H.Cq_Ring_Size > 0 and then H.Cq_Ring_Base /= System.Null_Address then
-         Sys.Unmap (H.Cq_Ring_Base, H.Cq_Ring_Size);
+         Posix.Unmap (H.Cq_Ring_Base, H.Cq_Ring_Size);
       end if;
       if H.Sq_Ring_Base /= System.Null_Address then
-         Sys.Unmap (H.Sq_Ring_Base, H.Sq_Ring_Size);
+         Posix.Unmap (H.Sq_Ring_Base, H.Sq_Ring_Size);
       end if;
       if H.Fd >= 0 then
-         Net.Close_Quietly (H.Fd);
+         Posix.Close_Quietly (H.Fd);
       end if;
    end Shut;
+
+   ---------------------------------------------------------------------------
+   --  Ring_Fd -- a sibling's ring, for messaging it
+   ---------------------------------------------------------------------------
+
+   procedure Ring_Fd (Shard : Shard_Id; Fd : out Ffi.C_Int)
+     with Global => (Input => Fds.Cells);
+
+   procedure Ring_Fd (Shard : Shard_Id; Fd : out Ffi.C_Int) is
+   begin
+      Fds.Get (Shard, Fd);
+   end Ring_Fd;
+
+   ---------------------------------------------------------------------------
+   --  Encode -- the portable Op_Spec as an SQE
+   ---------------------------------------------------------------------------
+
+   --  The one place a descriptor is taken apart.  An ordinary fd goes into
+   --  the fd field as it is; a fixed file becomes its slot number plus
+   --  IOSQE_FIXED_FILE.
+   procedure Aim (Fd : Descriptor; Item : in out Uring.Sqe)
+     with Global => null;
+
+   procedure Aim (Fd : Descriptor; Item : in out Uring.Sqe) is
+   begin
+      if Owner (Fd) /= No_Shard then
+         Item.Fd    := Integer_32 (Fixed_File_Slot (Fd));
+         Item.Flags := Item.Flags or Uring.Sqe_Fixed_File;
+      else
+         Item.Fd := Integer_32 (Fd);
+      end if;
+   end Aim;
+
+   --  Slot is where in the submission ring this operation is going, which
+   --  a timeout needs so it can point at that slot's timespec.
+   --
+   --  Named apart from the token Encode above: they are unrelated, and an
+   --  overload between them made the prover's diagnostics about one read
+   --  as if they were about the other.
+   procedure Fill_Sqe
+     (Shard : Shard_Id;
+      Spec  : Op_Spec;
+      Slot  : Unsigned_32;
+      Item  : out Uring.Sqe;
+      Ok    : out Boolean)
+     with Pre => Slot < Ring_Entries,
+          Global => (In_Out => Ffi.Kernel, Input => Fds.Cells),
+          Always_Terminates;
+
+   procedure Fill_Sqe
+     (Shard : Shard_Id;
+      Spec  : Op_Spec;
+      Slot  : Unsigned_32;
+      Item  : out Uring.Sqe;
+      Ok    : out Boolean)
+   is
+   begin
+      Ok := True;
+
+      --  Every field is set, including the ones this opcode does not use:
+      --  a recycled slot still holds the previous operation's bytes, and
+      --  the kernel would read them.
+      Item := (Opcode       => Uring.Op_Nop,
+               Flags        => 0,
+               Ioprio       => 0,
+               Fd           => -1,
+               Off          => 0,
+               Addr         => 0,
+               Len          => 0,
+               Op_Flags     => 0,
+               User_Data    => Spec.Token,
+               Buf_Index    => 0,
+               Personality  => 0,
+               Splice_Fd_In => 0,
+               Addr3        => 0,
+               Pad2         => 0);
+
+      case Spec.Kind is
+
+         when Kind_Nop =>
+            null;
+
+         when Kind_Accept =>
+            --  addr = sockaddr (none), off = addrlen pointer (none), len
+            --  unused; file_index = "allocate me a slot" when the socket is
+            --  to be installed directly.
+            Item.Opcode := Uring.Op_Accept;
+            Item.Splice_Fd_In :=
+              (if Spec.Direct then Uring.File_Index_Alloc else 0);
+            Aim (Spec.Fd, Item);
+
+         when Kind_Connect =>
+            --  addr = sockaddr, off = the address length BY VALUE, not a
+            --  pointer.
+            Item.Opcode := Uring.Op_Connect;
+            Item.Addr   := As_U64 (Spec.Buffer);
+            Item.Off    := Unsigned_64 (Spec.Length);
+            Aim (Spec.Fd, Item);
+
+         when Kind_Recv =>
+            Item.Opcode := Uring.Op_Recv;
+            Item.Addr   := As_U64 (Spec.Buffer);
+            Item.Len    := Unsigned_32 (Spec.Length);
+            Aim (Spec.Fd, Item);
+
+         when Kind_Send =>
+            --  MSG_NOSIGNAL so a vanished peer is reported as EPIPE on the
+            --  completion rather than raised as a signal.
+            Item.Opcode   := Uring.Op_Send;
+            Item.Addr     := As_U64 (Spec.Buffer);
+            Item.Len      := Unsigned_32 (Spec.Length);
+            Item.Op_Flags := Uring.Msg_Nosignal;
+            Aim (Spec.Fd, Item);
+
+         when Kind_Write =>
+            --  off = -1 means "the file's current position", which is also
+            --  what a pipe or terminal wants.
+            Item.Opcode := Uring.Op_Write;
+            Item.Addr   := As_U64 (Spec.Buffer);
+            Item.Off    := Unsigned_64'Last;
+            Item.Len    := Unsigned_32 (Spec.Length);
+            Aim (Spec.Fd, Item);
+
+         when Kind_Close =>
+            --  Closing a fixed file is asked for by slot, through
+            --  file_index, and the kernel refuses IOSQE_FIXED_FILE on a
+            --  close: so this does not go through Aim.
+            Item.Opcode := Uring.Op_Close;
+            if Owner (Spec.Fd) /= No_Shard then
+               Item.Fd           := -1;
+               Item.Splice_Fd_In := Integer_32 (Fixed_File_Slot (Spec.Fd)) + 1;
+            else
+               Item.Fd := Integer_32 (Spec.Fd);
+            end if;
+
+         when Kind_Timeout =>
+            --  fd = -1, addr = timespec, len = 1 (one timespec), off = 0
+            --  meaning "do not also wait for N completions".
+            declare
+               --  A Side_Effects function may only be called as an
+               --  assignment.
+               Where : System.Address;
+            begin
+               Where := Mem.Stage_Timeout
+                 (Shard       => Natural (Shard),
+                  Slot        => Natural (Slot),
+                  Nanoseconds => Spec.Nanoseconds);
+               Item.Opcode := Uring.Op_Timeout;
+               Item.Fd     := -1;
+               Item.Addr   := As_U64 (Where);
+               Item.Len    := 1;
+            end;
+
+         when Kind_Wake =>
+            --  fd = the ring being messaged, off = the user_data the target
+            --  will see, len = the res the target will see.
+            declare
+               Target_Fd : Ffi.C_Int;
+            begin
+               if Spec.Target not in Active_Shard then
+                  Ok := False;
+                  return;
+               end if;
+               Ring_Fd (Spec.Target, Target_Fd);
+               if Target_Fd < 0 then
+                  Ok := False;
+                  return;
+               end if;
+               Item.Opcode := Uring.Op_Msg_Ring;
+               Item.Fd     := Integer_32 (Target_Fd);
+               Item.Off    := Spec.Target_Token;
+               Item.Len    := 0;
+            end;
+      end case;
+   end Fill_Sqe;
 
    ---------------------------------------------------------------------------
    --  Push / Flush / Harvest
@@ -681,6 +789,8 @@ is
       Index      : Unsigned_32;
       Unsent     : Unsigned_32;
       Live       : Natural;
+      Item       : Uring.Sqe;
+      Ok         : Boolean;
    begin
       Queued := False;
 
@@ -692,6 +802,7 @@ is
       Head_Addr := To_Address (Head_I);
 
       if Entries = 0
+        or else Entries > Ring_Entries
         or else Sqes = System.Null_Address
         or else Head_Addr = System.Null_Address
       then
@@ -714,28 +825,22 @@ is
       Mask  := Entries - 1;
       Index := Local_Tail and Mask;
       pragma Assert (Index <= Mask);
+      pragma Assert (Index < Ring_Entries);
 
-      --  Every field is set, including the ones this opcode does not use:
-      --  a recycled slot still holds the previous operation's bytes, and
-      --  the kernel would read them.
+      Fill_Sqe (Shard, Spec, Index, Item, Ok);
+      if not Ok then
+         --  Nothing the kernel could act on -- a wake for a shard whose
+         --  ring is gone.  Report it as queued: the caller's retry loop is
+         --  for a full queue, and spinning on this would never end.
+         Queued := True;
+         return;
+      end if;
+
       Mem.Write_Sqe
         (Base  => Sqes,
          Count => Entries,
          Index => Index,
-         Item  => (Opcode       => Spec.Opcode,
-                   Flags        => Spec.Sqe_Flags,
-                   Ioprio       => Spec.Ioprio,
-                   Fd           => Spec.Fd,
-                   Off          => Spec.Off,
-                   Addr         => Spec.Addr,
-                   Len          => Spec.Length,
-                   Op_Flags     => Spec.Op_Flags,
-                   User_Data    => Spec.Token,
-                   Buf_Index    => Spec.Buf_Group,
-                   Personality  => 0,
-                   Splice_Fd_In => Spec.File_Index,
-                   Addr3        => 0,
-                   Pad2         => 0));
+         Item  => Item);
 
       Local_Tails.Set (Shard, Local_Tail + 1);
       Unsents.Get (Shard, Unsent);
@@ -914,13 +1019,6 @@ is
       Live_Ops.Get (Shard, Count);
    end In_Flight;
 
-   procedure Ring_Descriptor (Shard : Shard_Id; Fd : out Descriptor) is
-      Raw : Ffi.C_Int;
-   begin
-      Fds.Get (Shard, Raw);
-      Fd := (if Raw < 0 then Invalid_Descriptor else Descriptor (Raw));
-   end Ring_Descriptor;
-
    ---------------------------------------------------------------------------
    --  Registered files
    ---------------------------------------------------------------------------
@@ -933,10 +1031,10 @@ is
    procedure Unregister_File
      (Shard : Shard_Id; Slot : File_Slot; Status : out Io_Result)
    is
-      Fd      : Ffi.C_Int;
-      Empty   : constant Uring.Fd_Table (0 .. 0) := [0 => -1];
-      Update  : aliased Uring.Files_Update;
-      Result  : Ffi.C_Int;
+      Fd     : Ffi.C_Int;
+      Empty  : constant Uring.Fd_Table (0 .. 0) := [0 => -1];
+      Update : aliased Uring.Files_Update;
+      Result : Ffi.C_Int;
    begin
       Fds.Get (Shard, Fd);
       if Fd < 0 or else Slot >= Sparse_Table'Length then
@@ -959,6 +1057,12 @@ is
    --  Arm_Idle_Timer
    ---------------------------------------------------------------------------
 
+   function Backoff_Nanos (Level : Natural) return Unsigned_64 is
+     (Unsigned_64 (Idle_Poll_Nanos) * (2 ** Level))
+     with Pre  => Level <= Max_Backoff,
+          Post => Backoff_Nanos'Result
+                  <= Unsigned_64 (Idle_Poll_Nanos) * (2 ** Max_Backoff);
+
    procedure Arm_Idle_Timer
      (Shard : Shard_Id; Level : Natural := 0)
    is
@@ -971,11 +1075,26 @@ is
          Reason => "If the queue is full, submissions are pending, and"
                    & " their completions will wake the shard instead.");
       Push (Shard,
-            Op_Timeout (Mem.Of_Timespec (Idle_Timespecs (Step)),
+            Op_Timeout (Backoff_Nanos (Step),
                         Encode (Tag_Timer, Unsigned_32 (Step))),
             Queued);
       pragma Warnings
         (GNATprove, On, "*""Queued"" is set by ""Push"" but not used*");
    end Arm_Idle_Timer;
+
+   ---------------------------------------------------------------------------
+   --  Reporting
+   ---------------------------------------------------------------------------
+
+   function Backend_Name return String is ("io_uring");
+
+   --  io_uring has an opcode for every operation this runtime submits, so
+   --  once the ring is open there is no path beside it.
+   procedure Ring_Carries_Sockets (Shard : Shard_Id; Yes : out Boolean) is
+      Fd : Ffi.C_Int;
+   begin
+      Fds.Get (Shard, Fd);
+      Yes := Fd >= 0;
+   end Ring_Carries_Sockets;
 
 end Iour.Reactor;

@@ -32,7 +32,8 @@ package Iour.Promises with SPARK_Mode => On is
 
    --  Resolve it and wake whoever is waiting.  Callable from any fiber and
    --  from the environment task.  A wake sent from a shard reaches its
-   --  target immediately over MSG_RING; one sent from the environment task,
+   --  target immediately as a completion in its own stream; one sent from
+   --  the environment task,
    --  which owns no ring, is picked up on the target shard's next pass, so
    --  within its idle backoff if it was asleep.
    procedure Fulfil (Handle : Future_Id; Value : Io_Result);

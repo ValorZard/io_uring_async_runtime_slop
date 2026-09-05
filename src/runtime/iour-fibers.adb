@@ -1,7 +1,7 @@
 with Interfaces; use Interfaces;
 with System;
-with Iour.Ffi;
 with Iour.Ffi.Fiber;
+with Iour.Ffi.Identity;
 with Iour.Ffi.Sys;
 with Iour.Futures;
 with Iour.Per_Shard;
@@ -45,8 +45,10 @@ is
    --  Shard identity
    ---------------------------------------------------------------------------
 
-   --  Linux CPU number of shard 0.  Ada counts CPUs from one.
-   Linux_Base : constant Ffi.C_Int := Ffi.C_Int (First_Shard_Cpu) - 1;
+   --  The system's own number for the core shard 0 sits on.  Ada counts
+   --  CPUs from one and both Linux and Windows count them from zero, so
+   --  the offset is the same on either.
+   Cpu_Base : constant Integer := First_Shard_Cpu - 1;
 
    ---------------------------------------------------------------------------
    --  Fiber table
@@ -463,7 +465,12 @@ is
          Batch := [others => (others => <>)];
          Count := 0;
          while Count < Wake_Batch_Size and then Held > 0 loop
+            --  Restating the loop test, for the prover rather than the
+            --  compiler: it is what carries the bound on Count into the
+            --  indexing below.
+            pragma Warnings (Off, "condition is always True");
             pragma Loop_Invariant (Count < Wake_Batch_Size);
+            pragma Warnings (On, "condition is always True");
             Batch (Count) := Items (Head);
             Head := Head + 1;
             Held := Held - 1;
@@ -522,27 +529,31 @@ is
    procedure Context_Slots (Count : out Natural) is
       Slots : constant Ffi.C_Long := Fib.Slot_Count;
    begin
+      --  C's long is sixty-four bits on Linux and thirty-two on Windows,
+      --  so the upper guard is real on one and provably dead on the other.
+      --  It stays either way: the point is that this cannot overflow
+      --  wherever it is compiled.
+      pragma Warnings (Off, "condition is always False");
+      pragma Warnings (Off, "condition can only be True if invalid values*");
       Count := (if Slots <= 0 then 0
                 elsif Slots > Ffi.C_Long (Natural'Last) then Natural'Last
                 else Natural (Slots));
+      pragma Warnings (On, "condition can only be True if invalid values*");
+      pragma Warnings (On, "condition is always False");
    end Context_Slots;
 
-   function Self return Shard_Ref is
-      Cpu : constant Ffi.C_Int := Ffi.Sys.Sched_Getcpu;
-   begin
-      if Cpu < Linux_Base
-        or else Cpu >= Linux_Base + Ffi.C_Int (Shard_Count)
-      then
-         return No_Shard;
-      end if;
-      return Shard_Ref (Cpu - Linux_Base);
-   end Self;
+   function Self return Shard_Ref is (Ffi.Identity.Current);
 
-   procedure Verify_Cpu (Shard : Active_Shard; Ok : out Boolean) is
-      Who : constant Shard_Ref := Self;
+   procedure Claim_Core (Shard : Active_Shard; Pinned : out Boolean) is
    begin
-      Ok := Who = Shard;
-   end Verify_Cpu;
+      --  Identity first: from here on this thread is this shard, whatever
+      --  the scheduler underneath decides to do with it.
+      Ffi.Identity.Claim (Shard);
+
+      --  Then the core.  Side_Effects functions may only be called as the
+      --  right-hand side of an assignment.
+      Pinned := Ffi.Sys.Bind_To_Cpu (Natural (Cpu_Base + Integer (Shard)));
+   end Claim_Core;
 
    ---------------------------------------------------------------------------
    --  Thin forwarding layer
@@ -624,11 +635,12 @@ is
    --  Wakeups
    ---------------------------------------------------------------------------
 
-   --  Post a ring message from From's ring.  The submission queue can be
-   --  momentarily full; a message dropped for that reason would be a lost
-   --  wakeup, so flush and retry rather than give up.  The retry is bounded
-   --  because a ring that fails to flush is not coming back, and the idle
-   --  timer will surface the work eventually in any case.
+   --  Put a wakeup into another shard's completion stream.  The submission
+   --  queue can be momentarily full; a message dropped for that reason
+   --  would be a lost wakeup, so flush and retry rather than give up.  The
+   --  retry is bounded because an engine that fails to flush is not coming
+   --  back, and the idle timer will surface the work eventually in any
+   --  case.
    procedure Send_Message (From : Shard_Id; Message : Reactor.Op_Spec) is
       Accepted : Boolean;
       Status   : Io_Result;
@@ -649,23 +661,18 @@ is
       end if;
 
       --  Another core owns this fiber.  Rather than reach into its queue,
-      --  post a message on its ring: it arrives as an ordinary completion,
-      --  so a sibling asleep in io_uring_enter wakes with no shared lock
-      --  and no eventfd anywhere in the path.
+      --  put a completion into its stream: it arrives as an ordinary one,
+      --  so a sibling asleep in the kernel wakes with no shared lock and
+      --  nothing to poll.  IORING_OP_MSG_RING on Linux and a posted
+      --  completion-port entry on Windows, and neither is named here.
       if Home in Active_Shard and then From in Active_Shard then
-         declare
-            Target_Fd : Descriptor;
-         begin
-            Reactor.Ring_Descriptor (Home, Target_Fd);
-            Send_Message
-              (From,
-               Reactor.Op_Msg_Ring
-                 (Target_Ring  => Target_Fd,
-                  Target_Token =>
-                    Reactor.Encode
-                      (Reactor.Tag_Wake, Unsigned_32 (Fiber) + 1),
-                  Token => Reactor.Encode (Reactor.Tag_Msg_Send, 0)));
-         end;
+         Send_Message
+           (From,
+            Reactor.Op_Wake
+              (Target       => Home,
+               Target_Token =>
+                 Reactor.Encode (Reactor.Tag_Wake, Unsigned_32 (Fiber) + 1),
+               Token => Reactor.Encode (Reactor.Tag_Msg_Send, 0)));
       end if;
    end Wake;
 
@@ -684,20 +691,13 @@ is
          if Target /= From then
             Shard_Cells (Target).Take_Idle (Sleeping);
             if Sleeping then
-               declare
-                  Target_Fd : Descriptor;
-               begin
-                  Reactor.Ring_Descriptor (Target, Target_Fd);
-                  Send_Message
-                    (From,
-                     Reactor.Op_Msg_Ring
-                       (Target_Ring  => Target_Fd,
-                        --  Payload zero: "look around", no particular fiber.
-                        Target_Token =>
-                          Reactor.Encode (Reactor.Tag_Wake, 0),
-                        Token =>
-                          Reactor.Encode (Reactor.Tag_Msg_Send, 0)));
-               end;
+               Send_Message
+                 (From,
+                  Reactor.Op_Wake
+                    (Target => Target,
+                     --  Payload zero: "look around", no particular fiber.
+                     Target_Token => Reactor.Encode (Reactor.Tag_Wake, 0),
+                     Token => Reactor.Encode (Reactor.Tag_Msg_Send, 0)));
                exit;  --  one woken core is enough to drain the queue
             end if;
          end if;

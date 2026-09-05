@@ -307,12 +307,17 @@ package body Iour.Scheduler with SPARK_Mode => On is
       --  one through does the work.
       Fibers.Reserve_Contexts (Contexts_Ok);
 
-      --  Confirm this task really is on the core its static CPU aspect
-      --  promised, because shard identity is derived from that.
-      Fibers.Verify_Cpu (Shard, Pinned);
+      --  Take up this shard's identity, and ask for its core.  Identity
+      --  is what the rest of the runtime recognises this thread by; the
+      --  core is a performance matter, and a shard that did not get one
+      --  still takes part.
+      Fibers.Claim_Core (Shard, Pinned);
 
       Reactor.Open (Shard, Status);
-      if Failed (Status) or else not Pinned or else not Contexts_Ok then
+      if not Pinned then
+         Trace.Event (Shard, "not pinned; sharing a core with a sibling");
+      end if;
+      if Failed (Status) or else not Contexts_Ok then
          --  A shard with no ring cannot take part.  Count it as finished so
          --  the environment task is not left waiting on it forever.
          Control.Ring_Up;

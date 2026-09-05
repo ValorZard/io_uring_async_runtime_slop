@@ -14,7 +14,10 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use tokio_echo::{arg_or, build, cpu_list, parse, pin_to, Frame, Kind, FRAME_SIZE};
+use tokio_echo::{
+    arg_or, build, cpu_list, parse, pin_to, raise_descriptor_limit, Frame, Kind,
+    FRAME_SIZE,
+};
 
 struct Stats {
     started: AtomicUsize,
@@ -108,17 +111,6 @@ async fn session(host: String, port: u16, rounds: u32, stats: Arc<Stats>) {
     stats.finished_one(frames, ok, mismatch);
 }
 
-fn raise_descriptor_limit() -> u64 {
-    unsafe {
-        let mut lim: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
-            lim.rlim_cur = lim.rlim_max;
-            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
-            return lim.rlim_max as u64;
-        }
-        0
-    }
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -1,11 +1,35 @@
 --  The runtime library.  Ada throughout; the context switch is GNAT inline
 --  Asm in src/arch/<target>, and that body is the only SPARK_Mode => Off
---  unit in the project.
+--  unit outside the platform backends.
+--
+--  Two things vary with the host, and only these two: which of the two
+--  bodies under src/os implements Iour.Reactor, Iour.Ffi.Sys and
+--  Iour.Ffi.Net, and which calling convention the context switch is
+--  written against.  Everything under src, src/ffi, src/runtime and
+--  src/net compiles unchanged on both.
 library project Io_Uring_Async_Runtime is
 
    for Languages use ("Ada");
-   for Source_Dirs use
-     ("src", "src/ffi", "src/runtime", "src/net", "src/arch/x86_64");
+
+   --  Which host, decided by the OS environment variable Windows sets for
+   --  every process and no Unix does.  Override it with IOUR_OS when
+   --  cross-compiling, or when a shell has borrowed the name:
+   --
+   --     gprbuild -P io_uring_async_runtime.gpr -XIOUR_OS=linux
+   type Os_Kind is ("linux", "Windows_NT");
+   Host_Os : Os_Kind := external ("IOUR_OS", external ("OS", "linux"));
+
+   Portable_Dirs := ("src", "src/ffi", "src/runtime", "src/net");
+
+   case Host_Os is
+      when "Windows_NT" =>
+         for Source_Dirs use
+           Portable_Dirs & ("src/os/windows", "src/arch/x86_64-win64");
+      when "linux" =>
+         for Source_Dirs use
+           Portable_Dirs & ("src/os/linux", "src/arch/x86_64-sysv");
+   end case;
+
    for Object_Dir use "obj";
    for Library_Dir use "lib";
    for Library_Name use "iour";
@@ -27,9 +51,19 @@ library project Io_Uring_Async_Runtime is
    end Compiler;
 
    package Linker is
-      --  liburing supplies io_uring_setup and io_uring_enter; everything
-      --  else in the ring protocol is Ada.
-      for Linker_Options use ("-luring");
+      case Host_Os is
+         when "Windows_NT" =>
+            --  Winsock for the sockets.  The IoRing entry points are
+            --  resolved with GetProcAddress instead of linked, so that the
+            --  binary still starts on a Windows without them -- see
+            --  Iour.Ffi.Win32.
+            for Linker_Options use ("-lws2_32");
+         when "linux" =>
+            --  liburing supplies io_uring_setup, io_uring_enter and
+            --  io_uring_register; everything else in the ring protocol is
+            --  Ada.
+            for Linker_Options use ("-luring");
+      end case;
    end Linker;
 
 end Io_Uring_Async_Runtime;

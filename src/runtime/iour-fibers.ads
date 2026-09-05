@@ -35,6 +35,8 @@
 --  to race over and no address to hand out.
 ------------------------------------------------------------------------------
 
+with Iour.Ffi;
+
 package Iour.Fibers with
   SPARK_Mode     => On,
   Abstract_State => (Registry with Synchronous, External),
@@ -45,21 +47,27 @@ is
    --  Identity
    ---------------------------------------------------------------------------
 
-   --  Which shard the calling thread is.
-   --
-   --  Shard N is pinned to Ada CPU First_Shard_Cpu + N by a static aspect,
-   --  and Ada numbers CPUs from one where Linux numbers them from zero, so
-   --  the answer is arithmetic on the CPU the kernel reports.  No lookup
-   --  table, so nothing to keep in step and nothing for two shards to race
-   --  over.  Yields No_Shard on any thread that is not a shard, including
-   --  the environment task.
+   --  Which shard the calling thread is.  One load from thread-local
+   --  storage (Iour.Ffi.Identity), so nothing to keep in step and nothing
+   --  for two shards to race over.  Yields No_Shard on any thread that is
+   --  not a shard, including the environment task.
    function Self return Shard_Ref
      with Global => null;
 
-   --  Confirm a shard is running on the core its CPU aspect promised.
-   --  Purely a check: it records nothing.
-   procedure Verify_Cpu (Shard : Active_Shard; Ok : out Boolean)
-     with Global => null;
+   --  Take up a shard's identity, and its core.
+   --
+   --  Two things, in that order and for different reasons.  The identity
+   --  is what everything else depends on and is exact once claimed.  The
+   --  core is what Ada's CPU aspect was supposed to have arranged and, on
+   --  Windows, did not: GNAT accepts the aspect there and ignores it, so
+   --  the shard asks for the processor itself.
+   --
+   --  Pinned reports only the second.  A shard whose core could not be
+   --  claimed still runs correctly -- it shares a processor with a
+   --  sibling, and says so -- which is why this reports rather than
+   --  refuses.
+   procedure Claim_Core (Shard : Active_Shard; Pinned : out Boolean)
+     with Global => (In_Out => Ffi.Kernel);
 
    --  The fiber currently on this shard's core, or No_Fiber between fibers.
    procedure Running_Fiber (Shard : Shard_Id; Fiber : out Fiber_Ref);
@@ -213,9 +221,9 @@ is
    procedure Home_Of (Fiber : Fiber_Id; Shard : out Shard_Ref);
 
    --  Make a suspended fiber runnable again after its future resolved.
-   --  When the fiber belongs to another shard this goes out as a MSG_RING
+   --  When the fiber belongs to another shard this goes out as a wakeup
    --  submission, which lands in that shard's completion stream and lifts
-   --  it out of io_uring_enter without any shared lock.
+   --  it out of its sleep without any shared lock.
    procedure Wake (From : Shard_Id; Fiber : Fiber_Id; Home : Shard_Id);
 
    --  Hand a fiber back to its home shard from a thread that owns no ring,

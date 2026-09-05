@@ -36,22 +36,22 @@ package body Iour.Text with SPARK_Mode => On is
          --  went wrong.
          Net.Write_All (Fd, Line (0 .. N - 1), Result);
          if Failed (Result) then
-            Ffi.Sys.Write_Blocking (Ffi.C_Int (Fd), Line, Ffi.C_Size (N));
+            Ffi.Sys.Write_Blocking (Fd, Line, Ffi.C_Size (N));
          end if;
       else
          --  Environment task or scheduler context: nothing to suspend.
-         Ffi.Sys.Write_Blocking (Ffi.C_Int (Fd), Line, Ffi.C_Size (N));
+         Ffi.Sys.Write_Blocking (Fd, Line, Ffi.C_Size (N));
       end if;
    end Emit;
 
    procedure Put_Line (Text : String) is
    begin
-      Emit (Ffi.Sys.Stdout, Text);
+      Emit (Ffi.Sys.Standard_Output, Text);
    end Put_Line;
 
    procedure Put_Line_Error (Text : String) is
    begin
-      Emit (Ffi.Sys.Stderr, Text);
+      Emit (Ffi.Sys.Standard_Error, Text);
    end Put_Line_Error;
 
 end Iour.Text;

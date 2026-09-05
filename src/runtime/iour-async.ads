@@ -4,8 +4,9 @@
 --  result.
 --
 --  Iour.Net and Iour.Time are both thin layers over Perform.  Anything else
---  io_uring can do is added the same way: build an Op_Spec, call Perform,
---  and the suspension, the wakeup and the shard bookkeeping come for free.
+--  a backend can do is added the same way: give Iour.Reactor an operation
+--  kind, build an Op_Spec, call Perform, and the suspension, the wakeup and
+--  the shard bookkeeping come for free.
 ------------------------------------------------------------------------------
 
 with Iour.Reactor;

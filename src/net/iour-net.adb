@@ -1,6 +1,7 @@
 with Interfaces; use Interfaces;
 with System;
 with Iour.Async;
+with Iour.Ffi.Inet;
 with Iour.Ffi.Memory;
 with Iour.Ffi.Net;
 with Iour.Ffi.Sys;
@@ -8,6 +9,7 @@ with Iour.Ffi.Sys;
 package body Iour.Net with SPARK_Mode => On is
 
    package Raw renames Iour.Ffi.Net;
+   package Inet renames Iour.Ffi.Inet;
 
 
    ---------------------------------------------------------------------------
@@ -26,7 +28,7 @@ package body Iour.Net with SPARK_Mode => On is
       end if;
       --  A Side_Effects function may only be called as an assignment.
       Result := Raw.Tcp_Listener
-        (Host      => Raw.Any_Address,
+        (Host      => Inet.Any_Address,
          Port      => Unsigned_16 (Port),
          Backlog   => Backlog,
          Reuseport => Reuseport);
@@ -39,6 +41,9 @@ package body Iour.Net with SPARK_Mode => On is
       Result := Raw.Tcp_Socket;
       return Result;
    end New_Socket;
+
+   function Port_Sharing_Available return Boolean is
+     (Raw.Port_Sharing_Available);
 
    function Port_Of (S : Socket) return Io_Result is (Raw.Local_Port (S));
 
@@ -70,7 +75,7 @@ package body Iour.Net with SPARK_Mode => On is
 
    procedure Ignore_Broken_Pipes is
    begin
-      Ffi.Sys.Ignore_Sigpipe;
+      Ffi.Sys.Ignore_Broken_Pipe;
    end Ignore_Broken_Pipes;
 
    ---------------------------------------------------------------------------
@@ -266,7 +271,7 @@ package body Iour.Net with SPARK_Mode => On is
    is
       --  Local, so it lives on the fiber's stack for the whole of the
       --  operation.  The kernel reads it after this call has suspended.
-      Endpoint : aliased Raw.Sockaddr_In;
+      Endpoint : aliased Inet.Sockaddr_In;
       Host_Ip  : Unsigned_32;
       Valid    : Boolean;
    begin
@@ -275,17 +280,18 @@ package body Iour.Net with SPARK_Mode => On is
          return;
       end if;
 
-      Raw.Parse_Ipv4 (Host, Host_Ip, Valid);
+      Inet.Parse_Ipv4 (Host, Host_Ip, Valid);
       if not Valid then
          Result := -E_Invalid;
          return;
       end if;
 
-      Endpoint := Raw.Make_Address (Host_Ip, Unsigned_16 (Port));
+      Endpoint := Inet.Make_Address (Host_Ip, Unsigned_16 (Port));
 
       Async.Perform
         (Reactor.Op_Connect
-           (S, Ffi.Memory.Of_Sockaddr (Endpoint), Raw.Sockaddr_In'Size / 8, 0),
+           (S, Ffi.Memory.Of_Sockaddr (Endpoint),
+            Inet.Sockaddr_In'Size / 8, 0),
          Result);
    end Connect;
 
