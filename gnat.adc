@@ -1,4 +1,5 @@
 --  Partition-wide configuration pragmas.
+pragma SPARK_Mode (On);
 --
 --  Jorvik (Ada 2022, RM D.13) is the concurrency profile this runtime is
 --  built against.  Compared with Ravenscar it keeps the hard guarantees

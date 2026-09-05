@@ -364,9 +364,9 @@ would be verified against and a half-done version claims more than it proves.
 
 `scripts/bench.sh` runs on both systems. Everything platform-dependent is in one
 "Platform" section near the top; the stages are the same code on both.
-`make bench` still refuses to run on Windows because its *fairness controls* —
-`taskset`, `ip_local_port_range`, `ListenOverflows` — have no Windows
-equivalent; run `./scripts/bench.sh` directly there and read the caveats.
+`make bench` invokes it on both systems. Windows lacks the Linux fairness
+controls (`taskset`, `ip_local_port_range`, `ListenOverflows`), so read its
+Windows caveats before comparing numbers across systems.
 
 `bench/runwait` is a small Go program that replaces `/usr/bin/time -f '%U %S
 %M'`. It exists because of two traps:
@@ -408,6 +408,33 @@ Ada 128k rt/s vs Go 122k vs tokio 108k under the Ada client; CPU per round trip
 17–20 µs for all three; peak RSS 26 MB (Ada) / 11 MB (Go) / 6 MB (tokio) —
 the fiber stacks. Full report and raw CSVs in `bench/results/win-before` and
 `win-after`.
+
+### Latest run: 2026-09-04 (Windows, 32 logical CPUs)
+
+`bench/results/20260904-232732` used three repetitions, with the Ada server on
+CPUs 1–4 and the clients on CPUs 9–12. The demo had already passed 2,000
+connections and 20,000 frames with zero failures, but this larger matrix found
+intermittent failures. A failed row is not a throughput result: discard it,
+then inspect its saved client and server logs before drawing a conclusion.
+
+The all-Ada pair was sound at 1,000 × 100 (133k rt/s) and 2,000 × 100
+(169k rt/s), all three repetitions completing. At 100 × 1,000 it lost one of
+three repetitions; at 5,000 × 40 it lost one of three. Cross-language runs
+also failed intermittently, especially Go clients at high connection counts;
+do not attribute those failures to the Ada server without the per-run logs.
+
+Scaling is the immediate Ada-specific issue. With the same Tokio client at
+2,000 × 100, Ada measured 81.7k rt/s on one core, 83.5k on four, and 78.8k on
+eight: more shards did not increase throughput. Worse, the two-core Ada
+variant lost exactly 1,000 of 2,000 sessions in two of three runs. Reproduce
+that variant first and examine shard wakeups, affinity, run-queue ownership,
+and completion handover before treating higher-core results as performance
+data.
+
+Idle sequential latency was 28.0 us for Ada, versus 25.0 us for Go and
+25.2 us for Tokio. The small but persistent gap makes the Windows completion
+path a useful second target after correctness: scheduler transitions, the
+IoRing-to-port bridge, and the two completion copies are the likely costs.
 
 ---
 
