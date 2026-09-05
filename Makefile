@@ -3,28 +3,27 @@
 # to compile the ABI conformance test, which is C on purpose -- it checks the
 # Ada mirrors against the real headers.
 #
-# The GNAT toolchain comes from Alire; env.sh puts it on PATH.
+# The GNAT toolchain comes from Alire; alr exec puts it on PATH.
 
 SHELL := /bin/bash
-ENV   := source ./env.sh &&
 
 .PHONY: all lib examples tests abi-check smoke multi-await demo bench prove prove-boundary clean help
 
 all: examples abi-check
 
 lib:
-	$(ENV) gprbuild -P io_uring_async_runtime.gpr -j0
+	alr exec -- gprbuild -P io_uring_async_runtime.gpr -j0
 
 examples: lib
-	$(ENV) gprbuild -P examples.gpr -j0
+	alr exec -- gprbuild -P examples.gpr -j0
 
 tests: lib
-	$(ENV) gprbuild -P tests.gpr -j0
+	alr exec -- gprbuild -P tests.gpr -j0
 
 # Fails to compile if any Ada mirror of the kernel ABI ever drifts from the
 # system headers.
 abi-check: | bin
-	$(ENV) gcc -O2 -Wall -Wextra -o bin/abi_check tests/abi_check.c -luring
+	gcc -O2 -Wall -Wextra -o bin/abi_check tests/abi_check.c -luring
 	./bin/abi_check
 
 bin obj:
@@ -43,10 +42,9 @@ multi-await: tests
 demo: examples
 	./scripts/run_demo.sh
 
-# The runtime's echo demo against the Tokio and Seastar equivalents: every
+# The runtime's echo demo against the Tokio and Go equivalents: every
 # server against every client, then each server alone across core counts, then
-# latency.  Needs cargo, cmake, and Seastar's CMake prerequisites.  See the
-# header of scripts/bench.sh
+# latency.  Needs cargo and go.  See the header of scripts/bench.sh
 # for the knobs, and for why running it as root and unprivileged gives
 # different answers.
 bench: examples
@@ -64,6 +62,6 @@ help:
 	@echo "make smoke           build and run the runtime self-test"
 	@echo "make multi-await     many awaits in one procedure; check the handover"
 	@echo "make demo            traced walkthrough, then 2000 connections"
-	@echo "make bench           benchmark Ada, Tokio, and Seastar echo servers"
+	@echo "make bench           benchmark Ada, Tokio, and Go echo servers"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers"
 	@echo "make prove           SPARK proof of everything"

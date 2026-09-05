@@ -396,7 +396,7 @@ tests/abi_check.c            kernel-ABI conformance, checked at compile time
 ## Building
 
 Needs `liburing` (2.5 here) and a GNAT toolchain with SPARK. Both are already
-in place via Alire; `env.sh` puts them on `PATH`.
+in place via Alire; `alr exec` puts them on `PATH`.
 
 ```
 make examples     # library, server, client

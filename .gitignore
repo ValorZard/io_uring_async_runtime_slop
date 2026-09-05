@@ -7,7 +7,8 @@ target
 /obj/
 *.ali
 /bench/tokio_echo/target/
-/bench/seastar_echo/build/
+/bench/go_echo/go_echo_server
+/bench/go_echo/go_echo_client
 /bench/build/
 /bench/results/
 __pycache__

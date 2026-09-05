@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Benchmark this runtime's echo demo against the Tokio and Seastar equivalents
-# in bench/tokio_echo and bench/seastar_echo.
+# Benchmark this runtime's echo demo against the Tokio and Go equivalents
+# in bench/tokio_echo and bench/go_echo.
 #
 #   ./scripts/bench.sh [stage ...]        stages: build matrix scaling latency
 #                                         (default: all of them, in that order)
 #
 # What it measures
 #
-#   matrix    every server against every client -- Ada, Tokio, and Seastar --
+#   matrix    every server against every client -- Ada, Tokio, and Go --
 #             at several connection counts.  The cross pairings are what
 #             separate the server's ceiling from the client's.
 #   scaling   each server alone, driven by the same tokio load generator,
@@ -49,15 +49,12 @@
 #   BENCH_UNPRIVILEGED  1 to run Ada servers as BENCH_USER          (0)
 #   BENCH_OUT           results directory                         (bench/results/<timestamp>)
 #
-# Needs: the Alire toolchain (env.sh), cargo, /usr/bin/time, ss and nstat
+# Needs: the Alire toolchain (alr), cargo, go, /usr/bin/time, ss and nstat
 # from iproute2, python3 for the summary.
 #
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-
-# env.sh appends to LD_LIBRARY_PATH, which set -u objects to when unset.
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -91,10 +88,9 @@ CLIENT_CPUS=$(cpus_from "$CLIENT_FIRST_CPU" "$SHARD_COUNT")
 CLIENT_MAIN=$((CLIENT_FIRST_CPU - 2))
 
 TOKIO=bench/tokio_echo/target/release
-SEASTAR_BUILD=bench/seastar_echo/build
-SEASTAR=$SEASTAR_BUILD/seastar_echo_server
-SEASTAR_CLIENT=$SEASTAR_BUILD/seastar_echo_client
-SEASTAR_EXTRA_ARGS=${SEASTAR_EXTRA_ARGS:---memory=2G}
+GO_ECHO=bench/go_echo
+GO=$GO_ECHO/go_echo_server
+GO_CLIENT=$GO_ECHO/go_echo_client
 BUILD=bench/build
 
 TIMEFMT='%U %S %M'
@@ -172,7 +168,7 @@ build_variant() {
     fi
     rm -rf "$dir"; mkdir -p "$dir"
     cp -r src examples tests "$dir"/
-    cp io_uring_async_runtime.gpr examples.gpr tests.gpr gnat.adc env.sh "$dir"/
+    cp io_uring_async_runtime.gpr examples.gpr tests.gpr gnat.adc "$dir"/
     sed -i "s/^\( *Shard_Count *: *constant *:= *\)[0-9]*;/\1$shards;/" "$dir/src/iour.ads"
     sed -i "s/^\( *First_Shard_Cpu *: *constant *:= *\)[0-9]*;/\1$first_cpu;/" "$dir/src/iour.ads"
     if [[ -n $client_cpu ]]; then
@@ -181,17 +177,16 @@ build_variant() {
         sed -i "s/^\(procedure Echo_Client with SPARK_Mode => On, CPU => \)[0-9]*/\1$client_cpu/" \
             "$dir/examples/echo_client.adb"
     fi
-    ( cd "$dir" && source ./env.sh \
-        && gprbuild -q -P io_uring_async_runtime.gpr -j0 \
-        && gprbuild -q -P examples.gpr -j0 ) > "$OUT/build-$name.log" 2>&1 \
+    ( cd "$dir" && alr exec -- gprbuild -q -P io_uring_async_runtime.gpr -j0 \
+        && alr exec -- gprbuild -q -P examples.gpr -j0 ) > "$OUT/build-$name.log" 2>&1 \
         || { log "  build of $name failed; see $OUT/build-$name.log"; return 1; }
     log "  built $name (Shard_Count $shards, First_Shard_Cpu $first_cpu)"
 }
 
 stage_build() {
     log "=== build ==="
-    ( source ./env.sh && gprbuild -q -P io_uring_async_runtime.gpr -j0 \
-        && gprbuild -q -P examples.gpr -j0 ) > "$OUT/build-repo.log" 2>&1 \
+    ( alr exec -- gprbuild -q -P io_uring_async_runtime.gpr -j0 \
+        && alr exec -- gprbuild -q -P examples.gpr -j0 ) > "$OUT/build-repo.log" 2>&1 \
         || die "runtime build failed; see $OUT/build-repo.log"
     log "  built the runtime and examples (Shard_Count $SHARD_COUNT on Linux CPUs $SERVER_CPUS)"
 
@@ -199,12 +194,10 @@ stage_build() {
         || die "tokio build failed; see $OUT/build-tokio.log"
     log "  built bench/tokio_echo"
 
-    cmake -S bench/seastar_echo -B "$SEASTAR_BUILD" -DCMAKE_BUILD_TYPE=Release  -DCMAKE_IGNORE_PREFIX_PATH=/root/miniconda3 \
-        > "$OUT/build-seastar.log" 2>&1 \
-        || die "seastar configure failed; see $OUT/build-seastar.log"
-    cmake --build "$SEASTAR_BUILD" --parallel >> "$OUT/build-seastar.log" 2>&1 \
-        || die "seastar build failed; see $OUT/build-seastar.log"
-    log "  built bench/seastar_echo"
+    ( cd "$GO_ECHO" && go build -o go_echo_server ./cmd/go_echo_server \
+        && go build -o go_echo_client ./cmd/go_echo_client ) > "$OUT/build-go.log" 2>&1 \
+        || die "go build failed; see $OUT/build-go.log"
+    log "  built bench/go_echo"
 
     # The Ada client, moved off the server's cores.
     build_variant "client" "$SHARD_COUNT" "$CLIENT_FIRST_CPU" "$((CLIENT_FIRST_CPU - 1))" \
@@ -282,6 +275,8 @@ stage_matrix() {
     local ada_cli=$BUILD/client/bin/echo_client
     local tok_srv="env IOUR_BENCH_CPUS=$SERVER_CPUS IOUR_BENCH_MAIN_CPU=$SERVER_MAIN $TOKIO/tokio_echo_server"
     local tok_cli="env IOUR_BENCH_CPUS=$CLIENT_CPUS IOUR_BENCH_MAIN_CPU=$CLIENT_MAIN $TOKIO/tokio_echo_client"
+    local go_srv="env IOUR_BENCH_CPUS=$SERVER_CPUS $GO"
+    local go_cli="env IOUR_BENCH_CPUS=$CLIENT_CPUS $GO_CLIENT"
     for scale in $SCALES; do
         local conns=${scale%%:*} rounds=${scale##*:}
         for rep in $(seq 1 "$REPS"); do
@@ -293,17 +288,16 @@ stage_matrix() {
             run_pair "$csv" "ada-srv/tokio-cli"   "$conns" "$rounds" "$rep" $ada_srv -- $tok_cli
             # shellcheck disable=SC2086
             run_pair "$csv" "tokio-srv/ada-cli"   "$conns" "$rounds" "$rep" $tok_srv -- $ada_cli
-            run_pair "$csv" "seastar-srv/ada-cli" "$conns" "$rounds" "$rep" \
-                env "IOUR_BENCH_CPUS=$SERVER_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR" -- $ada_cli
-            run_pair "$csv" "ada-srv/seastar-cli" "$conns" "$rounds" "$rep" $ada_srv -- \
-                env "IOUR_BENCH_CPUS=$CLIENT_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR_CLIENT"
-            run_pair "$csv" "seastar-srv/tokio-cli" "$conns" "$rounds" "$rep" \
-                env "IOUR_BENCH_CPUS=$SERVER_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR" -- $tok_cli
-            run_pair "$csv" "tokio-srv/seastar-cli" "$conns" "$rounds" "$rep" $tok_srv -- \
-                env "IOUR_BENCH_CPUS=$CLIENT_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR_CLIENT"
-            run_pair "$csv" "seastar-srv/seastar-cli" "$conns" "$rounds" "$rep" \
-                env "IOUR_BENCH_CPUS=$SERVER_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR" -- \
-                env "IOUR_BENCH_CPUS=$CLIENT_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR_CLIENT"
+            # shellcheck disable=SC2086
+            run_pair "$csv" "go-srv/ada-cli"     "$conns" "$rounds" "$rep" $go_srv -- $ada_cli
+            # shellcheck disable=SC2086
+            run_pair "$csv" "ada-srv/go-cli"     "$conns" "$rounds" "$rep" $ada_srv -- $go_cli
+            # shellcheck disable=SC2086
+            run_pair "$csv" "go-srv/tokio-cli"   "$conns" "$rounds" "$rep" $go_srv -- $tok_cli
+            # shellcheck disable=SC2086
+            run_pair "$csv" "tokio-srv/go-cli"   "$conns" "$rounds" "$rep" $tok_srv -- $go_cli
+            # shellcheck disable=SC2086
+            run_pair "$csv" "go-srv/go-cli"      "$conns" "$rounds" "$rep" $go_srv -- $go_cli
         done
     done
 }
@@ -323,8 +317,8 @@ stage_scaling() {
             # shellcheck disable=SC2086
             run_pair "$csv" "tokio/$n-cores" "$CONNS" "$ROUNDS" "$rep" \
                 env IOUR_BENCH_CPUS="$cpus" IOUR_BENCH_MAIN_CPU=$SERVER_MAIN $TOKIO/tokio_echo_server -- $load
-            run_pair "$csv" "seastar/$n-cores" "$CONNS" "$ROUNDS" "$rep" \
-                env "IOUR_BENCH_CPUS=$cpus" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR" -- $load
+            run_pair "$csv" "go/$n-cores" "$CONNS" "$ROUNDS" "$rep" \
+                env "IOUR_BENCH_CPUS=$cpus" "$GO" -- $load
         done
     done
 }
@@ -339,8 +333,8 @@ stage_latency() {
         # shellcheck disable=SC2086
         run_pair "$csv" "tokio" 1 5000 "$rep" \
             env IOUR_BENCH_CPUS="$SERVER_CPUS" IOUR_BENCH_MAIN_CPU=$SERVER_MAIN $TOKIO/tokio_echo_server -- $load
-        run_pair "$csv" "seastar" 1 5000 "$rep" \
-            env "IOUR_BENCH_CPUS=$SERVER_CPUS" "SEASTAR_EXTRA_ARGS=$SEASTAR_EXTRA_ARGS" "$SEASTAR" -- $load
+        run_pair "$csv" "go" 1 5000 "$rep" \
+            env "IOUR_BENCH_CPUS=$SERVER_CPUS" "$GO" -- $load
     done
 }
 
