@@ -376,9 +376,36 @@ bodies will always be `SPARK_Mode => Off`. Everything the assembly is
 [`Iour.Ffi.Fiber.Machine`](src/arch/x86_64-sysv/iour-ffi-fiber-machine.ads) —
 one per ABI, beside its body, `SPARK_Mode => On` and proved.
 
-The package holds the machine locations the switch owns as a type, their
-offsets, the instruction sequence as data, an abstract machine, and the exact
-assembler text. Two ideas, from two papers:
+It is split in two. What every context switch has in common is portable and
+lives in [`src/ffi/`](src/ffi/) — the abstract machine
+(`Fiber.Frames`), the exchange theorem and the text walk (`Fiber.Target`),
+the assembler-text scanner (`Fiber.Text`) and the stack arithmetic
+(`Fiber.Layout`). What describes one machine — the locations, their offsets,
+the instruction sequence, and the assembler text — is per target.
+
+**`Fiber.Target` is the interface an assembly target implements**, and it
+implements it by instantiating it.
+
+> **Instantiation alone checks only profiles.** SPARK will not accept
+> contracts on generic formal subprograms — gnatprove rejects every
+> instantiation if you try — so the generic cannot state its requirement the
+> way an Ada `interface` or a C++ concept would. Nothing about *what*
+> `Save_One` must do is enforced by the instantiation itself.
+
+What makes it an interface anyway is that `Target` states the obligation
+itself, as the ghost predicates `Save_Obligation` and `Load_Obligation`, and
+`Model_Switch`'s body asserts them after every call and is proved **from**
+them. So the requirement is written once where a new target's author reads
+it, every target is held to the same one rather than merely to one strong
+enough for its own instance, and a target that misses it fails at its
+instantiation naming the predicate it broke.
+
+That last is checked, not asserted: a stand-in target whose `Save_One`
+treats the instruction pointer like any other register — and whose own
+postcondition says so, so that it is internally consistent — fails with
+`assertion might fail … Save_Obligation`.
+
+Two ideas, from two papers:
 
 * Rutter, *Using a high level language as a cross assembler* (SIGPLAN Notices
   16(2), 1981), is why the instructions are **values rather than characters**.
@@ -402,11 +429,25 @@ assembler text. Two ideas, from two papers:
     and then S.In_Ctx = S.In_Ctx'Old;
   ```
 
-  A dropped register, a duplicated offset, a load from the wrong slot and a
-  save that never happens all make it false. Dropping `xmm11` from the Win64
-  switch's fifty-nine instructions is an easy mistake and a nearly
-  undebuggable one — it corrupts only fibers suspended inside vectorised code,
-  which on a modern compiler means inside `memcpy`.
+  A duplicated offset, a load from the wrong slot and a save that never
+  happens all make it false. Dropping `xmm11` from the Win64 switch's
+  fifty-nine instructions is an easy mistake and a nearly undebuggable one —
+  it corrupts only fibers suspended inside vectorised code, which on a modern
+  compiler means inside `memcpy` — and it is caught not by this theorem but
+  by `Layout_Tiles_Context`, which requires the offsets to be a chain with no
+  holes. That lemma exists because the theorem alone did *not* catch it: a
+  register deleted from `Location` outright, with its offset, its template
+  lines and its record field, once compiled and proved clean and passed the
+  start-up check. Measured, on `r14`.
+
+**What none of it can check** is that `Location` is the ABI's callee-saved
+set in the first place, that `Apply` means what the instruction means, or
+that `Emit` renders the instruction it names. Those three are trusted input.
+The model proves that a *description* of the switch is internally consistent
+— layout, coverage, composition, text — and that the assembled text is that
+description; it cannot prove the description is right for the machine. The
+argument for the arrangement is that what is left trusted is a line each and
+reviewable by eye.
 
 **On stack-based TAL, and what this model does not do.** Behind the POPL paper
 is Morrisett, Crary and Glew's *Stack-Based Typed Assembly Language* (JFP
@@ -480,6 +521,16 @@ the body that does the resolving, because there is no way to turn an address
 from `GetProcAddress` into a callable subprogram without
 `Unchecked_Conversion`, and the reactor. `CLAUDE.md` has the detail.
 
+One caveat belongs here rather than only next to the code, because it bounds
+what "proved" means for the context switch. `Iour.Ffi.Fiber.Target` is the
+interface each ABI's model implements, and **instantiating it checks only
+profiles** — SPARK does not accept contracts on generic formal subprograms.
+The semantics are carried by the ghost predicates `Save_Obligation` and
+`Load_Obligation`, which the shared `Model_Switch` asserts after every call
+and is proved from. That is what holds every target to the same obligation;
+it is a proof obligation, not a language rule, and anyone reworking that
+generic has to keep the assertions or the interface silently stops binding.
+
 Both backends are written in SPARK, and `make prove` runs against either. The
 Windows reactor is a trusted body in the same sense the context switch is: its spec is in SPARK with full contracts, and every client above it
 — the scheduler, the fibers, the sockets — is verified against that spec
@@ -498,7 +549,7 @@ different Win32 mechanisms.
 included:
 
 ```
-Success: all checks proved (1161 checks).
+Success: all checks proved (1196 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
 Data Dependencies            131        129          .           2          .
@@ -516,7 +567,7 @@ configurations share it, and a run that inherits the other one's session
 reports a check count several higher than a clean run does.
 
 ```
-Success: all checks proved (974 checks).
+Success: all checks proved (1017 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
 Data Dependencies             78         77          .           1          .
@@ -709,6 +760,12 @@ src/ffi/                     the portable half of the system interface
   iour-ffi-identity.ads/.adb which shard this thread is: SPARK spec, Off body
   iour-ffi-memory.ads/.adb   address-of for the kernel: SPARK spec, Off body
   iour-ffi-fiber.ads         the context-switch spec
+  iour-ffi-fiber-target.ads/.adb
+                             the exchange theorem and the text walk: the
+                             interface an assembly target implements
+  iour-ffi-fiber-frames.ads  the abstract machine, over a location set
+  iour-ffi-fiber-text.ads/.adb    the assembler-text scanner
+  iour-ffi-fiber-layout.ads/.adb  where a fiber's first frame goes
 src/runtime/
   iour-reactor.ads           the whole surface onto asynchronous I/O
   iour-fibers.adb            fiber table, context switching, Await, Spawn
@@ -737,9 +794,9 @@ src/os/windows/
 src/arch/x86_64-sysv/
   iour-ffi-fiber.adb         the context switch: inline Asm, SPARK_Mode Off
   iour-ffi-fiber-machine.ads/.adb
-                             what that assembly is supposed to be, in
-                             SPARK: locations, offsets, the instruction
-                             sequence, the exchange theorem, the text
+                             one machine described: locations, offsets, the
+                             instruction sequence, the text; instantiates
+                             Iour.Ffi.Fiber.Target
 src/arch/x86_64-win64/
   iour-ffi-fiber.adb         the same, for the Win64 ABI
   iour-ffi-fiber-machine.ads/.adb

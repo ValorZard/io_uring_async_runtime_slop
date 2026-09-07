@@ -9,13 +9,18 @@
 --  probes and the unwinder go looking for them.  Twenty-five locations
 --  rather than eight, in four sizes rather than one.
 --
---  Read the SysV header for what the two papers behind this contribute.  In
---  one line each: the instructions are values rather than characters, so a
---  register and its offset are chosen by one expression and cannot
---  disagree (Rutter 1981); and the switch's obligation is stated as the
---  register-file exchange a typed assembly language would demand of it,
---  and proved (Crary 2003, and Morrisett, Crary and Glew's stack-based
---  TAL behind it).
+--  Read the SysV header for what the two papers behind this contribute and
+--  for what is proved against what is checked.  In one line each: the
+--  instructions are values rather than characters, so a register and its
+--  offset are chosen by one expression and cannot disagree (Rutter 1981);
+--  and the switch's obligation is stated as the register-file exchange a
+--  typed assembly language would demand of it, and proved (Crary 2003, and
+--  Morrisett, Crary and Glew's stack-based TAL behind it).
+--
+--  Everything a switch has in common with every other switch is in the
+--  portable half -- Iour.Ffi.Fiber.Frames, .Target, .Text and .Layout --
+--  and instantiating Iour.Ffi.Fiber.Target with what is here is what
+--  obliges this target to be right.
 --
 --  The size of the location set is exactly why this is worth doing here.
 --  Dropping xmm11 from a hand-written thirty-instruction save-and-restore
@@ -26,7 +31,13 @@
 --  misses is a proof that fails.
 ------------------------------------------------------------------------------
 
+with Iour.Ffi.Fiber.Frames;
+with Iour.Ffi.Fiber.Target;
+with Iour.Ffi.Fiber.Text;
+
 package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
+
+   package Txt renames Iour.Ffi.Fiber.Text;
 
    ---------------------------------------------------------------------------
    --  1.  The register file type
@@ -46,6 +57,14 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
       L_Xmm11, L_Xmm12, L_Xmm13, L_Xmm14, L_Xmm15);
 
    subtype Restorable is Location range L_Rsp .. L_Xmm15;
+
+   package Fr is new Iour.Ffi.Fiber.Frames (Location);
+
+   --  A generic instance's operations are not directly visible, and both
+   --  the contracts below and the Target instantiation need equality.
+   use type Fr.Frame;
+   use type Fr.Word;
+   use type Fr.State;
 
    --  What kind of machine location it is, which decides both the
    --  instruction that moves it and how wide its slot is.
@@ -124,6 +143,39 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
                   and then Off_Fpu_Cw + 2 = Off_Pad
                   and then Off_Pad + 2 = Off_Xmm;
 
+   --  Bytes between the x87 control word and the first vector register:
+   --  what carries Fpu_Cw up to the sixteen-byte alignment movaps needs.
+   Pad_Bytes : constant := Off_Xmm - Off_Pad;
+
+   --  Disjointness says no two locations overlap.  It does not say they
+   --  cover the context, and that omission is not academic: with only the
+   --  lemma above, deleting a register from the middle of Location --
+   --  together with its offset, its two template lines and its field of the
+   --  record -- compiles, proves clean and passes the start-up check, while
+   --  the switch silently stops preserving it.  That was measured, on the
+   --  SysV side's r14, before this lemma existed.  Context'Size does not
+   --  catch it either, because removing a middle field leaves a hole and
+   --  the record's size is unchanged.
+   --
+   --  So the offsets are required to be a *chain*: the first at zero, each
+   --  one starting where its predecessor ended -- plus the padding, at the
+   --  one place there is any -- and the last ending exactly at
+   --  Context_Bytes.  That is strictly stronger than disjointness, and it
+   --  is linear rather than quadratic in the number of locations, which
+   --  with twenty-five of them is worth having.
+   procedure Layout_Tiles_Context
+     with Ghost, Global => null, Always_Terminates,
+          Post => Offset_Of (Location'First) = 0
+                  and then
+                    (for all L in Location =>
+                       (if L /= Location'First then
+                          Offset_Of (L) =
+                            Offset_Of (Location'Pred (L))
+                            + Size_Of (Location'Pred (L))
+                            + (if L = L_Xmm6 then Pad_Bytes else 0)))
+                  and then Offset_Of (Location'Last)
+                           + Size_Of (Location'Last) = Context_Bytes;
+
    --  Which vector register L is, for the instruction that moves it.
    function Xmm_Number (L : Location) return Natural
      with Global => null,
@@ -181,23 +233,17 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
    --  4.  The abstract machine, and what the sequence means on it
    ---------------------------------------------------------------------------
 
-   --  One value per location, whatever its width: this model is about
-   --  which location's contents end up where, not about their encoding.
-   --  Width is a layout question and is settled by Disjoint above.
-   type Word is mod 2 ** 64;
+   --  The model is about which location's contents end up where, not about
+   --  their encoding: width is a layout question and is settled by the
+   --  disjointness lemma above.  Fr.Frame is one value per location
+   --  whatever its width.
+   --
+   --  Resume_Address is not Ghost: it is the actual for a generic formal
+   --  object, and a ghost entity may not be passed to a non-ghost formal.
+   --  A constant emits nothing either way.
+   Resume_Address : constant Fr.Word := 16#5245_5355_4D45_0001#;
 
-   type Frame is array (Location) of Word with Ghost;
-
-   type State is record
-      Live    : Frame;   --  the live locations, registers and TEB alike
-      Out_Ctx : Frame;   --  memory at (%rcx)
-      In_Ctx  : Frame;   --  memory at (%rdx)
-      Rax     : Word;
-   end record with Ghost;
-
-   Resume_Address : constant Word := 16#5245_5355_4D45_0001# with Ghost;
-
-   procedure Apply (S : in out State; I : Instruction)
+   procedure Apply (S : in out Fr.State; I : Instruction)
      with Ghost, Global => null, Always_Terminates,
        Post =>
          (case I.Op is
@@ -224,26 +270,89 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
                        (S'Old.Live with delta I.L => S'Old.In_Ctx (I.L))),
             when Op_Jump_Ctx | Op_Resume_Label | Op_Ret => S = S'Old);
 
-   --  The theorem, identical in shape to the SysV one and quantified over
-   --  a location set three times the size: the outgoing context ends up
-   --  holding the entry value of every location, every restorable location
-   --  ends up holding what the incoming context held, and the incoming
-   --  context is untouched.
-   procedure Model_Switch (S : in out State)
+   --  Saving one location leaves every other slot of the outgoing context,
+   --  and the whole of the live and incoming frames, exactly as they were.
+   --  Two locations sharing a slot would make this false for the second.
+   --
+   --  These two are what Iour.Ffi.Fiber.Target's formals bind to, so their
+   --  postconditions are this target's side of the interface.
+   procedure Save_One (S : in out Fr.State; L : Location)
      with Ghost, Global => null, Always_Terminates,
-       Post =>
-         (for all L in Location =>
-            S.Out_Ctx (L) =
-              (if L = L_Rip then Resume_Address else S.Live'Old (L)))
-         and then (for all L in Restorable => S.Live (L) = S.In_Ctx'Old (L))
-         and then S.In_Ctx = S.In_Ctx'Old;
+       Post => S.Live = S.Live'Old
+               and then S.In_Ctx = S.In_Ctx'Old
+               and then S.Out_Ctx =
+                 (S.Out_Ctx'Old with delta
+                    L => (if L = L_Rip then Resume_Address
+                          else S.Live'Old (L)));
+
+   procedure Load_One (S : in out Fr.State; L : Location)
+     with Ghost, Global => null, Always_Terminates,
+       Pre  => L in Restorable,
+       Post => S.Out_Ctx = S.Out_Ctx'Old
+               and then S.In_Ctx = S.In_Ctx'Old
+               and then S.Live =
+                 (S.Live'Old with delta L => S.In_Ctx'Old (L));
 
    ---------------------------------------------------------------------------
-   --  5.  The text
+   --  5.  What the sequence looks like
    ---------------------------------------------------------------------------
 
-   Nl    : constant String := "" & ASCII.LF;
-   Sigil : constant String := "%%";
+   --  The text of one location's save, one location's restore, and the
+   --  tail.  The other half of this target's side of the interface.
+   procedure Emit_Save
+     (Text : String; Cur : in out Positive; Ok : in out Boolean;
+      L : Location)
+     with Global => null, Always_Terminates,
+       Pre  => Text'First = 1
+               and then Text'Last in 0 .. Txt.Max_Template
+               and then Cur <= Text'Last + 1,
+       Post => Cur >= Cur'Old and then Cur <= Text'Last + 1;
+
+   procedure Emit_Load
+     (Text : String; Cur : in out Positive; Ok : in out Boolean;
+      L : Location)
+     with Global => null, Always_Terminates,
+       Pre  => Text'First = 1
+               and then Text'Last in 0 .. Txt.Max_Template
+               and then Cur <= Text'Last + 1
+               and then L in Restorable,
+       Post => Cur >= Cur'Old and then Cur <= Text'Last + 1;
+
+   procedure Emit_Tail
+     (Text : String; Cur : in out Positive; Ok : in out Boolean)
+     with Global => null, Always_Terminates,
+       Pre  => Text'First = 1
+               and then Text'Last in 0 .. Txt.Max_Template
+               and then Cur <= Text'Last + 1,
+       Post => Cur >= Cur'Old and then Cur <= Text'Last + 1;
+
+   ---------------------------------------------------------------------------
+   --  6.  The interface, instantiated
+   ---------------------------------------------------------------------------
+
+   --  This is where this target's obligations are discharged.  Model_Switch
+   --  and Check_Switch_Text come out of it; if any of the six actuals above
+   --  were wrong, the failure would be reported here.  With twenty-five
+   --  locations in four widths that is worth more here than next door.
+   package Switch is new Iour.Ffi.Fiber.Target
+     (Location       => Location,
+      F              => Fr,
+      Resume_Address => Resume_Address,
+      Save_One       => Save_One,
+      Load_One       => Load_One,
+      Emit_Save      => Emit_Save,
+      Emit_Load      => Emit_Load,
+      Emit_Tail      => Emit_Tail);
+
+   procedure Check_Switch_Text
+     (Text    : String;
+      Ok      : out Boolean;
+      At_Char : out Natural)
+     renames Switch.Check_Switch_Text;
+
+   ---------------------------------------------------------------------------
+   --  7.  The text GCC assembles
+   ---------------------------------------------------------------------------
 
    --  NT_TIB.StackBase, NT_TIB.StackLimit and TEB.DeallocationStack, at the
    --  offsets Windows has used on x86-64 since the platform existed.  They
@@ -259,90 +368,78 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
    --  character; it is written out only because GNAT requires an Asm
    --  template to be a static string.
    Switch_Template : constant String :=
-     "leaq 1f(" & Sigil & "rip), " & Sigil & "rax"          & Nl &
-     "movq " & Sigil & "rax, 0(" & Sigil & "rcx)"           & Nl &
-     "movq " & Sigil & "rsp, 8(" & Sigil & "rcx)"           & Nl &
-     "movq " & Sigil & "rbp, 16(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "rbx, 24(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "r12, 32(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "r13, 40(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "r14, 48(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "r15, 56(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "rdi, 64(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "rsi, 72(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "gs:" & Teb_Stack_Base
-            & ", " & Sigil & "rax"                          & Nl &
-     "movq " & Sigil & "rax, 80(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "gs:" & Teb_Stack_Limit
-            & ", " & Sigil & "rax"                          & Nl &
-     "movq " & Sigil & "rax, 88(" & Sigil & "rcx)"          & Nl &
-     "movq " & Sigil & "gs:" & Teb_Dealloc_Stack
-            & ", " & Sigil & "rax"                          & Nl &
-     "movq " & Sigil & "rax, 96(" & Sigil & "rcx)"          & Nl &
-     "stmxcsr 104(" & Sigil & "rcx)"                        & Nl &
-     "fnstcw 108(" & Sigil & "rcx)"                         & Nl &
-     "movaps " & Sigil & "xmm6, 112(" & Sigil & "rcx)"      & Nl &
-     "movaps " & Sigil & "xmm7, 128(" & Sigil & "rcx)"      & Nl &
-     "movaps " & Sigil & "xmm8, 144(" & Sigil & "rcx)"      & Nl &
-     "movaps " & Sigil & "xmm9, 160(" & Sigil & "rcx)"      & Nl &
-     "movaps " & Sigil & "xmm10, 176(" & Sigil & "rcx)"     & Nl &
-     "movaps " & Sigil & "xmm11, 192(" & Sigil & "rcx)"     & Nl &
-     "movaps " & Sigil & "xmm12, 208(" & Sigil & "rcx)"     & Nl &
-     "movaps " & Sigil & "xmm13, 224(" & Sigil & "rcx)"     & Nl &
-     "movaps " & Sigil & "xmm14, 240(" & Sigil & "rcx)"     & Nl &
-     "movaps " & Sigil & "xmm15, 256(" & Sigil & "rcx)"     & Nl &
-     "movaps 256(" & Sigil & "rdx), " & Sigil & "xmm15"     & Nl &
-     "movaps 240(" & Sigil & "rdx), " & Sigil & "xmm14"     & Nl &
-     "movaps 224(" & Sigil & "rdx), " & Sigil & "xmm13"     & Nl &
-     "movaps 208(" & Sigil & "rdx), " & Sigil & "xmm12"     & Nl &
-     "movaps 192(" & Sigil & "rdx), " & Sigil & "xmm11"     & Nl &
-     "movaps 176(" & Sigil & "rdx), " & Sigil & "xmm10"     & Nl &
-     "movaps 160(" & Sigil & "rdx), " & Sigil & "xmm9"      & Nl &
-     "movaps 144(" & Sigil & "rdx), " & Sigil & "xmm8"      & Nl &
-     "movaps 128(" & Sigil & "rdx), " & Sigil & "xmm7"      & Nl &
-     "movaps 112(" & Sigil & "rdx), " & Sigil & "xmm6"      & Nl &
-     "fldcw 108(" & Sigil & "rdx)"                          & Nl &
-     "ldmxcsr 104(" & Sigil & "rdx)"                        & Nl &
-     "movq 96(" & Sigil & "rdx), " & Sigil & "rax"          & Nl &
-     "movq " & Sigil & "rax, " & Sigil & "gs:"
-            & Teb_Dealloc_Stack                             & Nl &
-     "movq 88(" & Sigil & "rdx), " & Sigil & "rax"          & Nl &
-     "movq " & Sigil & "rax, " & Sigil & "gs:"
-            & Teb_Stack_Limit                               & Nl &
-     "movq 80(" & Sigil & "rdx), " & Sigil & "rax"          & Nl &
-     "movq " & Sigil & "rax, " & Sigil & "gs:"
-            & Teb_Stack_Base                                & Nl &
-     "movq 72(" & Sigil & "rdx), " & Sigil & "rsi"          & Nl &
-     "movq 64(" & Sigil & "rdx), " & Sigil & "rdi"          & Nl &
-     "movq 56(" & Sigil & "rdx), " & Sigil & "r15"          & Nl &
-     "movq 48(" & Sigil & "rdx), " & Sigil & "r14"          & Nl &
-     "movq 40(" & Sigil & "rdx), " & Sigil & "r13"          & Nl &
-     "movq 32(" & Sigil & "rdx), " & Sigil & "r12"          & Nl &
-     "movq 24(" & Sigil & "rdx), " & Sigil & "rbx"          & Nl &
-     "movq 16(" & Sigil & "rdx), " & Sigil & "rbp"          & Nl &
-     "movq 8(" & Sigil & "rdx), " & Sigil & "rsp"           & Nl &
-     "jmpq *0(" & Sigil & "rdx)"                            & Nl &
-     "1:"                                                   & Nl &
-     "ret"                                                  & Nl;
+     "leaq 1f(" & Txt.Sigil & "rip), " & Txt.Sigil & "rax"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, 0(" & Txt.Sigil & "rcx)"           & Txt.Nl &
+     "movq " & Txt.Sigil & "rsp, 8(" & Txt.Sigil & "rcx)"           & Txt.Nl &
+     "movq " & Txt.Sigil & "rbp, 16(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rbx, 24(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "r12, 32(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "r13, 40(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "r14, 48(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "r15, 56(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rdi, 64(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rsi, 72(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "gs:" & Teb_Stack_Base
+            & ", " & Txt.Sigil & "rax"                          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, 80(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "gs:" & Teb_Stack_Limit
+            & ", " & Txt.Sigil & "rax"                          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, 88(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "movq " & Txt.Sigil & "gs:" & Teb_Dealloc_Stack
+            & ", " & Txt.Sigil & "rax"                          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, 96(" & Txt.Sigil & "rcx)"          & Txt.Nl &
+     "stmxcsr 104(" & Txt.Sigil & "rcx)"                        & Txt.Nl &
+     "fnstcw 108(" & Txt.Sigil & "rcx)"                         & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm6, 112(" & Txt.Sigil & "rcx)"      & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm7, 128(" & Txt.Sigil & "rcx)"      & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm8, 144(" & Txt.Sigil & "rcx)"      & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm9, 160(" & Txt.Sigil & "rcx)"      & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm10, 176(" & Txt.Sigil & "rcx)"     & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm11, 192(" & Txt.Sigil & "rcx)"     & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm12, 208(" & Txt.Sigil & "rcx)"     & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm13, 224(" & Txt.Sigil & "rcx)"     & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm14, 240(" & Txt.Sigil & "rcx)"     & Txt.Nl &
+     "movaps " & Txt.Sigil & "xmm15, 256(" & Txt.Sigil & "rcx)"     & Txt.Nl &
+     "movaps 256(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm15"     & Txt.Nl &
+     "movaps 240(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm14"     & Txt.Nl &
+     "movaps 224(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm13"     & Txt.Nl &
+     "movaps 208(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm12"     & Txt.Nl &
+     "movaps 192(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm11"     & Txt.Nl &
+     "movaps 176(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm10"     & Txt.Nl &
+     "movaps 160(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm9"      & Txt.Nl &
+     "movaps 144(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm8"      & Txt.Nl &
+     "movaps 128(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm7"      & Txt.Nl &
+     "movaps 112(" & Txt.Sigil & "rdx), " & Txt.Sigil & "xmm6"      & Txt.Nl &
+     "fldcw 108(" & Txt.Sigil & "rdx)"                          & Txt.Nl &
+     "ldmxcsr 104(" & Txt.Sigil & "rdx)"                        & Txt.Nl &
+     "movq 96(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rax"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, " & Txt.Sigil & "gs:"
+            & Teb_Dealloc_Stack                             & Txt.Nl &
+     "movq 88(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rax"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, " & Txt.Sigil & "gs:"
+            & Teb_Stack_Limit                               & Txt.Nl &
+     "movq 80(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rax"          & Txt.Nl &
+     "movq " & Txt.Sigil & "rax, " & Txt.Sigil & "gs:"
+            & Teb_Stack_Base                                & Txt.Nl &
+     "movq 72(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rsi"          & Txt.Nl &
+     "movq 64(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rdi"          & Txt.Nl &
+     "movq 56(" & Txt.Sigil & "rdx), " & Txt.Sigil & "r15"          & Txt.Nl &
+     "movq 48(" & Txt.Sigil & "rdx), " & Txt.Sigil & "r14"          & Txt.Nl &
+     "movq 40(" & Txt.Sigil & "rdx), " & Txt.Sigil & "r13"          & Txt.Nl &
+     "movq 32(" & Txt.Sigil & "rdx), " & Txt.Sigil & "r12"          & Txt.Nl &
+     "movq 24(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rbx"          & Txt.Nl &
+     "movq 16(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rbp"          & Txt.Nl &
+     "movq 8(" & Txt.Sigil & "rdx), " & Txt.Sigil & "rsp"           & Txt.Nl &
+     "jmpq *0(" & Txt.Sigil & "rdx)"                            & Txt.Nl &
+     "1:"                                                   & Txt.Nl &
+     "ret"                                                  & Txt.Nl;
 
    --  The trampoline a freshly primed context starts on.  Win64's first
    --  argument register is rcx, where SysV uses rdi; everything else about
    --  it is the same.
    Trampoline_Template : constant String :=
-     "movq " & Sigil & "r13, " & Sigil & "rcx"              & Nl &
-     "jmpq *" & Sigil & "r12"                               & Nl;
-
-   Max_Line     : constant := 64;
-   Max_Template : constant := 8192;
-
-   procedure Check_Switch_Text
-     (Text    : String;
-      Ok      : out Boolean;
-      At_Char : out Natural)
-     with Global => null, Always_Terminates,
-          Pre  => Text'First = 1
-                  and then Text'Last in 0 .. Max_Template,
-          Post => (if Ok then At_Char = 0);
+     "movq " & Txt.Sigil & "r13, " & Txt.Sigil & "rcx"              & Txt.Nl &
+     "jmpq *" & Txt.Sigil & "r12"                               & Txt.Nl;
 
    procedure Check_Trampoline_Text
      (Text    : String;
@@ -350,14 +447,14 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
       At_Char : out Natural)
      with Global => null, Always_Terminates,
           Pre  => Text'First = 1
-                  and then Text'Last in 0 .. Max_Template,
+                  and then Text'Last in 0 .. Txt.Max_Template,
           Post => (if Ok then At_Char = 0);
 
    function Emitted_Matches_Model return Boolean
      with Global => null;
 
    ---------------------------------------------------------------------------
-   --  6.  The stack a fiber starts on
+   --  8.  The stack a fiber starts on
    ---------------------------------------------------------------------------
 
    --  Win64 has no red zone, but a function may write the thirty-two bytes
@@ -367,36 +464,5 @@ package Iour.Ffi.Fiber.Machine with SPARK_Mode => On is
    --  SysV model reserves 128 bytes of red zone in the same place, and the
    --  arithmetic is otherwise identical.
    Entry_Reserve : constant := 32;
-
-   subtype Page_Bytes is Natural range 4_096 .. 2 ** 20;
-   subtype Stack_Bytes is Natural range 0 .. 2 ** 28;
-
-   function Round_Up_Pages (Bytes : Stack_Bytes; Page : Page_Bytes)
-     return Natural
-     with Global => null,
-          Pre  => Bytes <= Stack_Bytes'Last - Page,
-          Post => Round_Up_Pages'Result mod Page = 0
-                  and then Round_Up_Pages'Result >= Bytes
-                  and then Round_Up_Pages'Result < Bytes + Page;
-
-   --  Where the dummy return address goes, as a byte offset from the base
-   --  of the mapping: one guard page, then Usable bytes the fiber may
-   --  touch, and the entry frame built down from the top of those.
-   --
-   --    mod 16 = 8       what a call leaves, which is the alignment the
-   --                     entry point is entitled to assume;
-   --    >= Guard         above the guard page, so priming never writes to
-   --                     it;
-   --    within the map   the shadow store above the frame is inside the
-   --                     usable region.
-   function Return_Slot_Offset (Guard : Page_Bytes; Usable : Natural)
-     return Natural
-     with Global => null,
-          Pre  => Usable in 4 * Guard .. Stack_Bytes'Last
-                  and then Guard <= Stack_Bytes'Last - Usable,
-          Post => Return_Slot_Offset'Result mod 16 = 8
-                  and then Return_Slot_Offset'Result >= Guard
-                  and then Return_Slot_Offset'Result + 8 + Entry_Reserve
-                             <= Guard + Usable;
 
 end Iour.Ffi.Fiber.Machine;

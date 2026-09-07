@@ -41,11 +41,13 @@ with System.Storage_Elements; use System.Storage_Elements;
 with Interfaces;
 with Iour.Ffi.Posix;
 with Iour.Ffi.Fiber.Machine;
+with Iour.Ffi.Fiber.Layout;
 
 package body Iour.Ffi.Fiber with SPARK_Mode => Off is
 
    package Posix renames Iour.Ffi.Posix;
    package Mach renames Iour.Ffi.Fiber.Machine;
+   package Lay  renames Iour.Ffi.Fiber.Layout;
 
    use type System.Address;
    use type Interfaces.C.int;
@@ -187,15 +189,15 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
    --  Fiber_Stack_Bytes is 64 KiB; 128 MB is room to spare.
    Max_Stack : constant := 2 ** 27;
 
-   function Page_Size return Mach.Page_Bytes is
+   function Page_Size return Lay.Page_Bytes is
       P : constant C_Int := Posix.Getpagesize;
    begin
-      if P >= C_Int (Mach.Page_Bytes'First)
-        and then P <= C_Int (Mach.Page_Bytes'Last)
+      if P >= C_Int (Lay.Page_Bytes'First)
+        and then P <= C_Int (Lay.Page_Bytes'Last)
       then
-         return Mach.Page_Bytes (P);
+         return Lay.Page_Bytes (P);
       else
-         return Mach.Page_Bytes'First;
+         return Lay.Page_Bytes'First;
       end if;
    end Page_Size;
 
@@ -206,7 +208,7 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
    --  first frame; above Max_Stack the offset arithmetic leaves the range
    --  Machine proves over.
    function Usable_Size
-     (Size : C_Size; Page : Mach.Page_Bytes; Bytes : out Natural)
+     (Size : C_Size; Page : Lay.Page_Bytes; Bytes : out Natural)
       return Boolean
    is
    begin
@@ -214,12 +216,12 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       if Size < C_Size (4 * Page) or else Size > C_Size (Max_Stack) then
          return False;
       end if;
-      Bytes := Mach.Round_Up_Pages (Natural (Size), Page);
+      Bytes := Lay.Round_Up_Pages (Natural (Size), Page);
       return True;
    end Usable_Size;
 
    function Stack_Alloc (Size : C_Size) return System.Address is
-      Page   : constant Mach.Page_Bytes := Page_Size;
+      Page   : constant Lay.Page_Bytes := Page_Size;
       Usable : Natural;
       Base   : System.Address;
       Status : C_Int;
@@ -252,7 +254,7 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
    end Stack_Alloc;
 
    procedure Stack_Free (Base : System.Address; Size : C_Size) is
-      Page    : constant Mach.Page_Bytes := Page_Size;
+      Page    : constant Lay.Page_Bytes := Page_Size;
       Usable  : Natural;
       Ignored : C_Int;
    begin
@@ -278,7 +280,7 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       Size : C_Size;
       Arg  : C_Long)
    is
-      Page   : constant Mach.Page_Bytes := Page_Size;
+      Page   : constant Lay.Page_Bytes := Page_Size;
       Usable : Natural;
       Slot_Address : System.Address;
    begin
@@ -303,7 +305,8 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       --  guard page, so this write cannot touch it; and the red zone above
       --  it is inside the mapping.
       Slot_Address :=
-        Base + Storage_Offset (Mach.Return_Slot_Offset (Page, Usable));
+        Base + Storage_Offset
+                 (Lay.Return_Slot_Offset (Page, Usable, Mach.Entry_Reserve));
 
       declare
          --  Written through a computed address; this is one of the two

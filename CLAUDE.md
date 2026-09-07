@@ -46,8 +46,8 @@ code either:
 alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=linux --mode=all --level=3 -j0
 ```
 
-Current state: **Linux 1161 checks proved, 0 unproved, 2 justified; Windows
-974 proved, 0 unproved, 1 justified.** Every justification is `unused global
+Current state: **Linux 1196 checks proved, 0 unproved, 2 justified; Windows
+1017 proved, 0 unproved, 1 justified.** Every justification is `unused global
 "Ffi.Kernel"` on a portable spec whose two bodies do different amounts:
 `Ffi.Net.Initialize` and `Ffi.Sys.Bind_To_Cpu` on Linux, which do less than
 Windows, and `Ffi.Sys.Ignore_Broken_Pipe` on Windows, which does less than
@@ -57,6 +57,10 @@ it.
 **Delete `obj/gnatprove` before quoting a number.** The two configurations
 share it, and a run that inherits the other one's session reports a total
 several checks higher than a clean run does.
+
+On this machine a whole-configuration `--mode=all --level=3 -j0` run takes
+roughly five minutes for Linux and eleven for Windows, so budget a quarter of
+an hour for the pair and use `-u <unit>.adb` while iterating.
 
 **A clean `gnatprove` is not a clean build.** gnatprove's frontend accepts at
 least one construct the compiler rejects -- a library-level `pragma Assert`
@@ -74,7 +78,8 @@ it that way.
 
 ```
 src/ffi/            portable system interface: Sys, Net, Inet, Identity,
-                    Memory, and the Fiber spec
+                    Memory, the Fiber spec, and the portable half of the
+                    context switch -- Fiber.Frames, .Target, .Text, .Layout
 src/runtime/        scheduler, fibers, futures, run queue, promises, text, trace
 src/net/            asynchronous sockets
 src/os/linux/       io_uring reactor, raw libc (Ffi.Posix), the mapped rings
@@ -84,8 +89,10 @@ src/arch/x86_64-win64/   context switch, Win64 ABI, and its proved model
 ```
 
 `Iour.Ffi.Fiber.Machine` is the second per-ABI unit, beside the switch it
-describes. See *The context switch is proved; the assembly is checked
-against the proof*.
+describes -- but only the target-specific half of it. What every switch has
+in common is portable and lives in `src/ffi/`, and a target implements it by
+instantiating `Iour.Ffi.Fiber.Target`. See *The context switch is proved; the
+assembly is checked against the proof*.
 
 `Op_Spec` is platform-neutral by design: a kind, a descriptor, a buffer, a
 token. Adding an operation means adding an `Op_Kind` and handling it in **both**
@@ -455,15 +462,53 @@ and its spec is what everything above is verified against.
 `Iour.Ffi.Fiber`'s body will always be `SPARK_Mode => Off` -- inline `Asm` in
 a `naked` subprogram is not analysable code. What used to follow from that,
 and no longer does, is that the switch itself was unverified. Everything the
-assembly is *supposed to be* is ordinary Ada and lives in
-`Iour.Ffi.Fiber.Machine`, one per ABI, beside the body it describes:
+assembly is *supposed to be* is ordinary Ada, and it is split in two: what
+every context switch has in common, portable, and what describes one
+machine, per target.
 
 ```
-src/arch/x86_64-sysv/iour-ffi-fiber-machine.ads/.adb    8 locations, 19 insns
-src/arch/x86_64-win64/iour-ffi-fiber-machine.ads/.adb  25 locations, 59 insns
+src/ffi/iour-ffi-fiber-frames.ads     the abstract machine, over a location
+                                      set -- generic
+src/ffi/iour-ffi-fiber-target.ads     the exchange theorem and the text
+        /.adb                         walk: THE INTERFACE -- generic
+src/ffi/iour-ffi-fiber-text.ads/.adb  the assembler-text scanner
+src/ffi/iour-ffi-fiber-layout.ads     where a fiber's first frame goes
+        /.adb
+
+src/arch/x86_64-sysv/iour-ffi-fiber-machine.ads/.adb   8 locations, 19 insns
+src/arch/x86_64-win64/iour-ffi-fiber-machine.ads/.adb 25 locations, 59 insns
 ```
 
 The Win64 template is 1332 characters. The SysV one is 19 lines.
+
+**A target implements the interface by instantiating
+`Iour.Ffi.Fiber.Target`**, and that instantiation is where its obligations
+are discharged. Be precise about how much of that Ada enforces, because it
+is less than it looks: the formal subprograms carry no contracts -- they
+cannot, see *SPARK and generics* -- so **instantiation alone checks only
+profiles**.
+
+What makes it an interface rather than a shared body of code is that
+`Target` states the obligation itself, as `Save_Obligation` and
+`Load_Obligation`, and `Model_Switch`'s body asserts them after every call
+and is proved *from* them rather than from whatever the actual happened to
+promise. So the obligation is written once where a new target's author
+reads it; every target is held to the same one rather than merely to a
+sufficient one; and a target that misses it fails at its instantiation,
+naming the predicate it broke.
+
+That last is checked, not asserted. A stand-in target whose `Save_One`
+treats the instruction pointer like any other register -- and whose own
+postcondition says so, so that it is internally consistent -- fails with
+`assertion might fail ... Save_Obligation`, at the instantiation. Without
+the asserted predicate it would have proved, because its instance's
+`Model_Switch` would have been proved from its own weaker contract.
+
+What a target supplies is five subprograms -- `Save_One`, `Load_One`,
+`Emit_Save`, `Emit_Load`, `Emit_Tail` -- plus its location set, offsets,
+opcodes, snippets and templates. Nothing else. Before the split, 313 of the
+SysV body's 427 lines had an identical twin in the Win64 body; it is 151 of
+277 now, and what is left is the same *shape* rather than the same text.
 
 **The generated code did not change.** `objdump` of `iour-ffi-fiber.o` before
 and after is byte for byte identical, on both `Swap` and `Trampoline`. This
@@ -583,17 +628,58 @@ Four designs were considered first and rejected. Do not re-derive them:
   it is three copies of every offset to catch a subset of what one render
   check catches totally.
 
+### What the model does not catch
+
+Measured, not reasoned about, and worth knowing before trusting any of this
+further than it goes.
+
+**A register deleted from `Location` was not caught, until the tiling lemma.**
+Deleting `L_R14`, `Off_R14`, its two template lines and its field of the
+context record left a model that compiled, proved clean at 168 checks, and
+passed the start-up text check -- while the switch silently stopped
+preserving r14. Everything agreed with everything else; there was simply one
+fewer register in the story. `Context'Size` does not catch it because
+removing a *middle* field leaves a hole and the record's size is unchanged.
+`Layout_Tiles_Context` now does catch it, on the successor of the hole.
+
+What is still trusted input, and cannot be checked from inside:
+
+* **That `Location` is the ABI's callee-saved set.** The lemmas tie
+  `Location` to the context record and to the emitted text; nothing ties any
+  of them to what the System V or Win64 ABI actually requires. If a target's
+  author never knew xmm11 was callee-saved, every artefact here is
+  consistent and wrong together.
+* **That `Apply` means what the instruction means.** `Op_Store_Reg` is
+  *defined* as `Out_Ctx (L) := Live (L)`. That it corresponds to what
+  `movq %reg, off(%base)` does on the machine is a claim in a comment.
+* **That `Emit` renders the instruction it names.** Same shape of claim, in
+  the other direction.
+
+So the honest summary is that the model proves the *internal* consistency of
+a description of the switch -- layout, coverage, composition, and text -- and
+that the assembled text is that description. It does not and cannot prove
+that the description is the right one for the machine. Two of the three
+trusted claims above are one line each and reviewable by eye, which is the
+argument for the arrangement, not a proof of it.
+
 ### What is proved and what is checked
 
 The distinction matters and is worth reading before changing anything here.
 
-**Proved by gnatprove**, statically -- 301 checks when the SysV model unit is
-proved on its own (`gnatprove -u iour-ffi-fiber-machine.adb`):
+**Proved by gnatprove**, statically. `gnatprove -u iour-ffi-fiber-machine.adb`
+is the quick way to work on one target: 175 checks for the SysV model, 273
+for the Win64 one, seconds rather than the minutes a whole configuration
+takes.
 
 * `Layout_Is_Disjoint`: the offsets do not overlap, each is naturally aligned
   for its width, and each fits `Context_Bytes`. Over 25 locations in four
   widths on Windows this is the check that would notice a vector slot laid on
   top of the control words.
+* `Layout_Tiles_Context`: the offsets are a *chain* -- first at zero, each
+  starting where its predecessor ended (plus the two padding bytes, on
+  Windows, at the one place there are any), last ending exactly at
+  `Context_Bytes`. **This is the one that catches a dropped register**, and
+  it exists because disjointness alone does not. See the measurement below.
 * `Model_Switch`'s postcondition above.
 * `Return_Slot_Offset`: a fiber's first frame is 8 modulo 16 -- the alignment
   a `call` leaves -- is above the guard page, and has the red zone (SysV, 128)
@@ -693,6 +779,44 @@ Two places outside `src/arch` know about the model, and both are small:
   their preconditions exclude. They are there because a `case` on `Location`
   must be complete, not because anything reaches them.
 
+### SPARK and generics, which is how the interface is expressed
+
+Four things established by experiment while splitting the model in two.
+Every one of them is the opposite of the obvious guess, so do not re-derive
+them:
+
+* **gnatprove analyses instances, not templates.** That is why the interface
+  works at all: `Iour.Ffi.Fiber.Target`'s `Model_Switch` is re-proved at each
+  instantiation against that target's actual `Save_One` and `Load_One`, so
+  the obligation lands on the target. It also means the split does not
+  halve proof time -- it halves *source*.
+* **Do not put contracts on generic formal subprograms.** Stating the
+  obligation as `with procedure Save_One (...) with Post => ...` is the
+  obvious way to do it, compiles under `gprbuild`, and is then rejected by
+  gnatprove's frontend at every instantiation with a type mismatch between
+  the formal `Location` and the actual. This is the mirror image of the
+  SPARK RM 7.7(3) trap: there the compiler rejects what gnatprove accepts,
+  here the reverse.
+  **State the obligation as a ghost predicate in the generic's visible part
+  and `pragma Assert` it after each call instead.** That is expressible --
+  the visible part can name the formal package's types, and the assertion
+  is checked in the instance where the types are concrete -- and it is
+  strictly better than a formal contract would have been, because the
+  shared code is then proved *from* the stated obligation rather than from
+  whatever each actual happens to promise.
+* **A ghost type may not appear in a generic formal subprogram's profile,
+  and a ghost actual may not be passed to a non-ghost formal.** So
+  `Fiber.Frames`'s `Frame` and `State` are not `Ghost` and neither is
+  `Resume_Address`; the formal *subprograms* carry `with Ghost` instead.
+  Nothing is emitted for a type or a constant, so the run-time cost is
+  still nil.
+* **A generic instance's operators are not directly visible, and a generic
+  formal part cannot carry a use clause.** The equalities the contracts
+  need are imported as formals with defaults --
+  `with function "=" (L, R : F.Frame) return Boolean is <>;` -- and the
+  instantiating package needs `use type Fr.Frame; use type Fr.Word; use
+  type Fr.State;` before its own contracts and before the instantiation.
+
 ### Static string expressions: more than the RM promises
 
 Established here by experiment, because GNAT is more generous than Ada is and
@@ -709,6 +833,77 @@ the difference is what makes the whole arrangement possible:
 * **GNAT folds static string comparison inside `pragma Compile_Time_Error`.**
   Not used here -- the render check subsumes it -- but it is real, and it is
   a way to tie a textual constant to a literal at compile time.
+
+### Adding a target
+
+The five things a new `Iour.Ffi.Fiber.Machine` must get right, none of which
+are obvious from the interface's profiles:
+
+1. **The instruction pointer must be `Location'First`.** The portable half
+   derives `Restorable` as `Location'Succ (Location'First) .. Location'Last`
+   and `Save_Obligation` special-cases `Location'First` as the one that
+   receives the resume address. Both existing targets put `L_Rip` first for
+   this reason; a target that put it elsewhere would fail the obligation
+   without any message saying why.
+2. **`Location` in ascending offset order.** The save phase is
+   `for L in Location` and the restore phase `for L in reverse Restorable`,
+   so the enumeration order *is* the instruction order, and the template has
+   to match it.
+3. **`Load_One` and `Emit_Load` take `Location`, not `Restorable`.** A
+   generic actual's profile must match the formal's exactly, and the formal
+   says `Location`. Constrain them with `Pre => L in Restorable` instead;
+   the generic only ever calls them from a loop over its own `Restorable`,
+   so the precondition discharges.
+4. **Give `Save_One` and `Load_One` postconditions that imply the
+   obligations.** They are written out in full in both targets rather than
+   deferred to `Save_Obligation`, because that is also where the target's
+   body is checked against them, and a target reads better with its
+   obligation in front of it.
+5. **`Resume_Address` and the frame types are not `Ghost`.** A ghost entity
+   cannot be a non-ghost generic formal's actual, and a ghost type cannot
+   appear in a formal subprogram's profile. The formal *subprograms* carry
+   `with Ghost`; nothing is emitted for a type or a constant either way.
+
+Then instantiate `Iour.Ffi.Fiber.Target`, add the arch directory to
+`io_uring_async_runtime.gpr`, and write the `Asm` body against the same spec
+the other two use.
+
+### Testing that the interface actually binds
+
+Worth doing after any change to the portable half, and easy to do wrongly:
+
+* **Breaking only the target's body proves nothing about the interface.**
+  The target's own postcondition catches it first, and the failure is
+  reported on the target's file. That is a test of the target, not of
+  `Target`.
+* **Break the body *and* its postcondition together**, so the target is
+  internally consistent but does not meet the obligation. Then the failure
+  is `assertion might fail ... Save_Obligation` inside
+  `iour-ffi-fiber-target.adb`, reported at the instantiation. That is the
+  test that the interface is load-bearing, and without the asserted
+  predicate that target would have proved.
+**Every mutation that has been tried, and what reports it.** Redo these
+after any change to the portable half; each one should still fail, in the
+place named.
+
+| mutation | caught by | message |
+|---|---|---|
+| swap two displacements in the template (`r14` at `r13`'s offset) | start-up text walk | `smoke` FAIL, character 153 |
+| delete one restore line from the template | start-up text walk | `smoke` FAIL, character 241 |
+| break `Save_One`'s body only | the target's own `Post` | `postcondition might fail`, in the target's file |
+| break `Save_One`'s body *and* its `Post` together | `Target.Save_Obligation` | `assertion might fail`, in `iour-ffi-fiber-target.adb`, reported at the instantiation |
+| delete a location, its offset, its template lines and its record field | `Layout_Tiles_Context` | `postcondition might fail ... Offset_Of (L) = Offset_Of (Pred) + Size_Of (Pred)` |
+| delete a location but leave the record field | the parent body's rep clause | `"Off_R14" not declared in "Machine"` |
+
+The fourth row is the one that has to be done properly: breaking only the
+body is a test of the *target*, not of the interface, because the target's
+own postcondition catches it first and the interface never gets a chance to.
+
+* **Back the file up before mutating it, and restore from the backup, not
+  from git.** `git checkout <file>` restores from HEAD, which after a
+  mid-session commit is the *committed* version and not the working one; it
+  will silently discard uncommitted work on that file. This cost a
+  reconstruction of the SysV spec in the session that wrote this.
 
 ### Changing it
 
@@ -729,17 +924,43 @@ the difference is what makes the whole arrangement possible:
 * Do not use `pragma Assert` at library level to state a fact about
   constants, for the same reason. A `Ghost` procedure with `Post` and a null
   body is the idiom.
+* An obligation stated for a generic to assert takes `Before, After : State`
+  rather than using `'Old`, because `'Old` is only available in a
+  postcondition. `Model_Switch` keeps a ghost `Before` and copies into it
+  before each call; ghost, so it costs nothing.
+* A subprogram of a generic instance can be re-exported by renaming --
+  `procedure Check_Switch_Text (...) renames Switch.Check_Switch_Text;` --
+  and the contract comes with it. That is what keeps `Machine`'s callers
+  from having to name the instance.
+* `Consumed_All` compares against `Text'Last + 1`, so it needs
+  `Text'Last in 0 .. Max_Template` in its precondition or the addition is an
+  unprovable overflow check on a 32-bit `Integer`.
+* `Layout.Reserve_Bytes` carries a `Predicate` of `mod 16 = 0`, because the
+  frame below the reserve could not be 8 modulo 16 otherwise. Both ABIs
+  oblige: 128 and 32.
 * **The Windows model can be exercised from Linux** -- it depends on nothing
-  Windows-specific, only on `Iour.Ffi.Fiber`'s spec. Copy `src/iour.ads`,
-  `src/ffi/iour-ffi.ads/.adb`, `src/ffi/iour-ffi-fiber.ads`, the win64
-  `iour-ffi-fiber-machine.ads/.adb`, and a stub body for `Iour.Ffi.Fiber`
-  into a scratch project with its own trivial `.gpr` -- do not use
-  `gnat.adc`, the stub has no tasking -- then call `Check_Switch_Text` on
-  `Switch_Template`. The stub needs `use type Interfaces.C.long` and explicit
-  `C_Int` conversions, and `Stack_Alloc` cannot be an expression function
-  because it is `Side_Effects`. That is how the 59-instruction Win64 template
-  was confirmed against its model without a Windows machine, and it is worth
-  redoing after any change to the Windows switch.
+  Windows-specific, only on `Iour.Ffi.Fiber`'s spec and the portable half.
+  Copy into a scratch project with its own trivial `.gpr`:
+
+  ```
+  src/iour.ads
+  src/ffi/iour-ffi.ads  iour-ffi.adb  iour-ffi-fiber.ads
+  src/ffi/iour-ffi-fiber-frames.ads   iour-ffi-fiber-target.ads/.adb
+  src/ffi/iour-ffi-fiber-text.ads/.adb
+  src/arch/x86_64-win64/iour-ffi-fiber-machine.ads/.adb
+  ```
+
+  plus a stub body for `Iour.Ffi.Fiber` -- and do not use `gnat.adc`, the
+  stub has no tasking. Then call `Check_Switch_Text` on `Switch_Template`.
+  The stub needs `use type Interfaces.C.long` and explicit `C_Int`
+  conversions, and `Stack_Alloc` cannot be an expression function because it
+  is `Side_Effects`. `iour-ffi-fiber-layout` is not needed unless the scratch
+  main touches the stack arithmetic.
+
+  That is how the 59-instruction Win64 template was confirmed against its
+  model without a Windows machine, and it is worth redoing after any change
+  to the Windows switch or to the portable half -- the answer to look for is
+  `switch: MATCHES`.
 
 ## Ada / GNAT / SPARK things hit in this codebase
 

@@ -47,11 +47,13 @@ with Interfaces;
 with Iour.Ffi.Sys;
 with Iour.Ffi.Win32;
 with Iour.Ffi.Fiber.Machine;
+with Iour.Ffi.Fiber.Layout;
 
 package body Iour.Ffi.Fiber with SPARK_Mode => Off is
 
    package Win  renames Iour.Ffi.Win32;
    package Mach renames Iour.Ffi.Fiber.Machine;
+   package Lay  renames Iour.Ffi.Fiber.Layout;
 
    use type System.Address;
    use type Interfaces.C.int;
@@ -230,13 +232,13 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
    --  Fiber_Stack_Bytes is 64 KiB; 128 MB is room to spare.
    Max_Stack : constant := 2 ** 27;
 
-   function Page_Size return Mach.Page_Bytes is
+   function Page_Size return Lay.Page_Bytes is
       P : constant Natural := Ffi.Sys.Page_Size;
    begin
-      if P in Mach.Page_Bytes then
-         return Mach.Page_Bytes (P);
+      if P in Lay.Page_Bytes then
+         return Lay.Page_Bytes (P);
       else
-         return Mach.Page_Bytes'First;
+         return Lay.Page_Bytes'First;
       end if;
    end Page_Size;
 
@@ -247,7 +249,7 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
    --  first frame; above Max_Stack the offset arithmetic leaves the range
    --  Machine proves over.
    function Usable_Size
-     (Size : C_Size; Page : Mach.Page_Bytes; Bytes : out Natural)
+     (Size : C_Size; Page : Lay.Page_Bytes; Bytes : out Natural)
       return Boolean
    is
    begin
@@ -255,12 +257,12 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       if Size < C_Size (4 * Page) or else Size > C_Size (Max_Stack) then
          return False;
       end if;
-      Bytes := Mach.Round_Up_Pages (Natural (Size), Page);
+      Bytes := Lay.Round_Up_Pages (Natural (Size), Page);
       return True;
    end Usable_Size;
 
    function Stack_Alloc (Size : C_Size) return System.Address is
-      Page    : constant Mach.Page_Bytes := Page_Size;
+      Page    : constant Lay.Page_Bytes := Page_Size;
       Usable  : Natural;
       Base     : System.Address;
       Previous : aliased Win.Dword := 0;
@@ -322,7 +324,7 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       Size : C_Size;
       Arg  : C_Long)
    is
-      Page   : constant Mach.Page_Bytes := Page_Size;
+      Page   : constant Lay.Page_Bytes := Page_Size;
       Usable : Natural;
       Limit  : System.Address;
       Slot_Address : System.Address;
@@ -354,7 +356,8 @@ package body Iour.Ffi.Fiber with SPARK_Mode => Off is
       --  spill its four register arguments without allocating them -- is
       --  inside the mapping.
       Slot_Address :=
-        Base + Storage_Offset (Mach.Return_Slot_Offset (Page, Usable));
+        Base + Storage_Offset
+                 (Lay.Return_Slot_Offset (Page, Usable, Mach.Entry_Reserve));
 
       declare
          --  Written through a computed address; this is one of the two
