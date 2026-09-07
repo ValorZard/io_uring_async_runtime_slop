@@ -76,11 +76,17 @@ is
    --  Start-up
    ---------------------------------------------------------------------------
 
-   --  Whether the machine-context slot table was reserved successfully.
+   --  Whether this shard may start: the machine-context slot table was
+   --  reserved successfully, and the context switch this binary contains is
+   --  the one that was proved.
+   --
    --  The table is built during elaboration, which sequential elaboration
    --  guarantees happens before any task is activated; this only reports
    --  the outcome, so shards can refuse to start rather than prime a slot
-   --  that does not exist.
+   --  that does not exist.  The second question is asked here rather than
+   --  at elaboration because it is a check on emitted assembly, and it is
+   --  what ties Iour.Ffi.Fiber.Machine's proof to the code GCC generated --
+   --  see that package's header.
    procedure Reserve_Contexts (Ok : out Boolean);
 
    --  Slots the context table currently holds, for reporting.

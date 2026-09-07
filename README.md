@@ -368,6 +368,90 @@ page below them, which is this runtime's addition to the minicoro layout:
 Windows — not `PAGE_GUARD`, which arms once and then becomes ordinary memory
 and would let the second overrun through silently.
 
+### The switch is proved, even though the assembly cannot be
+
+Inline `Asm` in a `naked` subprogram is not analysable code, so those two
+bodies will always be `SPARK_Mode => Off`. Everything the assembly is
+*supposed to be*, though, is ordinary Ada, and it lives in
+[`Iour.Ffi.Fiber.Machine`](src/arch/x86_64-sysv/iour-ffi-fiber-machine.ads) —
+one per ABI, beside its body, `SPARK_Mode => On` and proved.
+
+The package holds the machine locations the switch owns as a type, their
+offsets, the instruction sequence as data, an abstract machine, and the exact
+assembler text. Two ideas, from two papers:
+
+* Rutter, *Using a high level language as a cross assembler* (SIGPLAN Notices
+  16(2), 1981), is why the instructions are **values rather than characters**.
+  A save instruction carries the location it saves, and both its displacement
+  and its register name are derived from that one field, so `movq %r14,
+  40(%rdi)` — the register at its neighbour's offset, the classic
+  context-switch typo — is not expressible.
+
+* Crary, *Toward a Foundational Typed Assembly Language* (POPL 2003), is why
+  there is a **theorem rather than a checklist**. TAL states the callee-saved
+  convention as a type the callee must hand back unchanged; a context switch
+  is that obligation and nothing else. So `Model_Switch`'s postcondition is
+  exactly that, quantified over the whole location set:
+
+  ```ada
+  Post =>
+    (for all L in Location =>
+       S.Out_Ctx (L) =
+         (if L = L_Rip then Resume_Address else S.Live'Old (L)))
+    and then (for all L in Restorable => S.Live (L) = S.In_Ctx'Old (L))
+    and then S.In_Ctx = S.In_Ctx'Old;
+  ```
+
+  A dropped register, a duplicated offset, a load from the wrong slot and a
+  save that never happens all make it false. Dropping `xmm11` from the Win64
+  switch's fifty-nine instructions is an easy mistake and a nearly
+  undebuggable one — it corrupts only fibers suspended inside vectorised code,
+  which on a modern compiler means inside `memcpy`.
+
+**On stack-based TAL, and what this model does not do.** Behind the POPL paper
+is Morrisett, Crary and Glew's *Stack-Based Typed Assembly Language* (JFP
+13(5), 2003; TIC '98 before that). It is the closer ancestor of this
+particular problem, and worth naming separately, because it is where *both*
+halves of a context switch are already typed.
+
+Both halves, and this model takes one of them. First, callee-saved registers
+are handled by making the callee **hold their type abstract** and requiring
+the same type back at the return — which is `Model_Switch`'s postcondition
+read backwards: `Location` is that abstract set, and "hand it
+back unchanged" is the whole contract. Second, a **stack type variable** lets
+a function be polymorphic in the shape of the stack it was called on and
+obliges it to restore that shape before it can jump to its return address.
+That second one is what a context switch is: two stacks, each of a shape its
+own fiber knows and the switch does not, exchanged without either being
+disturbed.
+
+The second half is the one left on the table. `L_Rsp` is one more location
+that round-trips, so what is proved is that the stack *pointer* is exchanged
+intact — not anything about what is on either stack. A real STAL
+typing would carry the frame layout as well, and the switch would be
+`∀ρ₁ρ₂`-polymorphic in both. What stands in for it here is much weaker and
+much more local: `Return_Slot_Offset` proves the one frame this runtime builds
+itself, the initial one, is where the ABI says a fresh frame goes. Every
+frame after that is GCC's, and is outside anything proved here. Saying so
+matters, because "the context switch is proved" is easy to read as more than
+it is: the register file is proved exchanged, and the stack is proved only to
+be pointed at.
+
+The `Prime` arithmetic is proved in the same package rather than commented:
+`Return_Slot_Offset`'s postcondition is that a fiber's first frame is 8 modulo
+16 — the alignment a `call` leaves — that it is above the guard page, and that
+the red zone or shadow store above it is inside the mapping.
+
+**What is proved and what is checked.** GNAT requires an `Asm` template to be
+a static string, so the emitted text cannot itself be the rendered one: the
+template is written out, once, in the model package that the proof is about.
+`Emitted_Matches_Model` closes the gap by walking the proved instruction
+sequence and comparing its rendering with that constant, character for
+character. `Iour.Fibers.Reserve_Contexts` asks it before any shard starts, so
+a binary whose assembly and whose proof had drifted apart refuses to run
+rather than switching contexts wrongly. `make smoke` reports it, and names the
+character where a divergence begins.
+
 ## SPARK status
 
 Every unit is `SPARK_Mode => On` except the platform boundary, which is the
@@ -381,6 +465,12 @@ trusted base by design:
 | `Iour.Ffi.Identity` | one thread-local: which shard this thread is | per-thread state SPARK has no model for |
 | `Iour.Ffi.Win32` body (Windows) | the two lazily resolved Winsock extension pointers | `Unchecked_Conversion` to access-to-subprogram |
 | `Iour.Reactor` (Windows) | the completion-port engine | overlays records on completion-port pointers, and is re-entered from thread-pool threads |
+
+`Iour.Ffi.Fiber` is the one of these that has a proved companion rather than
+only a proved spec: `Iour.Ffi.Fiber.Machine` states what the assembly is meant
+to do and proves it, and the `Off` body is reduced to the `Asm` calls, two
+slot addresses and one write through a computed address. See *The switch is
+proved, even though the assembly cannot be*.
 
 Every one of these has a reason of the same kind. `Ffi.Win32`'s *spec* is
 `On` — every import carries a `Global`, and the two entry points it resolves
@@ -408,16 +498,16 @@ different Win32 mechanisms.
 included:
 
 ```
-Success: all checks proved (962 checks).
+Success: all checks proved (1161 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
-Data Dependencies            111        109          .           2          .
+Data Dependencies            131        129          .           2          .
 Flow Dependencies             23         23          .           .          .
-Initialization               340        340          .           .          .
-Run-time Checks              306          .        306           .          .
-Assertions                    29          .         29           .          .
-Functional Contracts          83          .         83           .          .
-Termination                   70         66          4           .          .
+Initialization               346        346          .           .          .
+Run-time Checks              392          .        392           .          .
+Assertions                    50          .         50           .          .
+Functional Contracts         125          .        125           .          .
+Termination                   94         90          4           .          .
 ```
 
 The same command with `-XIOUR_OS=Windows_NT` proves the other backend, from
@@ -426,16 +516,16 @@ configurations share it, and a run that inherits the other one's session
 reports a check count several higher than a clean run does.
 
 ```
-Success: all checks proved (685 checks).
+Success: all checks proved (974 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
-Data Dependencies             56         55          .           1          .
+Data Dependencies             78         77          .           1          .
 Flow Dependencies              9          9          .           .          .
-Initialization               224        224          .           .          .
-Run-time Checks              282          .        282           .          .
-Assertions                    26          .         26           .          .
-Functional Contracts          46          .         46           .          .
-Termination                   42         39          3           .          .
+Initialization               230        230          .           .          .
+Run-time Checks              435          .        435           .          .
+Assertions                    47          .         47           .          .
+Functional Contracts         106          .        106           .          .
+Termination                   69         66          3           .          .
 ```
 
 Zero unproved, zero warnings, zero data races, zero C.
@@ -646,8 +736,13 @@ src/os/windows/
   iour-ffi-sys.adb, iour-ffi-net.adb
 src/arch/x86_64-sysv/
   iour-ffi-fiber.adb         the context switch: inline Asm, SPARK_Mode Off
+  iour-ffi-fiber-machine.ads/.adb
+                             what that assembly is supposed to be, in
+                             SPARK: locations, offsets, the instruction
+                             sequence, the exchange theorem, the text
 src/arch/x86_64-win64/
   iour-ffi-fiber.adb         the same, for the Win64 ABI
+  iour-ffi-fiber-machine.ads/.adb
 examples/                    echo server and client
 tests/smoke.adb              runtime self-test
 tests/abi_check.c            kernel-ABI conformance, checked at compile time

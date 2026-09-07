@@ -14,6 +14,7 @@
 
 with Ada.Text_IO;  use Ada.Text_IO;
 with Iour;         use Iour;
+with Iour.Ffi.Fiber.Machine;
 with Iour.Ffi.Sys;
 with Iour.Fibers;
 with Iour.Net;
@@ -33,10 +34,34 @@ procedure Smoke with SPARK_Mode => On, CPU => 1 is
    Live, Peak : Natural;
    Slots      : Natural;
    Ok         : Boolean;
+   Asm_Ok     : Boolean;
+   Asm_At     : Natural;
 begin
    if Ada.Environment_Variables.Exists ("IOUR_TRACE") then
       Trace.Enable;
    end if;
+   --  Before anything else: is the context switch in this binary the one
+   --  Iour.Ffi.Fiber.Machine proved?  The shards ask the same question
+   --  through Fibers.Reserve_Contexts and refuse to start if the answer is
+   --  no, so this only reports it -- but it reports where, which is what a
+   --  person editing the template needs.
+   Ffi.Fiber.Machine.Check_Switch_Text
+     (Ffi.Fiber.Machine.Switch_Template, Asm_Ok, Asm_At);
+   if not Asm_Ok then
+      Put_Line ("smoke: FAIL -- the assembled context switch is not the"
+                & " proved instruction sequence, from character"
+                & Asm_At'Image);
+      Ffi.Sys.Exit_Process (1);
+   end if;
+   Ffi.Fiber.Machine.Check_Trampoline_Text
+     (Ffi.Fiber.Machine.Trampoline_Template, Asm_Ok, Asm_At);
+   if not Asm_Ok then
+      Put_Line ("smoke: FAIL -- the assembled trampoline is not the proved"
+                & " instruction sequence, from character" & Asm_At'Image);
+      Ffi.Sys.Exit_Process (1);
+   end if;
+   Put_Line ("smoke: context switch matches its proved instruction sequence");
+
    Shards.Activate;
    Net.Ignore_Broken_Pipes;
 

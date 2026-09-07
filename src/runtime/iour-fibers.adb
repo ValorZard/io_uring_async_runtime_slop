@@ -1,6 +1,7 @@
 with Interfaces; use Interfaces;
 with System;
 with Iour.Ffi.Fiber;
+with Iour.Ffi.Fiber.Machine;
 with Iour.Ffi.Identity;
 with Iour.Ffi.Sys;
 with Iour.Futures;
@@ -18,6 +19,7 @@ package body Iour.Fibers with
 is
 
    package Fib renames Iour.Ffi.Fiber;
+   package Mach renames Iour.Ffi.Fiber.Machine;
    use type System.Address;
    use type Ffi.C_Int;
    use type Ffi.C_Long;
@@ -561,7 +563,20 @@ is
 
    procedure Reserve_Contexts (Ok : out Boolean) is
    begin
-      Ok := Contexts_Ready;
+      --  Two questions, and a shard needs both answered yes.  The table is
+      --  the easy one.  The other is whether the assembly this binary was
+      --  built with is the assembly the context switch was proved about:
+      --  Iour.Ffi.Fiber.Machine renders its proved instruction sequence and
+      --  compares it, character for character, with the template GCC
+      --  actually assembled.
+      --
+      --  It has to be asked here rather than proved once and forgotten
+      --  because GNAT requires an Asm template to be a static string, so
+      --  the emitted text cannot itself be the rendered one.  Asking costs
+      --  a few hundred character comparisons per shard, once, and buys the
+      --  guarantee that a binary whose assembly and whose proof had drifted
+      --  apart refuses to start rather than switching contexts wrongly.
+      Ok := Contexts_Ready and then Mach.Emitted_Matches_Model;
    end Reserve_Contexts;
 
    procedure Running_Fiber (Shard : Shard_Id; Fiber : out Fiber_Ref) is

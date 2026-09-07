@@ -15,14 +15,23 @@
 --  Asm inside naked subprograms; there is no C anywhere in this runtime.
 --
 --  Contexts are named by slot index.  The slot table lives in the body of
---  this package, which is the one SPARK_Mode => Off body in the runtime:
---  it has to take addresses of objects and write through computed ones,
---  and SPARK forbids both.  This spec stays in SPARK, and its contracts are
---  what every client is verified against.  The saved-register table is
---  modelled as part of Ffi.Kernel: machine state the runtime owns.
+--  this package, which is SPARK_Mode => Off: it has to take addresses of
+--  objects and write through computed ones, and SPARK forbids both.  This
+--  spec stays in SPARK, and its contracts are what every client is verified
+--  against.  The saved-register table is modelled as part of Ffi.Kernel:
+--  machine state the runtime owns.
+--
+--  What the assembly in that body is supposed to do is not left to the
+--  comments around it.  The child package Iour.Ffi.Fiber.Machine, one per
+--  ABI and beside the body it describes, is SPARK_Mode => On and holds the
+--  machine locations the switch owns, their offsets, the instruction
+--  sequence as data, the register-file exchange it performs -- proved --
+--  and the assembler text, which it checks against that sequence before
+--  any shard is allowed to start.  Read its header first.
 --
 --  x86-64 only.  The body lives under src/arch/x86_64; another target gets
---  its own directory and body against this same spec.
+--  its own directory, its own model and its own body against this same
+--  spec.
 ------------------------------------------------------------------------------
 
 with System;

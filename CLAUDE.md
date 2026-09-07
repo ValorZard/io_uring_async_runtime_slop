@@ -16,7 +16,7 @@ say it and in a few places implies the opposite.
 
 ```
 make examples        # library + echo server/client        (both systems)
-make smoke           # runtime self-test
+make smoke           # runtime self-test, and the context-switch model check
 make multi-await     # await/handover test
 make demo            # traced walkthrough, then 2000 connections
 make check-linux     # compile the Linux backend from anywhere, no codegen
@@ -46,8 +46,8 @@ code either:
 alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=linux --mode=all --level=3 -j0
 ```
 
-Current state: **Linux 962 checks proved, 0 unproved, 2 justified; Windows
-685 proved, 0 unproved, 1 justified.** Every justification is `unused global
+Current state: **Linux 1161 checks proved, 0 unproved, 2 justified; Windows
+974 proved, 0 unproved, 1 justified.** Every justification is `unused global
 "Ffi.Kernel"` on a portable spec whose two bodies do different amounts:
 `Ffi.Net.Initialize` and `Ffi.Sys.Bind_To_Cpu` on Linux, which do less than
 Windows, and `Ffi.Sys.Ignore_Broken_Pipe` on Windows, which does less than
@@ -57,6 +57,12 @@ it.
 **Delete `obj/gnatprove` before quoting a number.** The two configurations
 share it, and a run that inherits the other one's session reports a total
 several checks higher than a clean run does.
+
+**A clean `gnatprove` is not a clean build.** gnatprove's frontend accepts at
+least one construct the compiler rejects -- a library-level `pragma Assert`
+calling a spec-declared function, under SPARK RM 7.7(3) -- so a proof-only
+change still needs a real `gprbuild` before it is finished. See *The context
+switch is proved*.
 
 ---
 
@@ -73,9 +79,13 @@ src/runtime/        scheduler, fibers, futures, run queue, promises, text, trace
 src/net/            asynchronous sockets
 src/os/linux/       io_uring reactor, raw libc (Ffi.Posix), the mapped rings
 src/os/windows/     completion-port reactor, Win32/Winsock (Ffi.Win32)
-src/arch/x86_64-sysv/    context switch, SysV ABI
-src/arch/x86_64-win64/   context switch, Win64 ABI
+src/arch/x86_64-sysv/    context switch, SysV ABI, and its proved model
+src/arch/x86_64-win64/   context switch, Win64 ABI, and its proved model
 ```
+
+`Iour.Ffi.Fiber.Machine` is the second per-ABI unit, beside the switch it
+describes. See *The context switch is proved; the assembly is checked
+against the proof*.
 
 `Op_Spec` is platform-neutral by design: a kind, a descriptor, a buffer, a
 token. Adding an operation means adding an `Op_Kind` and handling it in **both**
@@ -276,8 +286,10 @@ one. Three differences, and the middle one is easy to miss:
   `rdi`.
 
 The context record is 272 bytes with an explicit rep clause and a
-`Compile_Time_Error` guarding it. `pragma Machine_Attribute (X, "naked")` works
-on x86-64 with this GCC.
+`Compile_Time_Error` guarding it. Its offsets are `Iour.Ffi.Fiber.Machine`'s
+named numbers, not literals, and so are the displacements in the emitted
+instructions; the `Asm` template is that package's `Switch_Template`.
+`pragma Machine_Attribute (X, "naked")` works on x86-64 with this GCC.
 
 Fiber stacks: `VirtualAlloc` + `PAGE_NOACCESS` guard page. **Not
 `PAGE_GUARD`** — that arms once and then becomes ordinary memory, letting the
@@ -294,7 +306,7 @@ second overrun through silently.
 the kernel" — the Linux `Ffi.Sys`, `Ffi.Net` and `Iour.Reactor` are all `On`
 and all talk to the kernel. `Off` is a claim that the *language* cannot
 express what a body does, and each one enlarges the trusted base that the
-other 961 checks rest on. A new body starts `On`. If it will not prove, the
+other 1160 checks rest on. A new body starts `On`. If it will not prove, the
 thing to change is the body, not the aspect.
 
 Before writing `Off` anywhere, establish that `On` is impossible, and do it by
@@ -323,13 +335,28 @@ with `SPARK_Mode => Off` on the individual subprograms that need it, and that
 is preferred whenever it leaves anything analysed. The four below are
 whole-body only because in each case every subprogram in the body fails.
 
+When even that is not available -- the whole body is genuinely outside the
+language -- the next move is not to give up but to **lift what the body
+*means* into a proved companion beside it**, and reduce the `Off` body to the
+part the language cannot express.  `Iour.Ffi.Fiber.Machine` is the worked
+example: the switch's assembly is still `Off` and always will be, but the
+locations it owns, their layout, the instruction sequence, the register-file
+exchange and the stack arithmetic are all `On` and proved, and what is left
+in the `Off` body is two `Asm` calls, two slot addresses and one write
+through a computed address.  That pattern is available to
+`Ffi.Memory`, `Ffi.Uring.Memory` and the Windows reactor too, and has not
+been tried on any of them.
+
 ### Why the Linux trusted base is exactly these four
 
 Rechecked by flipping each to `On` and recording what came back. Do not retry
 them expecting a different answer:
 
 * `Ffi.Fiber` (per ABI) — inline `Asm` in `naked` subprograms, which is not
-  analysable code at all.
+  analysable code at all.  This is the one whose *content* has largely
+  escaped anyway: `Iour.Ffi.Fiber.Machine` is `On` and proved, and what is
+  left in the `Off` body is the `Asm` calls, two slot addresses and one
+  write through a computed address.  See the section below.
 * `Ffi.Memory` — `E0002`, `'Address` outside an attribute definition clause,
   on three of its four subprograms.
 * `Ffi.Uring.Memory` — `E0002` again, and `E0001` effectively volatile object
@@ -370,8 +397,9 @@ alr exec -- gprbuild -P examples.gpr -XIOUR_OS=Windows_NT \
   --subdirs=wincheck -j0 -c -f -cargs -gnatc
 ```
 
-**Windows: 685 checks proved, 0 unproved, 1 justified.** Before this it was
-3, because everything Windows-specific was `Off` and nothing was analysed.
+**Windows: 685 checks proved, 0 unproved, 1 justified** at the time. Before
+this it was 3, because everything Windows-specific was `Off` and nothing was
+analysed. It is 974 now; the context switch's model is the difference.
 
 Four things were needed, and three of them were contract work rather than the
 annotation pass this section used to predict:
@@ -390,8 +418,8 @@ annotation pass this section used to predict:
    function read it. Nothing here is a FIFO, so `Iour.Ffi` declares
    `Effective_Reads => False` and `Accept_Ex`/`Connect_Ex` can be read back
    by `Volatile_Function`s. This is the one change that touches the shared
-   spec, and the Linux proof is unchanged by it: **962 checks, the same two
-   justifications, nothing unproved.**
+   spec, and the Linux proof was unchanged by it: **962 checks at the time,
+   the same two justifications, nothing unproved.**
 
 3. **The resolved entry points are part of `Kernel`,** not a state
    abstraction of their own. A separate `Abstract_State` is what this section
@@ -422,9 +450,311 @@ What would close the rest is a way to resolve an entry point without
 `Ffi.Win32`'s body is a trusted base of the same kind as the context switch,
 and its spec is what everything above is verified against.
 
+## The context switch is proved; the assembly is checked against the proof
+
+`Iour.Ffi.Fiber`'s body will always be `SPARK_Mode => Off` -- inline `Asm` in
+a `naked` subprogram is not analysable code. What used to follow from that,
+and no longer does, is that the switch itself was unverified. Everything the
+assembly is *supposed to be* is ordinary Ada and lives in
+`Iour.Ffi.Fiber.Machine`, one per ABI, beside the body it describes:
+
+```
+src/arch/x86_64-sysv/iour-ffi-fiber-machine.ads/.adb    8 locations, 19 insns
+src/arch/x86_64-win64/iour-ffi-fiber-machine.ads/.adb  25 locations, 59 insns
+```
+
+The Win64 template is 1332 characters. The SysV one is 19 lines.
+
+**The generated code did not change.** `objdump` of `iour-ffi-fiber.o` before
+and after is byte for byte identical, on both `Swap` and `Trampoline`. This
+was a change to what is *known* about the switch, not to the switch.
+
+**Measured anyway, paired against the commit before it** (Linux, WSL2, 32
+CPUs, Shard_Count 4; one constant Ada client built at `First_Shard_Cpu` 10
+driving the two servers alternately, rep by rep, order swapped each rep):
+
+| | before | after | paired |
+|---|---|---|---|
+| 2000 x 100, srv us/rt | 3.75 | 3.72 | -0.7% |
+| 2000 x 100, rt/s | 131.3k | 136.5k | new 4, base 1, tie 1 |
+| 2000 x 5 (spawn-dominated), srv us/rt | 11.00 | 11.00 | 0.0% |
+| 2000 x 5, rt/s | 8,395 | 8,361 | base 3, new 1, tie 2 |
+| 1 x 20000, unbounded server | 104.04 us/rt | 104.20 us/rt | base 3, new 3, tie 2 |
+
+Every run completed 2000 of 2000 sessions, so none of them is disqualified.
+**Read the `srv us/rt` column, not the throughput one**: within a single
+build the throughput at 2000 x 100 ranged over 23.7% (base, 115.8k to 143.3k)
+and 14.1% (new), so the +3.9% median gap is inside one build's own spread and
+is not a result. Single-connection latency on this machine is bimodal at
+~98 or ~104 us and both builds land in both modes across the eight reps,
+which is the same story told more obviously.
+
+The latency row is the second measurement, not the first. The first one
+leaked: `kill` on a `/usr/bin/time` wrapper does not kill its child, so every
+rep left an idle unbounded server pinned to the same four cores as the next
+rep's server under test, fourteen of them by the end. It happened to give
+almost exactly the same answer -- 98.09 against 98.02, a 3-2-3 split -- which
+is the point worth remembering: a contaminated paired comparison can look
+perfectly healthy, because the contamination lands on both arms. It was
+caught by `pgrep`, not by the numbers. See *Measurement traps*.
+
+The one genuinely new cost is `Emitted_Matches_Model`, and it was measured
+directly rather than inferred: **0.66 us per call**, once per shard in
+`Reserve_Contexts`, so about 2.6 us per process at `Shard_Count` 4. The
+2000 x 5 row exists because it is spawn-dominated -- 2000 `Prime` calls for
+10,000 round trips -- and it is where the extra arithmetic in `Prime` would
+show if it were going to.
+
+### The two papers, and which idea came from which
+
+**Rutter, *Using a high level language as a cross assembler* (SIGPLAN Notices
+16(2), 1981).** The instruction sequence is *data*, not characters. A save is
+`(Op_Store_Reg, L_R14)`, and both its displacement and its register name are
+derived from `L_R14` by `Offset_Of` and `Reg_Name`. So `movq %r14, 40(%rdi)`
+-- the register written at its neighbour's offset -- is not a thing anyone
+can type. That whole class of bug is gone by construction rather than by
+review.
+
+**Crary, *Toward a Foundational Typed Assembly Language* (POPL 2003)**, and
+closer still Morrisett, Crary and Glew's **stack-based TAL** (JFP 13(5),
+2003; TIC '98 before that). TAL states the callee-saved convention as a type
+the callee holds abstract and must hand back unchanged. A context switch is
+that obligation and nothing else, so it is stated as one predicate and
+proved:
+
+```ada
+   procedure Model_Switch (S : in out State)
+     with Ghost, Global => null, Always_Terminates,
+       Post =>
+         (for all L in Location =>
+            S.Out_Ctx (L) =
+              (if L = L_Rip then Resume_Address else S.Live'Old (L)))
+         and then (for all L in Restorable => S.Live (L) = S.In_Ctx'Old (L))
+         and then S.In_Ctx = S.In_Ctx'Old;
+```
+
+STAL types *both* halves of a switch and this model takes one. The other half
+is the stack type variable: a function polymorphic in the shape of the stack
+it was called on, obliged to restore that shape before jumping to its return
+address, which is exactly two fibers' stacks exchanged. Here `L_Rsp` is one
+more location that round-trips, so what is proved is that the stack
+*pointer* is exchanged intact, and nothing about what is on either stack.
+`Return_Slot_Offset` covers the one frame this runtime builds itself, the
+initial one; every frame after that is GCC's. Do not describe the switch as
+"proved" without that qualification -- the README states it at length and the
+sentence is load-bearing.
+
+### How coverage is guaranteed, and why not the obvious way
+
+`Location` is the ABI's callee-saved set as an enumeration **in ascending
+offset order**. `Restorable` is all of it except `L_Rip`, which is saved (as
+the resume label's address) and never restored, because the incoming
+context's copy is the jump that ends the sequence.
+
+The save phase is `for L in Location` and the restore phase
+`for L in reverse Restorable`, in *both* consumers. So coverage is by
+construction and **never a proof obligation** -- there is no "did we remember
+`xmm11`" to discharge. What is left to prove is non-interference, which is
+`Save_One`'s and `Load_One`'s postcondition, and which is where a duplicated
+offset dies.
+
+That the real assembly already had exactly this shape -- ascending saves,
+descending restores, on both ABIs -- is why the model is a description of the
+existing switch rather than a rewrite of it. Check that before changing the
+order of anything.
+
+Four designs were considered first and rejected. Do not re-derive them:
+
+* **A flat program array plus an interpreter, with the permutation property
+  proved.** The theorem then needs loop invariants quantified over the prefix
+  of an arbitrary well-formed program, or thirty unrollings. Looping over the
+  type instead makes coverage free and the invariants trivial.
+* **Build-time codegen** -- an Ada program that emits the template into a
+  checked-in source file, with `make` diffing it. Faithful to Rutter, and
+  strictly worse here: it adds a generated source and a build step to buy
+  what the start-up check already buys.
+* **`"i"` immediate `Asm` operands**, so `%0` in the template picks up
+  `Off_Rbp` as an Ada expression and the offsets exist only once. It removes
+  offset duplication and adds operand-index duplication, and it makes the
+  text check impossible because the template would then hold `%0`, not `16`.
+* **A `Compile_Time_Error` per offset**, comparing the named number and a
+  textual twin against the same literal, so editing one without the other
+  fires at compile time. It works -- GNAT folds the string comparison -- but
+  it is three copies of every offset to catch a subset of what one render
+  check catches totally.
+
+### What is proved and what is checked
+
+The distinction matters and is worth reading before changing anything here.
+
+**Proved by gnatprove**, statically -- 301 checks when the SysV model unit is
+proved on its own (`gnatprove -u iour-ffi-fiber-machine.adb`):
+
+* `Layout_Is_Disjoint`: the offsets do not overlap, each is naturally aligned
+  for its width, and each fits `Context_Bytes`. Over 25 locations in four
+  widths on Windows this is the check that would notice a vector slot laid on
+  top of the control words.
+* `Model_Switch`'s postcondition above.
+* `Return_Slot_Offset`: a fiber's first frame is 8 modulo 16 -- the alignment
+  a `call` leaves -- is above the guard page, and has the red zone (SysV, 128)
+  or shadow store (Win64, 32) above it inside the mapping.
+* `Round_Up_Pages` cannot overflow. The arithmetic it replaced could, for a
+  large enough request; nothing asked for one, so it was latent.
+* Nothing in the renderer can go out of bounds.
+
+**Checked at start-up**: that the text GCC actually assembled is the
+rendering of that instruction sequence. It has to be a run-time check because
+**GNAT requires an `Asm` template to be a static string**, so the template
+cannot be built by the loops that render it -- it is written out once, in the
+same package the proof is about, and `Emitted_Matches_Model` walks the
+sequence and compares character for character.
+`Iour.Fibers.Reserve_Contexts` asks before any shard starts, and a shard that
+gets `False` refuses to run; `Iour.Scheduler` already treats that as "this
+shard takes no part". It costs a few hundred character comparisons per shard,
+once. `make smoke` reports it separately and names the character where a
+divergence begins.
+
+Both failure classes were tested by introducing them into the SysV template:
+a displacement swapped between `r13` and `r14` is caught at character 153, a
+dropped `movq 40(%rsi), %r13` at 241.
+
+### The structure that ties the two together
+
+One `Snippet` per location, consumed twice:
+
+```
+Save_Snippet (L) / Load_Snippet (L) / Tail_Snippet
+        |                                   |
+        v                                   v
+   Apply  (semantics, Ghost, proved)   Emit (text, checked at start-up)
+```
+
+Both walk the same snippets in the same order, so a location the meaning
+covers is a location the text covers. That is the whole argument, and it is
+why `Instruction` and `Snippet` are **not** `Ghost` while `State`, `Frame`,
+`Apply` and `Model_Switch` are: the machine model costs nothing at run time,
+the instruction sequence has to exist because the checker reads it.
+
+`Op_Array` is fixed length -- no heap here either -- and `N` says how many of
+its entries are the snippet. `Pad_Op` fills the rest and is never read by
+either consumer. Two instructions is the maximum on SysV (`L_Rip`'s save
+needs the `leaq`); on Win64 the TEB fields also take two each way, because
+gs-relative to memory is not a move the machine has and they go through
+`rax`, which Win64 makes caller-saved. The tail is three.
+
+### Where it hooks into the rest of the runtime
+
+Two places outside `src/arch` know about the model, and both are small:
+
+* `Iour.Fibers` is portable and now `with`s `Iour.Ffi.Fiber.Machine`, which
+  is per-ABI. That is legal and safe because both arches provide the unit and
+  `Reserve_Contexts` only calls `Emitted_Matches_Model`, which is a
+  `Boolean` function with `Global => null` on both. It is the second
+  portable-to-arch dependency after `Iour.Ffi.Fiber` itself; keep any further
+  use to subprograms that exist identically on both sides, because `Location`
+  and everything indexed by it do not.
+* `tests/smoke.adb` runs `Check_Switch_Text` and `Check_Trampoline_Text`
+  before `Shards.Activate` and exits 1 on failure, naming the character. The
+  shards would refuse to start anyway; smoke exists to say *where*.
+
+### Traps found while building it
+
+* **A precondition on a SPARK unit called from an `Off` body is neither
+  proved nor checked.** Assertions are `Ignore` by default in this project,
+  so `Machine.Round_Up_Pages`'s precondition buys the `Off` caller nothing.
+  `Iour.Ffi.Fiber`'s body therefore enforces the bounds itself, in
+  `Usable_Size`: at least four pages, at most `Max_Stack` (2**27), page size
+  clamped into `Page_Bytes`. Any future call from an `Off` body into a proved
+  one needs the same treatment.
+* **The model works in offsets from the mapping base; the old code worked in
+  addresses.** `Return_Slot_Offset` does its own 16-alignment on the offset,
+  which is the same answer as aligning the address only if the base is itself
+  16-aligned. `mmap` and `VirtualAlloc` always return that, so `Prime` now
+  refuses -- `To_Integer (Base) mod 16 /= 0` -- rather than build a
+  misaligned frame if it ever stops being true.
+* **`Align_Down_16` models the mask rather than deriving 16-alignment from
+  the page size.** Deriving it needs divisibility transitivity (`X mod P = 0`
+  and `P mod 16 = 0` implies `X mod 16 = 0`), which provers do not reliably
+  do. Modelling `and $-16` directly keeps the whole thing in linear
+  arithmetic *and* keeps the model the same shape as the code.
+* **A null `String` may have `'Last = 'First - 1`.** `Text'Last <=
+  Max_Template` is not enough; SPARK produced a counterexample with
+  `Text'Last = -1`. Every such precondition is `Text'Last in 0 ..
+  Max_Template`.
+* **Newlines terminate instructions, they do not separate them**, so both
+  templates end with one. The separating version needed a `First : in out
+  Boolean` threaded through the renderer, and gnatprove's flow analysis then
+  warned that the last call sets it and nobody reads it.
+* The bounds guard at the top of `Emitted_Matches_Model` is provably dead --
+  the templates are static and GCC says so -- and is wrapped in
+  `pragma Warnings (Off, "range test optimized away")`. It stays because it
+  is what discharges `Check_Switch_Text`'s precondition.
+* `Reg_Name` and `Teb_Offset` on Windows have `when others =>` branches that
+  their preconditions exclude. They are there because a `case` on `Location`
+  must be complete, not because anything reaches them.
+
+### Static string expressions: more than the RM promises
+
+Established here by experiment, because GNAT is more generous than Ada is and
+the difference is what makes the whole arrangement possible:
+
+* **Concatenation of string literals, and of `constant String`s declared in
+  another unit, is static** and works as an `Asm` template. Verified by
+  compiling a two-unit test and reading `gcc -S`: the text comes out verbatim.
+  This is what lets the template live in the model package rather than beside
+  the `Asm` call.
+* **An array aggregate is never static.** `Nl` is `"" & ASCII.LF`, not
+  `[1 => ASCII.LF]`; the latter compiles fine everywhere except as part of an
+  `Asm` template, where it fails with "asm template argument is not static".
+* **GNAT folds static string comparison inside `pragma Compile_Time_Error`.**
+  Not used here -- the render check subsumes it -- but it is real, and it is
+  a way to tie a textual constant to a literal at compile time.
+
+### Changing it
+
+* Adding a register means adding a `Location` and an `Off_*`. Coverage
+  follows; the template does not, so the start-up check fails until it is
+  updated. That is the intended workflow, not a nuisance.
+* Offsets are named numbers in the model spec, and the context record's
+  representation clause in the parent body uses them. Do not write a literal
+  offset in either place. `Compile_Time_Error` on `Context'Size` against
+  `Machine.Context_Bytes` catches the record and the model disagreeing about
+  the total.
+* **`gnatprove` accepting a unit does not mean it compiles.** A library-level
+  `pragma Assert` calling a function declared in the same package's spec is
+  rejected by the *compiler* under SPARK RM 7.7(3), "early call region",
+  while gnatprove is happy with it. That is why the layout theorem is a ghost
+  procedure with a postcondition and an empty body rather than an assertion.
+  Always run a real `gprbuild` after a proof-only change.
+* Do not use `pragma Assert` at library level to state a fact about
+  constants, for the same reason. A `Ghost` procedure with `Post` and a null
+  body is the idiom.
+* **The Windows model can be exercised from Linux** -- it depends on nothing
+  Windows-specific, only on `Iour.Ffi.Fiber`'s spec. Copy `src/iour.ads`,
+  `src/ffi/iour-ffi.ads/.adb`, `src/ffi/iour-ffi-fiber.ads`, the win64
+  `iour-ffi-fiber-machine.ads/.adb`, and a stub body for `Iour.Ffi.Fiber`
+  into a scratch project with its own trivial `.gpr` -- do not use
+  `gnat.adc`, the stub has no tasking -- then call `Check_Switch_Text` on
+  `Switch_Template`. The stub needs `use type Interfaces.C.long` and explicit
+  `C_Int` conversions, and `Stack_Alloc` cannot be an expression function
+  because it is `Side_Effects`. That is how the 59-instruction Win64 template
+  was confirmed against its model without a Windows machine, and it is worth
+  redoing after any change to the Windows switch.
+
 ## Ada / GNAT / SPARK things hit in this codebase
 
 - A `Side_Effects` function **may not be an expression function**.
+- **A static string expression is more than the RM promises.** GNAT folds
+  concatenation of string literals and of `constant String`s declared in
+  another unit, which is what lets an `Asm` template live in a different
+  package from the `Asm` call. An **array aggregate is never static**, so a
+  one-character string for a template is `"" & ASCII.LF`, not
+  `[1 => ASCII.LF]`. GNAT also folds static string comparison inside
+  `pragma Compile_Time_Error`.
+- A library-level `pragma Assert` that calls a function declared in the same
+  package's spec is rejected under **SPARK RM 7.7(3), "early call region"** --
+  by the compiler, not by gnatprove, so it only appears in a real build.
+  State the fact as a ghost procedure with a postcondition and an empty body.
 - `Unsigned_32'Mod (X)` is valid; `Hresult'Mod (X)` is not — `'Mod` needs a
   modular *target*. Reinterpret to a signed type arithmetically.
 - A record's `'Size` is **not static**, so it cannot appear in a named-number
@@ -506,6 +836,17 @@ hangs the whole run.
   this machine `TIME_WAIT` drains in ~30 s (not the documented 120) and the
   dynamic range is 1024–65534. The harness's `drain` waits for it.
 - **Never rebuild binaries while a benchmark is running.**
+- **Killing a `/usr/bin/time` wrapper does not kill the process it is
+  timing.** A harness that starts `time server ...` in the background and
+  kills `$!` kills the wrapper; the server keeps running, keeps its port,
+  and keeps its shard pinning. Doing that once per rep against an unbounded
+  server accumulates one competitor per rep on exactly the cores under test.
+  Start the server directly and kill its own pid, take its CPU from
+  `/proc/<pid>/stat` before killing it, and have every rep refuse to start
+  while any `echo_server` is alive, with
+  `ps -eo args | grep -c "[b]in/echo_server"`.
+  The tell is not in the numbers, which stay plausible because both arms are
+  contaminated equally; check for strays directly.
 - Restarting a server needs the previous one gone *and* the new one's
   `listening on port` line seen. A fixed `sleep 1` is not enough and produces
   all-connections-failed runs that look like regressions.
@@ -780,6 +1121,15 @@ Ranked by expected payoff:
    what remains is `Ffi.Win32`'s body, which needs a way to resolve an entry
    point without `Unchecked_Conversion` to an access-to-subprogram and has
    none, and `Iour.Reactor`.
+5. **STAL's other half, if it is ever worth it.**
+   `Iour.Ffi.Fiber.Machine` proves the register file is exchanged and proves
+   the *initial* frame's placement; it says nothing about what is on a
+   suspended fiber's stack, because `L_Rsp` is modelled as one more location
+   that round-trips. Typing the stack the way stack-based TAL does would
+   need frame layouts the compiler owns and this runtime never sees, so it
+   is not a small change and may not be a possible one against GCC-generated
+   frames. Listed so that "the context switch is proved" is not read as more
+   than it is. See *The context switch is proved*.
 
 Not open, and deliberately: **registering buffers, or anything else that
 needs the IoRing back.** `REGISTER_BUFFERS` was the one registration Windows
@@ -806,7 +1156,11 @@ no access types and no dynamic allocation, and changes should keep it that way.
 **Everything that CAN be proven with `SPARK_Mode => On` SHOULD be set to
 `SPARK_Mode => On`** — see *SPARK_Mode is On unless it cannot be*, which is
 where the rule and the evidence for the current `Off` bodies live — four on
-Linux, plus `Ffi.Win32`'s body and the reactor on Windows. `SPARK_Mode => Off`
-is confined to the trusted base listed in the README's *SPARK status* table;
+Linux, plus `Ffi.Win32`'s body and the reactor on Windows. Where a body has
+to stay `Off`, the next move is to lift what it *means* into a proved
+companion beside it and reduce the `Off` body to the part the language
+genuinely cannot express; `Iour.Ffi.Fiber.Machine` is the worked example.
+`SPARK_Mode => Off` is confined to the trusted base listed in the README's
+*SPARK status* table;
 adding another needs a reason of the same kind, and needs `--mode=check_all`
 run to show that `On` was not possible.
