@@ -17,7 +17,7 @@ with Iour.Ffi.Inet;
 with Iour.Ffi.Sys;
 with Iour.Ffi.Win32;
 
-package body Iour.Ffi.Net with SPARK_Mode => Off is
+package body Iour.Ffi.Net with SPARK_Mode => On is
 
    package Win renames Iour.Ffi.Win32;
    package Inet renames Iour.Ffi.Inet;
@@ -29,23 +29,24 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
    --  Winsock start-up
    ---------------------------------------------------------------------------
 
-   --  Atomic, and guarded on the result rather than on having started:
-   --  every shard calls this the moment its task activates.  WSAStartup is
-   --  reference counted and idempotent, so two shards racing simply start
-   --  Winsock twice, which is what the second WSACleanup we never make
-   --  would have balanced.
-   Started : Boolean := False with Atomic;
-
    procedure Initialize is
-      Data   : aliased Win.Wsa_Data;
-      Status : C_Int;
+      Data    : aliased Win.Wsa_Data;
+      Ignored : C_Int;
    begin
-      if Started then
-         return;
-      end if;
       --  Version 2.2, as every Winsock since 1996 supports.
-      Status := Win.Wsa_Startup (16#0202#, Data'Access);
-      Started := Status = 0;
+      --
+      --  Called once per shard as each opens its engine, and deliberately
+      --  not guarded by a "have we already" flag.  WSAStartup is
+      --  reference-counted and meant to be called by every component that
+      --  wants Winsock; this runtime never calls WSACleanup, so the count
+      --  is never read.  The flag that used to be here was shared mutable
+      --  state written by every shard, which is a race for the sake of
+      --  skipping three calls at start-up.
+      declare
+         Cell : constant access Win.Wsa_Data := Data'Access;
+      begin
+         Ignored := Win.Wsa_Startup (16#0202#, Cell);
+      end;
    end Initialize;
 
    ---------------------------------------------------------------------------
@@ -79,14 +80,17 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
    ---------------------------------------------------------------------------
 
    procedure Set_Flag (S : Win.Handle; Level, Name : C_Int) is
-      One     : aliased constant C_Int := 1;
-      Ignored : C_Int;
+      One : aliased constant C_Int := 1;
    begin
       --  A refused socket option is never fatal here: TCP_NODELAY and
       --  address reuse are optimisations, and the caller would rather have
-      --  a working socket than none.
-      Ignored := Win.C_Setsockopt
-        (S, Level, Name, One'Address, C_Int'Size / 8);
+      --  a working socket than none.  Win.Set_Option is the procedure form
+      --  precisely because there is no result to look at.
+      declare
+         Value : constant access constant C_Int := One'Access;
+      begin
+         Win.Set_Option (S, Level, Name, Value, C_Int'Size / 8);
+      end;
    end Set_Flag;
 
    ---------------------------------------------------------------------------
@@ -150,7 +154,6 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
       Where   : constant access constant Inet.Sockaddr_In := Addr'Access;
       Status  : C_Int;
       Failure : Io_Result;
-      Ignored : C_Int;
       --  Windows reads SOMAXCONN as "the largest backlog this provider
       --  will give", and silently clamps any explicit number to a system
       --  maximum that is 200 on client editions.  A server that asks for
@@ -176,14 +179,14 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
       Status := Win.C_Bind (S, Where, Inet.Sockaddr_In'Size / 8);
       if Status /= 0 then
          Failure := Ffi.Sys.Failure_Code;
-         Ignored := Win.C_Closesocket (S);
+         Win.Close_Quietly (S);
          return Failure;
       end if;
 
       Status := Win.C_Listen (S, Depth);
       if Status /= 0 then
          Failure := Ffi.Sys.Failure_Code;
-         Ignored := Win.C_Closesocket (S);
+         Win.Close_Quietly (S);
          return Failure;
       end if;
 
@@ -202,7 +205,12 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
       if Fd < 0 then
          return -E_Invalid;
       end if;
-      Status := Win.C_Getsockname (Win.Handle (Fd), Addr'Access, Len'Access);
+      declare
+         Where : constant access Inet.Sockaddr_In := Addr'Access;
+         Size  : constant access C_Int            := Len'Access;
+      begin
+         Status := Win.C_Getsockname (Win.Handle (Fd), Where, Size);
+      end;
       if Status /= 0 then
          return Ffi.Sys.Failure_Code;
       end if;
@@ -218,14 +226,18 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
       if Fd < 0 then
          return 0;
       end if;
-      return Adapt (Win.C_Closesocket (Win.Handle (Fd)));
+      declare
+         Status : C_Int;
+      begin
+         Status := Win.C_Closesocket (Win.Handle (Fd));
+         return Adapt (Status);
+      end;
    end Close;
 
    procedure Close_Quietly (Fd : Descriptor) is
-      Ignored : C_Int;
    begin
       if Fd >= 0 then
-         Ignored := Win.C_Closesocket (Win.Handle (Fd));
+         Win.Close_Quietly (Win.Handle (Fd));
       end if;
    end Close_Quietly;
 
@@ -252,6 +264,7 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
             when Shut_Write => Win.Sd_Send,
             when others     => Win.Sd_Both);
       Status  : C_Int;
+      Raw     : C_Int;
       Failure : Win.Dword;
       Ignored : Win.Bool;
    begin
@@ -264,7 +277,17 @@ package body Iour.Ffi.Net with SPARK_Mode => Off is
          return 0;
       end if;
 
-      Failure := Win.Dword (Win.Wsa_Get_Last_Error);
+      --  WSAGetLastError is typed as a signed int and every code it can
+      --  return here is positive -- the two named below are 10057 and
+      --  10022 -- so the conversion to Dword needs the guard that the
+      --  value already satisfies.  Without it the conversion is the one
+      --  unproved check in the whole Windows backend.
+      Raw := Win.Wsa_Get_Last_Error;
+      if Raw <= 0 then
+         return -E_Invalid;
+      end if;
+
+      Failure := Win.Dword (Raw);
       if Failure = Win.Wsaenotconn or else Failure = Win.Wsaeinval then
          --  A listening socket, or one that never connected.  Cancel what
          --  is outstanding on it instead; the pending AcceptEx then

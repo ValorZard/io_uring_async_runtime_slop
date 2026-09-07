@@ -18,13 +18,31 @@
 --  cannot see what.  Synchronous because the kernel serialises its own
 --  state: two shards making system calls at once do not race in any sense
 --  SPARK's data-race check is about.
+--
+--  The external properties are spelled out rather than defaulted, and the
+--  one that matters is Effective_Reads => False.  Defaulted, External means
+--  all four, and Effective_Reads => True says that reading the state is
+--  itself an act that changes it -- true of a hardware FIFO, and the
+--  reason SPARK forbids a function from reading such a state at all.
+--  Nothing here is a FIFO.  Kernel is a marker meaning "the operating
+--  system did something", so asking it a question twice gives the same
+--  answer, and saying so is what lets a query like Win32.Accept_Ex -- a
+--  Winsock extension pointer resolved once at run time, machine state the
+--  runtime owns in the same sense as Ffi.Fiber's slot table -- be a
+--  function instead of a procedure with an out parameter.
 ------------------------------------------------------------------------------
 
 with Interfaces.C;
 
 package Iour.Ffi with
   SPARK_Mode     => On,
-  Abstract_State => (Kernel with External, Synchronous)
+  Abstract_State =>
+    (Kernel with
+       Synchronous,
+       External => (Async_Readers    => True,
+                    Async_Writers    => True,
+                    Effective_Reads  => False,
+                    Effective_Writes => True))
 is
    --  A spec with only subtypes would not normally get a body; the body is
    --  needed to carry Kernel's (empty) refinement.

@@ -379,16 +379,19 @@ trusted base by design:
 | `Iour.Ffi.Memory` | address-of for buffers handed to the kernel | taking addresses |
 | `Iour.Ffi.Uring.Memory` (Linux) | atomic ring-word access, SQE/CQE overlays, the timeout backing store | overlays at run-time addresses |
 | `Iour.Ffi.Identity` | one thread-local: which shard this thread is | per-thread state SPARK has no model for |
-| `Iour.Ffi.Win32`, `Iour.Ffi.Sys`, `Iour.Ffi.Net`, `Iour.Reactor` (Windows) | the whole Windows backend | overlays records on completion-port pointers, and is re-entered from thread-pool threads |
+| `Iour.Ffi.Win32` body (Windows) | the two lazily resolved Winsock extension pointers | `Unchecked_Conversion` to access-to-subprogram |
+| `Iour.Reactor` (Windows) | the completion-port engine | overlays records on completion-port pointers, and is re-entered from thread-pool threads |
 
-Only the Windows reactor has a reason of the same kind as the Linux four; the
-other three are a gap rather than a boundary, and removing the IoRing cut the
-work needed to close it down to two lazily-resolved entry points. `CLAUDE.md`
-has the detail.
+Every one of these has a reason of the same kind. `Ffi.Win32`'s *spec* is
+`On` — every import carries a `Global`, and the two entry points it resolves
+at run time are declared as part of `Ffi.Kernel` — so `Ffi.Sys` and `Ffi.Net`
+are `On` on Windows exactly as they are on Linux. What stays `Off` there is
+the body that does the resolving, because there is no way to turn an address
+from `GetProcAddress` into a callable subprogram without
+`Unchecked_Conversion`, and the reactor. `CLAUDE.md` has the detail.
 
-The Linux backend is written in SPARK throughout, and `make prove` is run
-there. The Windows reactor is a trusted body in the same sense the context
-switch is: its spec is in SPARK with full contracts, and every client above it
+Both backends are written in SPARK, and `make prove` runs against either. The
+Windows reactor is a trusted body in the same sense the context switch is: its spec is in SPARK with full contracts, and every client above it
 — the scheduler, the fibers, the sockets — is verified against that spec
 rather than through the body.
 
@@ -413,20 +416,41 @@ Flow Dependencies             23         23          .           .          .
 Initialization               340        340          .           .          .
 Run-time Checks              306          .        306           .          .
 Assertions                    29          .         29           .          .
-Functional Contracts          82          .         82           .          .
+Functional Contracts          83          .         83           .          .
 Termination                   70         66          4           .          .
+```
+
+The same command with `-XIOUR_OS=Windows_NT` proves the other backend, from
+either system — it generates no code. Delete `obj/gnatprove` first: the two
+configurations share it, and a run that inherits the other one's session
+reports a check count several higher than a clean run does.
+
+```
+Success: all checks proved (685 checks).
+
+SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
+Data Dependencies             56         55          .           1          .
+Flow Dependencies              9          9          .           .          .
+Initialization               224        224          .           .          .
+Run-time Checks              282          .        282           .          .
+Assertions                    26          .         26           .          .
+Functional Contracts          46          .         46           .          .
+Termination                   42         39          3           .          .
 ```
 
 Zero unproved, zero warnings, zero data races, zero C.
 
-The two justified checks are the same one twice, and it is a consequence of
-having two backends behind one spec. `Ffi.Net.Initialize` and
-`Ffi.Sys.Bind_To_Cpu` both declare `In_Out => Ffi.Kernel`, because that is
-the union of what the two bodies do: the Windows ones call `WSAStartup` and
-`SetThreadAffinityMask`, the Linux ones have nothing to prepare and only
-confirm what the `CPU` aspect already arranged. Narrowing the contract to fit
-the body that does less would make it wrong for the one that does more, so
-the justification says so at each site.
+Every justified check is the same one, and it is a consequence of having two
+backends behind one spec. `Ffi.Net.Initialize` and `Ffi.Sys.Bind_To_Cpu` both
+declare `In_Out => Ffi.Kernel`, because that is the union of what the two
+bodies do: the Windows ones call `WSAStartup` and `SetThreadAffinityMask`, the
+Linux ones have nothing to prepare and only confirm what the `CPU` aspect
+already arranged. `Ffi.Sys.Ignore_Broken_Pipe` is the same trade running the
+other way — the Linux body installs `SIG_IGN` for `SIGPIPE` and the Windows
+one has no such signal to ignore — which is why the Linux proof carries two
+justifications and the Windows proof one. Narrowing a contract to fit the body
+that does less would make it wrong for the one that does more, so the
+justification says so at each site.
 
 ### What the contracts say, and what they cannot
 
@@ -616,7 +640,8 @@ src/os/linux/
   iour-reactor.adb           the io_uring submission/completion protocol
   iour-ffi-sys.adb, iour-ffi-net.adb
 src/os/windows/
-  iour-ffi-win32.ads/.adb    Kernel32, Winsock, the thread pool
+  iour-ffi-win32.ads/.adb    Kernel32, Winsock, the thread pool:
+                             SPARK spec, Off body
   iour-reactor.adb           one completion port per shard
   iour-ffi-sys.adb, iour-ffi-net.adb
 src/arch/x86_64-sysv/

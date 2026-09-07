@@ -31,7 +31,7 @@ with System;
 with Interfaces; use Interfaces;
 with Iour.Ffi.Inet;
 
-package Iour.Ffi.Win32 with SPARK_Mode => Off is
+package Iour.Ffi.Win32 with SPARK_Mode => On is
 
    ---------------------------------------------------------------------------
    --  Base types
@@ -76,32 +76,38 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
    Wsaetimedout    : constant := 10060;
 
    function Get_Last_Error return Dword
-     with Import, Convention => Stdcall, External_Name => "GetLastError";
+     with Import, Convention => Stdcall, External_Name => "GetLastError",
+          Global => null;
 
    function Wsa_Get_Last_Error return C_Int
-     with Import, Convention => Stdcall, External_Name => "WSAGetLastError";
+     with Import, Convention => Stdcall, External_Name => "WSAGetLastError",
+          Global => null;
 
    --  A Windows or Winsock code as one of the errno-shaped numbers the rest
    --  of the runtime reasons about.  The handful that have a name in Iour
    --  are translated; anything else is passed through as it stands, which
    --  is unambiguous because Windows codes and errno values do not overlap
    --  in the ranges either side actually uses.
-   function As_Errno (Code : Dword) return Natural;
+   function As_Errno (Code : Dword) return Natural
+     with Global => null;
 
    --  The same, already negated, as a failed Io_Result.
    function As_Failure (Code : Dword) return Io_Result
-     with Post => As_Failure'Result < 0
+     with Global => null,
+          Post => As_Failure'Result < 0
                   and then As_Failure'Result > Io_Result'First;
 
    --  An NTSTATUS-shaped HRESULT as a failed Io_Result.
    function Hresult_Failure (Code : Hresult) return Io_Result
-     with Post => Hresult_Failure'Result < 0
+     with Global => null,
+          Post => Hresult_Failure'Result < 0
                   and then Hresult_Failure'Result > Io_Result'First;
 
    --  The same for a raw NTSTATUS, which is what an OVERLAPPED carries in
    --  its Internal field once the operation the kernel was doing is over.
    function Status_Failure (Status : Unsigned_64) return Io_Result
-     with Post => Status_Failure'Result < 0
+     with Global => null,
+          Post => Status_Failure'Result < 0
                   and then Status_Failure'Result > Io_Result'First;
 
    ---------------------------------------------------------------------------
@@ -110,36 +116,43 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
 
    procedure Exit_Process (Status : C_Uint32)
      with Import, Convention => Stdcall, External_Name => "ExitProcess",
-          No_Return;
+          No_Return,
+          Global => null;
 
    function Get_Current_Processor_Number return Dword
      with Import, Convention => Stdcall,
-          External_Name => "GetCurrentProcessorNumber";
+          External_Name => "GetCurrentProcessorNumber",
+          Global => null;
 
    --  A pseudo-handle meaning "the calling thread", which is what every
    --  thread-affinity call wants and what GetCurrentThread returns.
    function Current_Thread return Handle
-     with Import, Convention => Stdcall, External_Name => "GetCurrentThread";
+     with Import, Convention => Stdcall, External_Name => "GetCurrentThread",
+          Global => null;
 
    --  Returns the previous mask, or zero on failure.
    function Set_Thread_Affinity_Mask
      (Thread : Handle; Mask : Unsigned_64) return Unsigned_64
      with Import, Convention => Stdcall,
-          External_Name => "SetThreadAffinityMask";
+          External_Name => "SetThreadAffinityMask",
+          Global => null;
 
    --  Give the rest of this time slice back, so a thread that has just
    --  been given a new affinity is moved before it looks again.
    procedure Switch_To_Thread
-     with Import, Convention => Stdcall, External_Name => "SwitchToThread";
+     with Import, Convention => Stdcall, External_Name => "SwitchToThread",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    Std_Output_Handle : constant := 16#FFFF_FFF5#;   --  (DWORD) -11
    Std_Error_Handle  : constant := 16#FFFF_FFF4#;   --  (DWORD) -12
 
    function Get_Std_Handle (Which : Dword) return Handle
-     with Import, Convention => Stdcall, External_Name => "GetStdHandle";
+     with Import, Convention => Stdcall, External_Name => "GetStdHandle",
+          Global => null;
 
    function Close_Handle (H : Handle) return Bool
-     with Import, Convention => Stdcall, External_Name => "CloseHandle";
+     with Import, Convention => Stdcall, External_Name => "CloseHandle",
+          Global => null;
 
    --  Cancel outstanding overlapped I/O on a handle.  With Overlap null it
    --  cancels every request on that handle whichever thread issued it,
@@ -148,7 +161,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
    --  from the environment task.
    function Cancel_Io
      (H : Handle; Overlap : System.Address) return Bool
-     with Import, Convention => Stdcall, External_Name => "CancelIoEx";
+     with Import, Convention => Stdcall, External_Name => "CancelIoEx",
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
 
    function Write_File
      (H         : Handle;
@@ -156,7 +170,24 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       To_Write  : Dword;
       Written   : access Dword;
       Overlap   : System.Address) return Bool
-     with Import, Convention => Stdcall, External_Name => "WriteFile";
+     with Import, Convention => Stdcall, External_Name => "WriteFile",
+          Global => null;
+
+   --  WriteFile again, with the buffer as an array rather than an address.
+   --  For C convention GNAT passes an array as a pointer to its first
+   --  element, so nothing here takes an address -- which is what keeps
+   --  Iour.Ffi.Sys.Write_Blocking, its only caller, inside SPARK.  The
+   --  Linux side imports write(2) exactly this way and for exactly this
+   --  reason.  A procedure, because a short or failed write of a trace
+   --  line is not something anyone acts on.
+   procedure Write_Blocking
+     (H         : Handle;
+      Buffer    : Byte_Array;
+      To_Write  : Dword;
+      Written   : access Dword;
+      Overlap   : System.Address)
+     with Import, Convention => Stdcall, External_Name => "WriteFile",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    Mem_Commit  : constant := 16#0000_1000#;
    Mem_Reserve : constant := 16#0000_2000#;
@@ -169,18 +200,21 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Size    : C_Size;
       Kind    : Dword;
       Protect : Dword) return System.Address
-     with Import, Convention => Stdcall, External_Name => "VirtualAlloc";
+     with Import, Convention => Stdcall, External_Name => "VirtualAlloc",
+          Global => null;
 
    function Virtual_Free
      (Address : System.Address; Size : C_Size; Kind : Dword) return Bool
-     with Import, Convention => Stdcall, External_Name => "VirtualFree";
+     with Import, Convention => Stdcall, External_Name => "VirtualFree",
+          Global => null;
 
    function Virtual_Protect
      (Address  : System.Address;
       Size     : C_Size;
       Protect  : Dword;
       Previous : access Dword) return Bool
-     with Import, Convention => Stdcall, External_Name => "VirtualProtect";
+     with Import, Convention => Stdcall, External_Name => "VirtualProtect",
+          Global => null;
 
    --  struct SYSTEM_INFO, of which only the page size is wanted.  The rest
    --  is mirrored so the record is the size the call expects to fill.
@@ -199,7 +233,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
      with Convention => C;
 
    procedure Get_System_Info (Info : access System_Info)
-     with Import, Convention => Stdcall, External_Name => "GetSystemInfo";
+     with Import, Convention => Stdcall, External_Name => "GetSystemInfo",
+          Global => null, Always_Terminates;
 
    ---------------------------------------------------------------------------
    --  The thread pool
@@ -230,7 +265,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Context     : System.Address;
       Environment : System.Address) return System.Address
      with Import, Convention => Stdcall,
-          External_Name => "CreateThreadpoolTimer";
+          External_Name => "CreateThreadpoolTimer",
+          Global => null;
 
    --  Due_Time is a FILETIME.  A negative value is a relative interval in
    --  hundred-nanosecond units, which is the only form this runtime uses.
@@ -240,16 +276,19 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Period      : Dword;
       Window      : Dword)
      with Import, Convention => Stdcall,
-          External_Name => "SetThreadpoolTimer";
+          External_Name => "SetThreadpoolTimer",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    procedure Close_Threadpool_Timer (Timer : System.Address)
      with Import, Convention => Stdcall,
-          External_Name => "CloseThreadpoolTimer";
+          External_Name => "CloseThreadpoolTimer",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    procedure Wait_For_Threadpool_Timer_Callbacks
      (Timer : System.Address; Cancel : Bool)
      with Import, Convention => Stdcall,
-          External_Name => "WaitForThreadpoolTimerCallbacks";
+          External_Name => "WaitForThreadpoolTimerCallbacks",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    --  TrySubmitThreadpoolCallback's callback:
    --    void (*)(PTP_CALLBACK_INSTANCE, PVOID)
@@ -262,7 +301,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Context     : System.Address;
       Environment : System.Address) return Bool
      with Import, Convention => Stdcall,
-          External_Name => "TrySubmitThreadpoolCallback";
+          External_Name => "TrySubmitThreadpoolCallback",
+          Global => null;
 
    ---------------------------------------------------------------------------
    --  Completion ports
@@ -306,7 +346,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Key      : Unsigned_64;
       Threads  : Dword) return Handle
      with Import, Convention => Stdcall,
-          External_Name => "CreateIoCompletionPort";
+          External_Name => "CreateIoCompletionPort",
+          Global => null;
 
    function Get_Completions
      (Port         : Handle;
@@ -316,7 +357,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Milliseconds : Dword;
       Alertable    : Bool) return Bool
      with Import, Convention => Stdcall,
-          External_Name => "GetQueuedCompletionStatusEx";
+          External_Name => "GetQueuedCompletionStatusEx",
+          Global => null;
 
    function Post_Completion
      (Port    : Handle;
@@ -324,7 +366,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Key     : Unsigned_64;
       Overlap : System.Address) return Bool
      with Import, Convention => Stdcall,
-          External_Name => "PostQueuedCompletionStatus";
+          External_Name => "PostQueuedCompletionStatus",
+          Global => null;
 
    ---------------------------------------------------------------------------
    --  Winsock
@@ -362,7 +405,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
 
    function Wsa_Startup
      (Version : Unsigned_16; Data : access Wsa_Data) return C_Int
-     with Import, Convention => Stdcall, External_Name => "WSAStartup";
+     with Import, Convention => Stdcall, External_Name => "WSAStartup",
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
 
    function Wsa_Socket
      (Family         : C_Int;
@@ -371,28 +415,33 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Protocol_Info  : System.Address;
       Group          : Unsigned_32;
       Flags          : Dword) return Handle
-     with Import, Convention => Stdcall, External_Name => "WSASocketW";
+     with Import, Convention => Stdcall, External_Name => "WSASocketW",
+          Global => null;
 
    function C_Bind
      (S    : Handle;
       Addr : access constant Inet.Sockaddr_In;
       Len  : C_Int) return C_Int
-     with Import, Convention => Stdcall, External_Name => "bind";
+     with Import, Convention => Stdcall, External_Name => "bind",
+          Global => null;
 
    function C_Listen (S : Handle; Backlog : C_Int) return C_Int
-     with Import, Convention => Stdcall, External_Name => "listen";
+     with Import, Convention => Stdcall, External_Name => "listen",
+          Global => null;
 
    function C_Connect
      (S    : Handle;
       Addr : access constant Inet.Sockaddr_In;
       Len  : C_Int) return C_Int
-     with Import, Convention => Stdcall, External_Name => "connect";
+     with Import, Convention => Stdcall, External_Name => "connect",
+          Global => null;
 
    function C_Getsockname
      (S    : Handle;
       Addr : access Inet.Sockaddr_In;
       Len  : access C_Int) return C_Int
-     with Import, Convention => Stdcall, External_Name => "getsockname";
+     with Import, Convention => Stdcall, External_Name => "getsockname",
+          Global => null;
 
    function C_Setsockopt
      (S     : Handle;
@@ -400,13 +449,36 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Name  : C_Int;
       Value : System.Address;
       Len   : C_Int) return C_Int
-     with Import, Convention => Stdcall, External_Name => "setsockopt";
+     with Import, Convention => Stdcall, External_Name => "setsockopt",
+          Global => null;
+
+   --  setsockopt again, with the option value as an access-to-constant
+   --  rather than an address, and imported as a procedure because a
+   --  refused TCP_NODELAY is never something a caller acts on.  The Linux
+   --  side has Set_Option in the same shape and for the same reason: it is
+   --  what lets Iour.Ffi.Net set a flag without taking an address.
+   procedure Set_Option
+     (S     : Handle;
+      Level : C_Int;
+      Name  : C_Int;
+      Value : access constant C_Int;
+      Len   : C_Int)
+     with Import, Convention => Stdcall, External_Name => "setsockopt",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    function C_Closesocket (S : Handle) return C_Int
-     with Import, Convention => Stdcall, External_Name => "closesocket";
+     with Import, Convention => Stdcall, External_Name => "closesocket",
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
+
+   --  The same call for the paths that want the effect and not the
+   --  result: an error unwind, or a ring being torn down.
+   procedure Close_Quietly (S : Handle)
+     with Import, Convention => Stdcall, External_Name => "closesocket",
+          Global => (In_Out => Kernel), Always_Terminates;
 
    function C_Shutdown (S : Handle; How : C_Int) return C_Int
-     with Import, Convention => Stdcall, External_Name => "shutdown";
+     with Import, Convention => Stdcall, External_Name => "shutdown",
+          Side_Effects, Global => (In_Out => Kernel), Always_Terminates;
 
    type Wsabuf is record
       Len : Unsigned_32    := 0;
@@ -422,7 +494,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Flags    : access Dword;
       Overlap  : System.Address;
       Routine  : System.Address) return C_Int
-     with Import, Convention => Stdcall, External_Name => "WSARecv";
+     with Import, Convention => Stdcall, External_Name => "WSARecv",
+          Global => null;
 
    function Wsa_Send
      (S       : Handle;
@@ -432,7 +505,8 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
       Flags   : Dword;
       Overlap : System.Address;
       Routine : System.Address) return C_Int
-     with Import, Convention => Stdcall, External_Name => "WSASend";
+     with Import, Convention => Stdcall, External_Name => "WSASend",
+          Global => null;
 
    ---------------------------------------------------------------------------
    --  AcceptEx and ConnectEx
@@ -472,9 +546,23 @@ package Iour.Ffi.Win32 with SPARK_Mode => Off is
 
    --  Fetch both from Winsock, using any socket of the right family.
    --  Idempotent; the pointers are process-wide.
-   procedure Load_Socket_Extensions (S : Handle);
+   --
+   --  The pointers themselves are lazily resolved process-wide state, and
+   --  they are modelled as part of Kernel for the same reason Ffi.Fiber's
+   --  slot table is: they are machine state the runtime owns, written once
+   --  by whichever shard gets here first and read by all of them.  Saying
+   --  so is what stops a caller being verified against a Load that claims
+   --  to change nothing and an Accept_Ex that claims to be a constant.
+   procedure Load_Socket_Extensions (S : Handle)
+     with Global => (In_Out => Kernel), Always_Terminates;
 
-   function Accept_Ex return Accept_Ex_Fn;
-   function Connect_Ex return Connect_Ex_Fn;
+   --  Volatile_Function, because the answer before Load_Socket_Extensions
+   --  runs is not the answer after it: a plain function reading Kernel
+   --  would let SPARK fold two calls into one.
+   function Accept_Ex return Accept_Ex_Fn
+     with Volatile_Function, Global => (Input => Kernel);
+
+   function Connect_Ex return Connect_Ex_Fn
+     with Volatile_Function, Global => (Input => Kernel);
 
 end Iour.Ffi.Win32;

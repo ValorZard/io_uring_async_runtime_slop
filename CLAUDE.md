@@ -46,10 +46,17 @@ code either:
 alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=linux --mode=all --level=3 -j0
 ```
 
-Current state: **962 checks proved, 0 unproved, 2 justified.** The two
-justifications are `unused global "Ffi.Kernel"` on `Ffi.Net.Initialize` and
-`Ffi.Sys.Bind_To_Cpu`, whose contracts are the union of what the two backends do
-and whose Linux bodies do less. Do not "fix" them by narrowing the contract.
+Current state: **Linux 962 checks proved, 0 unproved, 2 justified; Windows
+685 proved, 0 unproved, 1 justified.** Every justification is `unused global
+"Ffi.Kernel"` on a portable spec whose two bodies do different amounts:
+`Ffi.Net.Initialize` and `Ffi.Sys.Bind_To_Cpu` on Linux, which do less than
+Windows, and `Ffi.Sys.Ignore_Broken_Pipe` on Windows, which does less than
+Linux. The contract is the union in each case. Do not "fix" them by narrowing
+it.
+
+**Delete `obj/gnatprove` before quoting a number.** The two configurations
+share it, and a run that inherits the other one's session reports a total
+several checks higher than a clean run does.
 
 ---
 
@@ -347,41 +354,73 @@ not. `Current` is declared `Global => null` because it is a question about the
 Legality is necessary and not sufficient; the question is always whether the
 analysed program is the one that runs.
 
-### Windows is not at this standard, and this is the gap
+### Windows: what closed the gap, and what is left
 
-`Ffi.Win32` (spec **and** body), `Ffi.Sys`, `Ffi.Net` and `Iour.Reactor` are
-all `Off` on Windows, where the Linux `Ffi.Sys` and `Ffi.Net` are `On`. Only
-the reactor has a reason of the Linux kind. Both checks run against the
-Windows configuration from Linux — neither generates code:
+`Ffi.Win32`'s **spec**, `Ffi.Sys` and `Ffi.Net` are `On` on Windows, as they
+are on Linux. What is still `Off` there is `Ffi.Win32`'s **body** — the
+`Unchecked_Conversion` from `System.Address` to access-to-subprogram that
+`Load_Socket_Extensions` is made of — and `Iour.Reactor`, which has a reason
+of the Linux kind. Both checks run against the Windows configuration from
+Linux; neither generates code:
 
 ```
 alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=Windows_NT \
-  --mode=check_all -j0 -U
+  --mode=all --level=3 -j0
 alr exec -- gprbuild -P examples.gpr -XIOUR_OS=Windows_NT \
   --subdirs=wincheck -j0 -c -f -cargs -gnatc
 ```
 
-Measured that way: with the `Ffi.Win32` spec flipped to `On`, legality passes,
-`Ffi.Net` is four errors from `On` (three `'Access`-with-ownership, one
-`'Address`) and `Ffi.Sys` two, one of each. That is the tempting version of
-this change and it is the unsound one — it also raises `assumed-global-null`
-warnings, because not one of Win32's imports carries a `Global`.
+**Windows: 685 checks proved, 0 unproved, 1 justified.** Before this it was
+3, because everything Windows-specific was `Off` and nothing was analysed.
 
-Doing it properly is gated on a design change rather than an annotation pass:
-the lazily-resolved entry points are mutable package-level
-access-to-subprogram variables, and sound `On` needs them declared as an
-`Abstract_State`, the loader declared to write it, every accessor to read it,
-and a truthful `Global` on each import.
+Four things were needed, and three of them were contract work rather than the
+annotation pass this section used to predict:
 
-**Removing the IoRing shrank that job by most of its size, and nobody has
-gone back to it.** It used to be nine such variables and five flags beside
-them — `AcceptEx`, `ConnectEx` and seven IoRing entry points, with
-`Ioring_Available` and the rest reading the flags back. It is now two
-variables (`Accept_Ex_Ptr`, `Connect_Ex_Ptr`), one flag
-(`Extensions_Missing`), and 34 imports rather than 38. That is a small enough
-surface to be worth attempting; the four packages stay `Off` together until
-someone does, because the spec is what everything above is verified against
-and a half-done version claims more than it proves.
+1. **A `Global` on every import.** Function imports get `Global => null`,
+   procedure imports `Global => (In_Out => Kernel), Always_Terminates` — the
+   convention `Ffi.Posix` already follows. Getting one wrong is not cosmetic:
+   `Get_System_Info` declared as writing `Kernel` made `Ffi.Sys.Page_Size` a
+   function with an output global, which is `E0005` and not allowed in SPARK
+   at all. `GetSystemInfo` is Windows' `getpagesize` and takes `Global =>
+   null` for the same reason Linux's does.
+
+2. **`Kernel`'s external properties, spelled out.** Defaulted, `External`
+   means all four, and `Effective_Reads => True` says reading the state is
+   itself an act that changes it — which is why SPARK refuses to let any
+   function read it. Nothing here is a FIFO, so `Iour.Ffi` declares
+   `Effective_Reads => False` and `Accept_Ex`/`Connect_Ex` can be read back
+   by `Volatile_Function`s. This is the one change that touches the shared
+   spec, and the Linux proof is unchanged by it: **962 checks, the same two
+   justifications, nothing unproved.**
+
+3. **The resolved entry points are part of `Kernel`,** not a state
+   abstraction of their own. A separate `Abstract_State` is what this section
+   used to prescribe and it does not work: `Ffi.Net`'s spec is portable and
+   cannot name a Windows-only abstraction, so `Tcp_Socket` could never list
+   it in a `Global`, and gnatprove says exactly that, twice. They belong to
+   `Kernel` on the same grounds `Ffi.Fiber`'s slot table does — machine state
+   the runtime owns.
+
+4. **Two idioms borrowed from the Linux bodies.** `'Access` on a local
+   aliased object is bound to a scoped `constant access` first, the way the
+   Linux body already wraps `getrlimit`. `'Address` is avoided by importing
+   the same entry point a second time with a typed profile — `WriteFile`
+   taking a `Byte_Array`, `setsockopt` taking `access constant C_Int` — which
+   is how `Ffi.Posix` already imports `write` and `close` twice each.
+
+Three things fell out of it. `closesocket`, `shutdown`, `WSAStartup` and
+`CancelIoEx` are now `Side_Effects` functions over `Kernel`, as their Linux
+counterparts are; a `Side_Effects` function may only appear as the right-hand
+side of an assignment, so `Adapt (Win.C_Closesocket (...))` had to become two
+statements. `Ffi.Sys.Failure_Code` and `Ffi.Net.Shutdown` both converted
+`WSAGetLastError` to `Dword` without excluding a negative, which is a real
+latent bug and was the last unproved check. And `Bind_To_Cpu` computed
+`Shift_Left (1, Cpu)` *before* checking `Cpu >= 64`.
+
+What would close the rest is a way to resolve an entry point without
+`Unchecked_Conversion` to an access-to-subprogram, and there is not one — so
+`Ffi.Win32`'s body is a trusted base of the same kind as the context switch,
+and its spec is what everything above is verified against.
 
 ## Ada / GNAT / SPARK things hit in this codebase
 
@@ -736,9 +775,11 @@ Ranked by expected payoff:
 3. **Run the harness on Linux.** Nothing has been measured there since the
    port, though it compiles and proves clean. The interesting comparison is
    now the same runtime over io_uring against itself over completion ports.
-4. **Finish the Windows SPARK story.** See *Windows is not at this standard*:
-   the removal cut the blocking work down to two access-to-subprogram
-   variables and one flag.
+4. **The last two Windows `Off` bodies.** See *Windows: what closed the gap,
+   and what is left*. `Ffi.Win32`'s spec, `Ffi.Sys` and `Ffi.Net` are `On`;
+   what remains is `Ffi.Win32`'s body, which needs a way to resolve an entry
+   point without `Unchecked_Conversion` to an access-to-subprogram and has
+   none, and `Iour.Reactor`.
 
 Not open, and deliberately: **registering buffers, or anything else that
 needs the IoRing back.** `REGISTER_BUFFERS` was the one registration Windows
@@ -764,7 +805,8 @@ stay within 79 columns. Handles are small integers into static tables; there are
 no access types and no dynamic allocation, and changes should keep it that way.
 **Everything that CAN be proven with `SPARK_Mode => On` SHOULD be set to
 `SPARK_Mode => On`** — see *SPARK_Mode is On unless it cannot be*, which is
-where the rule and the evidence for the current four `Off` bodies live.
-`SPARK_Mode => Off` is confined to the trusted base listed in the README's
-*SPARK status* table; adding a fifth one needs a reason of the same kind, and
-needs `--mode=check_all` run to show that `On` was not possible.
+where the rule and the evidence for the current `Off` bodies live — four on
+Linux, plus `Ffi.Win32`'s body and the reactor on Windows. `SPARK_Mode => Off`
+is confined to the trusted base listed in the README's *SPARK status* table;
+adding another needs a reason of the same kind, and needs `--mode=check_all`
+run to show that `On` was not possible.
