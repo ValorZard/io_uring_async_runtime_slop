@@ -989,6 +989,7 @@ got wrong anyway.
 | absence of lock-ordering deadlock | structural: no protected body calls anything outside itself, one priority throughout |
 | the context switch's register exchange | proved as a model, and the emitted text checked against it at start-up |
 | the `'Access` and the indirect call | trusted: `Iour.Fibers.Job`, `Iour.Fibers.Invoke` |
+| the lock-free handover in `Await_Direct` | a design argument, not a proof — see below |
 | a shard knows which shard it is | trusted: `Ffi.Identity`, thread-local, which SPARK cannot model |
 
 ### What is still outside
@@ -1000,6 +1001,23 @@ shard exactly like two on different ones. That is conservative — it reports
 races that shard confinement would rule out — which is the right way for a
 check to be wrong, and it is why `Next_Core` became `Atomic` rather than
 being justified by the confinement argument it used to carry.
+
+**The handover that takes the locks off the I/O path.** `Await_Direct` is
+how a fiber sleeps on an operation it has just submitted, and it involves no
+future at all: the scheduler that reaps the completion puts the fiber back
+on the ready queue with the result beside it, and `Resume` hands that result
+over through a per-shard atomic cell. Every protected object is off the
+path, which is most of why the I/O path is as cheap as it is.
+
+What makes it sound is an argument about ownership rather than about
+synchronization: only this shard reaps this shard's ring, and it does so
+only once the fiber has switched out — so the completion cannot arrive
+before the switch — and a fiber has at most one such operation outstanding,
+so the result in the cell cannot be anyone else's. Every step of that is
+true. None of it is checked. SPARK sees an atomic cell written and read by
+one thread, which is exactly what it is, and nothing that would notice if
+the ownership rule were broken. The loop in `Await_Direct` that re-sleeps on
+a resumption carrying no result is the defence in depth.
 
 **Progress.** SPARK establishes partial correctness and absence of run-time
 errors. Nothing rules out a fiber awaiting a future no one resolves, or

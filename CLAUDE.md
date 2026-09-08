@@ -1644,12 +1644,56 @@ to `Races.Never_Runs` is half of the pair of tasks the data-race rule needs
 while iterating; just do not read a clean single-unit run as saying
 anything about races. See *Race-checking fibers*.
 
+**Editing sources with a script can rewrite every line ending.** The tree is
+LF; Python's text mode writes `os.linesep`, which on Windows is CRLF, so a
+scripted edit turns a three-line change into a whole-file diff and hides
+what actually changed. Read and write in binary, or normalise afterwards
+(`open(p,'rb').read().replace(b'
+', b'
+')`) before looking at
+`git diff`.
+
 And one that is not a trap so much as a dead end worth recording: **the
 `.spark` files do not carry the globals.** They hold entity names with
 slocs, plus the flow and proof results, which is enough to see *which*
 subprograms were analysed and how they fared and not enough to build a
 linter over "what does each fiber body touch". That was the zero-runtime
 alternative to the race witness, and this is why it was not taken.
+
+## Running a SPARK concurrency experiment
+
+Most of what is written about SPARK's concurrency rules here was settled by
+a throwaway project rather than by reading, and the setup is worth keeping
+because every one of these questions is faster to answer than to argue
+about. Four files:
+
+```
+alire.toml     name/description/version/authors/maintainers/licenses,
+               plus [[depends-on]] gnatprove = "^16.1.0"
+gnat.adc       pragma SPARK_Mode (On);
+               pragma Profile (Jorvik);
+               pragma Partition_Elaboration_Policy (Sequential);
+<name>.gpr     Source_Dirs "src", Object_Dir "obj",
+               Builder.Global_Configuration_Pragmas "gnat.adc",
+               Compiler switches "-gnat2022"
+src/*.ad?      the question
+```
+
+`alr` refuses to run without the manifest -- `Could not detect an alire.toml
+manifest` -- which is the only reason the first file is there. The `gnat.adc`
+is not optional either: without the profile every tasking construct fails
+with `tasking in SPARK requires Ravenscar profile (SPARK RM 9(2))`, and
+without `-gnat2022` some of what this codebase does will not parse.
+
+Then `alr gnatprove -P <name>.gpr --mode=all --level=1 -j2` answers in
+seconds. The baseline worth building first, because everything else is a
+variation on it: two tasks, one unsynchronized library-level variable, one
+procedure that touches it, called from both. That reports `high: possible
+data race when accessing variable "..."`, and once you have seen it you can
+tell a rule that did not fire from a rule that fired and found nothing --
+which is the distinction most of these experiments turn on.
+
+---
 
 ## Two justification idioms, and where each one has to go
 
@@ -1941,8 +1985,19 @@ Four things, and the first is the one a consumer has to act on.
   verified. See *Why the Linux trusted base is exactly these four*.
 
 * **The trusted bodies.** Everything in the README's *SPARK status* table,
-  plus `Iour.Fibers.Invoke` and `Iour.Fibers.Job`'s private part. Each is
+  plus `Iour.Fibers.Invoke` and the whole of `Iour.Fibers.Job`. Each is
   verified against its spec rather than through it.
+
+* **`Await_Direct`'s handover.** The fastest path in the runtime -- a fiber
+  sleeping on its own submission, with the result handed over through a
+  per-shard atomic cell and no protected object anywhere -- rests on an
+  ownership argument rather than on synchronization: only this shard reaps
+  this shard's ring, it does so only after the fiber has switched out, and a
+  fiber has at most one such operation outstanding. All true, none checked.
+  SPARK sees an atomic cell written and read by one thread, which is what it
+  is, and would not notice the ownership rule being broken. If that path is
+  ever changed, the argument has to be re-made by hand; there is nothing to
+  re-run.
 
 * **`Switch`'s `Always_Terminates` is false in one case**, which its own
   comment admits. See *Open work*.
