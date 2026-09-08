@@ -1,4 +1,3 @@
-with Iour.Fibers.Race_Witness;
 ------------------------------------------------------------------------------
 --  Multi_Await_Workload -- does one fiber body get to hold many futures and
 --  await many times, and does the core really change hands at every one of
@@ -43,17 +42,6 @@ package Multi_Await_Workload with SPARK_Mode => On is
    procedure Weaver (Arg : Fiber_Argument);
    procedure Kid (Arg : Fiber_Argument);
    procedure Root (Arg : Fiber_Argument);
-
-   --  Every fiber body this program registers.  Never executed: it is
-   --  reached only through Races.Never_Runs, which the main subprogram
-   --  calls once and which is guarded by a flag nothing ever sets.
-   --
-   --  A body missing from here is a body checked for nothing, and nothing
-   --  will say so.  Keep it in step with the Iour.Fibers.Job instances.
-   procedure All_Fiber_Bodies;
-
-   package Races is new Iour.Fibers.Race_Witness (All_Fiber_Bodies);
-
 
    --  Start Root as a fiber; the Iour.Fibers.Job instance is in the body,
    --  which is where library-level instantiation is available.

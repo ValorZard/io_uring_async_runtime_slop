@@ -451,13 +451,4 @@ package body Echo_Server_App with SPARK_Mode => On is
       Stats.Read (Accepted, Completed, Rejected, Frames, Errors, Concurrent);
    end Snapshot;
 
-
-   --  The list the race witness in the spec is instantiated with; see
-   --  Iour.Fibers.Race_Witness.  Never executed.
-   procedure All_Fiber_Bodies is
-   begin
-      Serve (0);
-      Acceptor (0);
-   end All_Fiber_Bodies;
-
 end Echo_Server_App;

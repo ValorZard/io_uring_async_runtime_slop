@@ -131,12 +131,6 @@ begin
       end;
    end loop;
 
-   --  Does nothing at run time: one atomic read and a branch never taken.
-   --  It is here so the environment task is in the call graph of this
-   --  program's fiber bodies, which is what lets SPARK check them for data
-   --  races at all.  See the race witness in Smoke_Workload's body.
-   Smoke_Workload.Races.Never_Runs;
-
    Fibers.Release_All_Stacks;
 
    Ok := Finished = Smoke_Workload.Worker_Count and then Live = 0;

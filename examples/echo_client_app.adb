@@ -393,13 +393,4 @@ package body Echo_Client_App with SPARK_Mode => On is
         (Started, Succeeded, Failed, Frames, Mismatched, Concurrent);
    end Snapshot;
 
-
-   --  The list the race witness in the spec is instantiated with; see
-   --  Iour.Fibers.Race_Witness.  Never executed.
-   procedure All_Fiber_Bodies is
-   begin
-      Session (0);
-      Driver (0);
-   end All_Fiber_Bodies;
-
 end Echo_Client_App;

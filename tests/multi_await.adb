@@ -72,12 +72,6 @@ begin
    end if;
 
    Scheduler.Wait_For_Shutdown;
-   --  Does nothing at run time: one atomic read and a branch never taken.
-   --  It is here so the environment task is in the call graph of this
-   --  program's fiber bodies, which is what lets SPARK check them for data
-   --  races at all.  See the race witness in Multi_Await_Workload's body.
-   Multi_Await_Workload.Races.Never_Runs;
-
    Fibers.Release_All_Stacks;
 
    Multi_Await_Workload.Weave_Result

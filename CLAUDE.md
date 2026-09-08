@@ -78,12 +78,14 @@ Current state, all measured after deleting `obj/gnatprove`:
 **Linux x86_64 1217 checks proved, 2 justified; Linux AArch64 1252 proved,
 2 justified; Windows 1037 proved, 1 justified. Nothing unproved anywhere.**
 
-And, separately, the *consumers*: **`make prove-consumers` proves 1586
+And, separately, the *consumers*: **`make prove-consumers` proves 1715
 checks**, covering the echo server, the echo client, `smoke` and
 `multi_await` against the library, with their fiber bodies race-checked
-through the witnesses. See *Fiber bodies are numbers, not pointers* for why
-that target exists, and *Race-checking fibers* for what makes the fiber
-bodies visible to the data-race rule at all.
+through the witness every `Iour.Fibers.Job` instance carries. It was 1586
+while that witness was one per program rather than one per job. See *Fiber
+bodies are numbers, not pointers* for why that target exists, and
+*Race-checking fibers* for what makes the fiber bodies visible to the
+data-race rule at all.
 
 Every justification is `unused global
 "Ffi.Kernel"` on a portable spec whose two bodies do different amounts:
@@ -1637,12 +1639,14 @@ added, `multi_await_workload` produced a dozen ordinary obligations that
 had never been looked at. Any new main added to `tests/` or `examples/`
 inherits the same trap unless it goes in `for Main use` as well.
 
-**A single-unit run does no race analysis at all.** `gnatprove -u
-<app>.adb` cannot see the main subprogram, and the main subprogram's call
-to `Races.Never_Runs` is half of the pair of tasks the data-race rule needs
--- so the whole check silently does nothing. It is fast and it is tempting
-while iterating; just do not read a clean single-unit run as saying
-anything about races. See *Race-checking fibers*.
+**A single-unit run used to do no race analysis at all**, and no longer
+does nothing: the two witness tasks now come with the `Iour.Fibers.Job`
+instance, so a `gnatprove -u <workload>.adb` run has both halves of the
+pair inside the unit it is looking at. The trap as it stood -- the main
+subprogram's call to `Races.Never_Runs` being half the pair, and a
+single-unit run therefore silently checking nothing -- died with the
+consumer's witness. `-U` is still what `make prove-consumers` passes, for
+the unrelated reason above. See *Race-checking fibers*.
 
 **Editing sources with a script can rewrite every line ending.** The tree is
 LF; Python's text mode writes `os.linesep`, which on Windows is CRLF, so a
@@ -1739,91 +1743,171 @@ subprogram nobody calls, and nothing connects a fiber body to a shard task.
 (The indirect call through `Iour.Fibers.Invoke` is a second break, but it is
 downstream of the first and never gets reached.)
 
-`Iour.Fibers.Race_Witness` closes it. Its header carries the mechanism in
-full; a program supplies a list and one instantiation, and that is all.
-
-In the spec, so the main subprogram can reach the instance directly:
+`Iour.Fibers.Race_Witness` closes it, and **nothing instantiates it by
+hand**. `Iour.Fibers.Job` does, on the same actual, from its visible part:
 
 ```ada
-   procedure All_Fiber_Bodies;
-   package Races is new Iour.Fibers.Race_Witness (All_Fiber_Bodies);
+   --  in iour-fibers-job.ads, once, for every job there will ever be
+   package Witness is new Iour.Fibers.Race_Witness (Work);
 ```
 
-In the body, the list itself:
+So registering a fiber body is what puts it under the rule. A consumer
+writes what it always wrote --
 
 ```ada
-   procedure All_Fiber_Bodies is
+   procedure Serve (Arg : Fiber_Argument);
+   package Serve_Job is new Iour.Fibers.Job (Work => Serve);
+```
+
+-- and there is no list, no call from the main subprogram, and nothing to
+forget. Nothing runs: both witness tasks read an atomic flag nothing ever
+sets and take a branch never taken.
+
+**This is not what this section used to say.** The trade it used to
+describe was measured correctly and decided wrongly: the witness now costs
+a second parked thread per job kind, and buys the removal of every part of
+the mechanism that a consumer could get silently wrong.
+
+### Why it is in `Job`'s visible part and not in `Job`
+
+`Job` is where it belongs -- that is the only place in the runtime that
+reaches a fiber body directly, everywhere else holds it as a `Fiber_Body`
+access value and SPARK sees nothing through an access-to-subprogram. But it
+cannot be *in* `Job`, and the reason is a chain already documented here:
+
+`Job`'s private part is `SPARK_Mode => Off` for the one `'Access` the
+runtime contains, an **`Off` private part forces an `Off` body**, and a task
+body declared in an `Off` package body is analysed for nothing at all. A
+witness task written directly into `Job` would compile, park two threads,
+and report nothing -- the worst possible failure, because it looks exactly
+like a clean run.
+
+So the witness is a sibling generic with a body of its own, which is `On`,
+instantiated from `Job`'s **visible** part, which is also `On`. gnatprove
+analyses instances, so each job's instance is analysed against that job's
+actual, concretely.
+
+The thing to check if this is ever restructured: that the instantiation is
+above the `private` keyword in `iour-fibers-job.ads`. Below it, it inherits
+the `Off` and the whole mechanism goes quiet.
+
+### Two tasks per job, and the arrangement that came before
+
+The rule needs **two callers of the same body**. One task per job would
+catch state shared between *different* jobs and miss state one job shares
+with itself across shards -- which is the commoner case and exactly the
+`Next_Core` case, so it is not an acceptable weakening. Hence `Witness_A`
+and `Witness_B`, both calling `Work`.
+
+What came before got its second caller from the environment task: one
+witness per *program*, instantiated on a procedure the application wrote
+listing every fiber body, plus one call to `Races.Never_Runs` from `main`.
+That cost one thread per program rather than two per job kind. It was the
+right answer on thread count and the wrong one overall, because three of
+its failure modes were silent and every one of them was the consumer's to
+get wrong -- a body left off the list, a missing call from `main`, and a
+single-unit `gnatprove -u` run in which the main's unit was half the pair.
+None of the three exists now.
+
+**The elaboration trick still does not work**, and it is the thing that
+would have got this to one task per job. Making the instance's own
+elaboration the second caller is rejected outright: `high: cannot write
+"Shared_Counter" during elaboration of "Handler_Job" [E0008]`. The atomic
+guard does not help, because E0008 is a flow rule over the call graph
+rather than anything gnatprove folds.
+
+So the cost is **two parked threads per kind of fiber**: four for the echo
+server and for `smoke`, six for `multi_await`, against one per program
+before. Not per fiber -- a server with two thousand live connections still
+has four.
+
+### They never run, and neither reason is the obvious one
+
+Two independent things stop a witness task from ever calling a fiber body,
+and **the order of the statements in the task body is what buys the first**:
+
+```ada
+   task body Witness_A is
    begin
-      Serve (0);
-      Acceptor (0);
-   end All_Fiber_Bodies;
+      Never_Opens.Park;   --  an entry whose barrier is False.  Blocks here
+      Never_Runs;         --  for ever, so this is never reached
+      loop
+         Never_Opens.Park;
+      end loop;
+   end Witness_A;
 ```
 
-And in the main subprogram, once: `Echo_Server_App.Races.Never_Runs;`
+1. **The task blocks before the call.** `Never_Opens.Park`'s barrier is
+   `False` and nothing opens it, so the call does not return. This is the
+   same mechanism `Iour.Shards` already uses to park a surplus shard.
+2. **`Run` is `False`**, and nothing anywhere assigns it -- it is declared
+   in this body and nothing outside can name it.
 
-Nothing runs: `Never_Runs` reads an atomic flag nothing ever sets. The two
-tasks the rule needs are the generic's own witness task and the environment
-task, which is why the main subprogram has to make that one call.
+gnatprove folds neither, which is why the arrangement is free: it cannot
+fold an entry call, and `Async_Writers => True` says an outside agent might
+write `Run`. `Work` stays in the call graph either way, and the race check
+is unchanged -- verified by mutating `Next_Core` back to a plain variable
+with the wait first, which still reports the race naming both of that job's
+tasks.
 
-**The instantiation goes in the spec on purpose.** In the body it works
-just as well, but the main subprogram cannot then see `Races`, so the
-application needs a third declaration -- a wrapper whose only job is to
-call `Never_Runs` on the instance. Putting the instance where the caller
-can see it removes that, and leaves the application with the list, which is
-content, and one line, which is not.
+**Measured, not reasoned about.** An `Exit_Process (99)` at the top of
+`Never_Runs`, in a scratch build: with the call *before* the wait -- which
+is how this was first written -- `smoke` exits 99 every time, so those tasks
+really were reaching it. With the wait first, five runs of `smoke` and one
+of `multi_await` all exit 0. The old shape was safe, because `Run` was
+`False`; it was one mechanism deep rather than two, and it was executing
+code nobody wanted executed.
 
-The list has to live where the fiber bodies are visible, and they are
-usually private to the package body -- which is why `All_Fiber_Bodies` is
-declared in the spec and defined in the body rather than living somewhere
-tidier next to the main subprogram. Moving it out would mean making every
-fiber body public, which is a worse trade.
+### Ghost is not available, and neither is a bare task type
 
-### Why it is a generic in the runtime rather than a task in the runtime
+The threads cannot be compiled out. Both attempts were made and both are
+walls, so do not re-derive them:
 
-The obvious question is why the whole thing cannot live in the library, and
-the answer is the same wall as everywhere else here: **the runtime cannot
-name a consumer's fiber body.** It holds them as `Fiber_Body` access values
-and SPARK sees nothing through an access-to-subprogram, so a witness task
-declared in `Iour.Shards` or `Iour.Fibers` would have an empty call graph.
+* **`Ghost` cannot apply to a task.** GNAT rejects it twice at once:
+  `aspect "Ghost" cannot apply to a task type` and `ghost object
+  "Witness_A" cannot be synchronized`. Behind the message is a rule no
+  arrangement gets around -- ghost code may not write non-ghost state, and
+  reaching a fiber body that writes real state is the entire purpose. A
+  ghost witness would be a witness to nothing.
+* **A task type with no objects is silent**, and so is **a task type with
+  one object**. Both were run against a plain unsynchronized `Next_Core`
+  and reported nothing: gnatprove counts task *objects*, not potential
+  instances of a type. So there is no way to declare the shape without
+  paying for the threads.
 
-The one place in the runtime that reaches a fiber body *directly* is
-`Iour.Fibers.Job`'s `Trampoline`, which calls the generic formal. Putting
-the witness there was tried and is worse:
-
-* **Two tasks per instantiation, not one.** One task per job catches state
-  shared between *different* jobs and misses state one job shares across
-  shards -- which is exactly the `Next_Core` case. Measured both ways.
-* **The elaboration trick does not work.** Making the instance's own
-  elaboration the second caller would have got it to one task per job, and
-  SPARK rejects it: `high: cannot write "Shared_Counter" during elaboration
-  of "Handler_Job" [E0008]`.
-
-So a per-job witness costs two parked threads per job kind -- four for the
-echo server, six for `multi_await`. One generic per *program* costs one,
-and the enumeration is a reviewable list in one place. That is the trade,
-and it is why the actual is `All_Fiber_Bodies` rather than something the
-`Job` instantiation provides automatically.
-
-The price of that choice is that a witness can be forgotten. It is the
-worst property of this arrangement and there is no way around it.
+Two real task objects per job kind is the floor. What the ordering above
+buys is that they cost a thread each and nothing else -- no code of the
+program's ever runs on them.
 
 ### Mutation tests
 
 Redo these after any change to the witness or to how fiber bodies are
-registered. The first must fail; **the last three must all be silent**, and
-knowing which is which is the point.
+registered. Run them with `--mode=flow -j0 -U` on `examples.gpr`, which is
+seconds rather than the minutes `--mode=all` takes; the data-race rule is a
+flow rule and the flow phase reports it in full.
 
 | mutation | result |
 |---|---|
-| `Next_Core` back to a plain variable | `high: possible data race ... next_core` |
-| the main subprogram's call to `Everything_A_Fiber_Does` removed | **silent** -- one task, and the rule needs two |
-| a fiber body dropped from `All_Fiber_Bodies` | **silent** -- that body is checked for nothing |
-| `gnatprove -u <app>.adb` without the main's unit | **silent** -- the main's call is half the pair |
+| `Next_Core` back to a plain variable | `high: possible data race ... next_core`, naming `acceptor_job.witness.witness_a` and `..._b` |
+| delete `Witness_B` from the witness body | **silent** for `Next_Core` -- one task, and the rule needs two |
+| move `package Witness` below `private` in `iour-fibers-job.ads` | **silent** -- it inherits the `Off` |
+| delete the `Witness` instantiation from `Job` | **silent** -- nothing is in any task's call graph again |
+| move `Never_Runs` *before* `Never_Opens.Park` in a task body | race still reported -- but the task then really executes the call site, which an `Exit_Process` at the top of `Never_Runs` proves |
 
-That last one is why `make prove-consumers` passes `-U`. Proving one unit
-at a time does not check for races at all, and says nothing about it.
+The first was re-run when the witness moved into `Job`, and the message
+names both of that one job's own tasks -- which is the confirmation that
+the self-race case is covered, and that case is the one a single task per
+job would have missed.
 
-### Four things about the shape, each established by experiment
+Three mutations that used to be on this list are gone with the consumer's
+list: a body dropped from `All_Fiber_Bodies`, a missing `Races.Never_Runs`
+call, and `gnatprove -u <app>.adb` without the main's unit. The last is
+still worth knowing about -- `make prove-consumers` passes `-U` for the
+unrelated reason in *Running gnatprove without lying to yourself* -- but a
+single-unit run over a workload package now does race-check its fibers,
+because both witness tasks are inside that unit's own closure.
+
+### Four more things about the shape, each established by experiment
 
 * **The guard must be one gnatprove cannot fold.** A statically `False`
   guard is pruned -- `warning: this statement is never reached` -- and the
@@ -1835,7 +1919,8 @@ at a time does not check for races at all, and says nothing about it.
   reports nothing, even under `-U`. That is what settles the design: the
   witness is compiled into the program rather than being a proof-only
   artefact, which also keeps the proved program and the shipped program the
-  same program.
+  same program. Reaching it through `Job` makes this automatic, since a
+  program that spawns a fiber at all withs `Job`.
 
 * **It must run at `Runtime_Priority`.** At any other priority every
   protected object it reaches reports a possible ceiling violation instead
@@ -1843,12 +1928,15 @@ at a time does not check for races at all, and says nothing about it.
 
 * **It must park, not spin.** Jorvik forbids a task body from running off
   its end, so the obvious `loop null; end loop;` is a task burning a core
-  for the life of the process. The witness waits on a barrier that never
-  opens, exactly as `Iour.Shards` does for shards past `Shard_Count`.
+  for the life of the process. The witness tasks wait on a barrier that
+  never opens, exactly as `Iour.Shards` does for shards past `Shard_Count`
+  -- and they wait *first*, which is what makes the call unreachable at run
+  time as well as unexecuted. See *They never run* above.
 
 ### What it costs, and what it found
 
-One thread per program: it starts, makes no call, and parks for good.
+Two threads per kind of fiber: each starts, blocks on its first statement,
+and never runs again. No code of the program's runs on them.
 
 It also gets fiber bodies analysed *standalone* rather than only in their
 calling contexts, which surfaces obligations the caller had been
@@ -1967,16 +2055,18 @@ from two tasks. Every shared thing in the runtime is one of:
 
 Four things, and the first is the one a consumer has to act on.
 
-* **Fiber bodies are checked only if the program says so.** SPARK's rule is
-  about tasks, and the assembly trampoline means a fiber body is in no
-  task's call graph -- so by default state shared between fibers is checked
-  for nothing at all. A **race witness** closes that, and every program in
-  this repository now has one; see *Race-checking fibers* above. A consumer
-  that omits one gets no warning, only silence. What the witness still does
-  not model is the scheduling: SPARK cannot tell two fibers on one shard
-  (which cannot preempt each other) from two on different shards (which
-  race), so it treats both as racing. That is conservative, which is the
-  right way round.
+* **Fiber bodies reach the rule through a witness.** SPARK's rule is about
+  tasks, and the assembly trampoline means a fiber body is in no task's
+  call graph -- so by default state shared between fibers would be checked
+  for nothing at all. `Iour.Fibers.Job` instantiates a **race witness** on
+  every job, so registering a fiber body is what puts it under the rule and
+  a consumer neither opts in nor can forget to; see *Race-checking fibers*
+  above. What the witness still does not model is the scheduling: SPARK
+  cannot tell two fibers on one shard (which cannot preempt each other)
+  from two on different shards (which race), so it treats both as racing.
+  That is conservative, which is the right way round. A body that is never
+  registered as a job -- reached some other way -- is still checked for
+  nothing.
 
 * **`Ffi.Identity` is analysed as a different program.** SPARK ignores
   `pragma Thread_Local_Storage` and would model the one per-thread slot as
@@ -2716,9 +2806,10 @@ Ranked by expected payoff:
    entirely. That is now half wrong, and the half that changed is the
    useful half.
 
-   Races between fibers **are** checked, wherever a program instantiates
-   `Iour.Fibers.Race_Witness` -- see *Race-checking fibers*. It found three
-   real ones the day it was written.
+   Races between fibers **are** checked, for every body registered with
+   `Iour.Fibers.Job`, which instantiates the witness on it -- see
+   *Race-checking fibers*. It found three real ones the day it was
+   written.
 
    What is still not modelled is that fibers on one shard cannot preempt
    each other. SPARK treats two fibers on the same shard exactly like two
@@ -2738,14 +2829,17 @@ Ranked by expected payoff:
    increment per accepted connection here, and the argument it replaced was
    three sentences long and rested on a build-time configuration.
 
-   The remaining weakness is that the witness is a convention. Three ways
-   to get it wrong are silent -- a body left out of the list, a missing
-   call from the main subprogram, a single-unit `gnatprove -u` run -- and
-   the mutation table in *Race-checking fibers* exists because a witness
-   that has stopped working looks exactly like a clean run. Making any of
-   those three loud would be a real improvement and none is obvious: the
-   list cannot be generated, because the runtime holds fiber bodies as
-   access values and SPARK sees nothing through one.
+   The remaining weakness is smaller than it was. The three silent ways to
+   get the witness wrong were all consumer-side -- a body left out of the
+   list, a missing call from the main subprogram, a single-unit `gnatprove
+   -u` run -- and all three went when the witness moved into
+   `Iour.Fibers.Job`, which is the one place in the runtime that can name a
+   fiber body. What is left is that a body reached some way other than
+   through a `Job` instance is still witnessed by nothing, and that a
+   change to the generic could break the mechanism without breaking a
+   build. The mutation table in *Race-checking fibers* exists for the
+   second, because a witness that has stopped working looks exactly like a
+   clean run.
 
 8. **`Ffi.Identity` is analysed as a different program, and shard identity
    is what the shared-nothing argument rests on.** SPARK ignores
@@ -2793,9 +2887,10 @@ run to show that `On` was not possible.
 Two obligations belong to anything that adds a fiber body or a protected
 object, because neither is enforced by the language and both fail quietly:
 
-* **A new fiber body goes in its program's `All_Fiber_Bodies`.** One that
-  does not is checked for races against nothing at all, and nothing says
-  so. See *Race-checking fibers*.
+* **A new fiber body is race-checked because it is registered**, and for
+  no other reason. `Iour.Fibers.Job` attaches the witness; a body reached
+  some way other than through a `Job` instance is checked for races against
+  nothing at all, and nothing says so. See *Race-checking fibers*.
 * **A helper called from inside a protected body goes inside it.** "No
   protected body calls anything outside itself" is the premise the whole
   deadlock-freedom argument rests on, and the way it breaks is somebody

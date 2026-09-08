@@ -1,4 +1,3 @@
-with Iour.Fibers.Race_Witness;
 ------------------------------------------------------------------------------
 --  Smoke_Workload -- the fiber bodies and shared state for the smoke test.
 --
@@ -26,17 +25,6 @@ package Smoke_Workload with SPARK_Mode => On is
 
    --  Fans out the workers, waits for them, then stops the runtime.
    procedure Root (Arg : Fiber_Argument);
-
-   --  Every fiber body this program registers.  Never executed: it is
-   --  reached only through Races.Never_Runs, which the main subprogram
-   --  calls once and which is guarded by a flag nothing ever sets.
-   --
-   --  A body missing from here is a body checked for nothing, and nothing
-   --  will say so.  Keep it in step with the Iour.Fibers.Job instances.
-   procedure All_Fiber_Bodies;
-
-   package Races is new Iour.Fibers.Race_Witness (All_Fiber_Bodies);
-
 
    --  Start Root as a fiber.  The Iour.Fibers.Job instance it needs must
    --  be at library level, so it lives in this package's body.

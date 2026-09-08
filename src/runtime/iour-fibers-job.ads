@@ -37,7 +37,18 @@
 --  An instance must be at library level: it registers from its own
 --  elaboration, and a job that came and went with a stack frame would
 --  leave a dangling entry behind.
+--
+--  Registering also puts the body under SPARK's data-race rule, which it
+--  is otherwise outside of: a fiber is entered through the context
+--  switch's assembly, so nothing connects a fiber body to a task and the
+--  rule never looks.  Witness below is what connects it, and it is here
+--  rather than in the consumer so that there is no list to keep in step
+--  with these instantiations and nothing to forget.  See
+--  Iour.Fibers.Race_Witness, which explains the whole mechanism and why
+--  it cannot live in this package's own body.
 ------------------------------------------------------------------------------
+
+with Iour.Fibers.Race_Witness;
 
 generic
    --  The fiber body.  An ordinary procedure with whatever effects it
@@ -76,6 +87,16 @@ package Iour.Fibers.Job with SPARK_Mode => On is
    procedure Spawn_On
      (Shard : Active_Shard; Arg : Fiber_Argument; Started : out Boolean)
      with Global => (In_Out => Registry);
+
+   --  Puts Work into two tasks' call graphs, so that state it shares with
+   --  another fiber is seen by SPARK's data-race rule.  Nothing in it ever
+   --  runs; it costs two threads that park for good, per kind of fiber.
+   --
+   --  It is instantiated here, in the visible part, and not in the body:
+   --  the private part below is SPARK_Mode => Off, an Off private part
+   --  forces an Off body, and a task body in an Off body is analysed for
+   --  nothing.
+   package Witness is new Iour.Fibers.Race_Witness (Work);
 
 private
    pragma SPARK_Mode (Off);

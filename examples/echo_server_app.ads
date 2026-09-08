@@ -1,4 +1,3 @@
-with Iour.Fibers.Race_Witness;
 ------------------------------------------------------------------------------
 --  Echo_Server_App -- the server's fiber bodies.
 --
@@ -84,16 +83,6 @@ package Echo_Server_App with SPARK_Mode => On is
    --  each one on this core, or deal it round the cores when Configure was
    --  told to spread.  Several of these may share one listener.
    procedure Acceptor (Arg : Fiber_Argument);
-
-   --  Every fiber body this program registers.  Never executed: it is
-   --  reached only through Races.Never_Runs, which the main subprogram
-   --  calls once and which is guarded by a flag nothing ever sets.
-   --
-   --  A body missing from here is a body checked for nothing, and nothing
-   --  will say so.  Keep it in step with the Iour.Fibers.Job instances.
-   procedure All_Fiber_Bodies;
-
-   package Races is new Iour.Fibers.Race_Witness (All_Fiber_Bodies);
 
    --  Start an acceptor on a named shard.  As with the client, the
    --  Iour.Fibers.Job instance must be at library level and so lives in
