@@ -93,10 +93,14 @@ prove:
 # was illegal SPARK and nothing said so, because nothing asked.  See *Fiber
 # bodies are numbers, not pointers* in CLAUDE.md.
 #
+# -U, and not by accident: without it gnatprove analyses only the units
+# reachable from "for Main use", and multi_await.adb is not one of them --
+# so the target silently skipped a quarter of what it claims to cover.
+#
 # Keep it green.  A consumer-visible API that only the library's own proof
 # exercises will drift back out of SPARK without a single warning.
 prove-consumers:
-	alr gnatprove -P examples.gpr --mode=all --level=2 -j0
+	alr gnatprove -P examples.gpr --mode=all --level=2 -j0 -U
 
 # Compile the other system's backend without running it: catches anything
 # that would only break over there, and needs no cross toolchain because

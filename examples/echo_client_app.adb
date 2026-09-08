@@ -17,10 +17,53 @@ package body Echo_Client_App with SPARK_Mode => On is
    --  Written once by the environment task before the shards start, read by
    --  every session fiber afterwards.  Atomic components declare the
    --  sharing rather than leaving it to be inferred.
-   type Host_Text is array (1 .. Max_Host) of Character
-     with Atomic_Components;
+   --  A protected object, not an array with Atomic_Components.  That was
+   --  what this used to be, and it is not synchronized: SPARK counts an
+   --  Atomic *object* as synchronized and an array of atomic components as
+   --  an ordinary variable -- which Iour.Per_Shard's header says at length,
+   --  and which is why that package holds Max_Shards separate scalars
+   --  rather than one array.  The race witness at the bottom of this body
+   --  reported it as soon as it could see the session fibers.
+   --
+   --  Nothing here is on a hot path: written once at start-up, read once
+   --  per session when it connects.
+   type Host_Text is array (1 .. Max_Host) of Character;
 
-   Host_Chars  : Host_Text := [others => ' '];
+   protected Server_Host
+     with Priority => Runtime_Priority
+   is
+      procedure Put (Text : String; Count : Natural)
+        with Pre => Text'First = 1 and then Text'Length >= Max_Host
+                    and then Count <= Max_Host;
+      procedure Get (Text : out String; Last : out Natural)
+        with Pre  => Text'First = 1 and then Text'Length >= Max_Host,
+             Post => Last <= Max_Host;
+   private
+      Chars : Host_Text := [others => ' '];
+      Held  : Natural range 0 .. Max_Host := 0;
+   end Server_Host;
+
+   protected body Server_Host is
+
+      procedure Put (Text : String; Count : Natural) is
+      begin
+         Chars := [others => ' '];
+         for I in 1 .. Count loop
+            Chars (I) := Text (I);
+         end loop;
+         Held := Count;
+      end Put;
+
+      procedure Get (Text : out String; Last : out Natural) is
+      begin
+         Text := [others => ' '];
+         for I in 1 .. Held loop
+            Text (I) := Chars (I);
+         end loop;
+         Last := Held;
+      end Get;
+
+   end Server_Host;
 
    --  The same sharing, one scalar at a time -- and with the external
    --  properties spelled out rather than defaulted, because they say what
@@ -37,9 +80,6 @@ package body Echo_Client_App with SPARK_Mode => On is
    --  least one of Async_Readers and Async_Writers, so the shape is
    --  Async_Writers alone -- which is also how Iour.Trace declares its
    --  Enabled flag, for the same reasons.
-   Host_Length : Natural := 0
-     with Atomic, Async_Writers => True, Async_Readers => False,
-          Effective_Reads => False, Effective_Writes => False;
    Server_Port : Natural := 0
      with Atomic, Async_Writers => True, Async_Readers => False,
           Effective_Reads => False, Effective_Writes => False;
@@ -170,30 +210,30 @@ package body Echo_Client_App with SPARK_Mode => On is
       Length : constant Natural :=
         (if Host'Length > Max_Host then Max_Host else Host'Length);
    begin
-      for I in 1 .. Length loop
-         pragma Loop_Invariant (Length <= Host'Length);
-         Host_Chars (I) := Host (Host'First + (I - 1));
-      end loop;
-      Host_Length   := Length;
+      declare
+         Text : String (1 .. Max_Host) := [others => ' '];
+      begin
+         for I in 1 .. Length loop
+            pragma Loop_Invariant (Length <= Host'Length);
+            Text (I) := Host (Host'First + (I - 1));
+         end loop;
+         Server_Host.Put (Text, Length);
+      end;
       Server_Port   := Port;
       Round_Count   := Rounds;
       Stats.Set_Session_Count (Connections);
    end Configure;
 
-   --  A procedure rather than a function returning String, because SPARK
-   --  forbids a function from reading a volatile object at all (E0005)
-   --  and Host_Chars is one.  The caller supplies the buffer, which also
-   --  keeps the whole thing on the fiber's own stack.
+   --  A procedure rather than a function returning String: a protected
+   --  operation cannot be called from a SPARK function, and the caller
+   --  supplying the buffer also keeps the whole thing on the fiber's own
+   --  stack.
    procedure Host_String (Result : out String; Last : out Natural)
-     with Pre => Result'First = 1 and then Result'Length >= Max_Host
+     with Pre  => Result'First = 1 and then Result'Length >= Max_Host,
+          Post => Last <= Max_Host
    is
-      Length : constant Natural := Host_Length;
    begin
-      Result := [others => ' '];
-      Last   := (if Length > Max_Host then Max_Host else Length);
-      for I in 1 .. Last loop
-         Result (I) := Host_Chars (I);
-      end loop;
+      Server_Host.Get (Result, Last);
    end Host_String;
 
    ---------------------------------------------------------------------------
@@ -280,7 +320,11 @@ package body Echo_Client_App with SPARK_Mode => On is
             exit;
          end if;
 
-         Frames := Frames + 1;
+         --  Saturating; see Echo_Server_App's Serve for why the race
+         --  witness is what turned this into a visible obligation.
+         if Frames < Natural'Last then
+            Frames := Frames + 1;
+         end if;
       end loop;
 
       --  Say goodbye so the server closes its side tidily.
@@ -348,5 +392,14 @@ package body Echo_Client_App with SPARK_Mode => On is
       Stats.Read
         (Started, Succeeded, Failed, Frames, Mismatched, Concurrent);
    end Snapshot;
+
+
+   --  The list the race witness in the spec is instantiated with; see
+   --  Iour.Fibers.Race_Witness.  Never executed.
+   procedure All_Fiber_Bodies is
+   begin
+      Session (0);
+      Driver (0);
+   end All_Fiber_Bodies;
 
 end Echo_Client_App;

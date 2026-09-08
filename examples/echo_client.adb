@@ -210,6 +210,12 @@ begin
       end;
    end loop;
 
+   --  Does nothing at run time: one atomic read and a branch never taken.
+   --  It is here so the environment task is in the call graph of this
+   --  program's fiber bodies, which is what lets SPARK check them for data
+   --  races at all.  See the race witness in Echo_Client_App's body.
+   Echo_Client_App.Races.Never_Runs;
+
    Fibers.Release_All_Stacks;
 
    Ffi.Sys.Exit_Process

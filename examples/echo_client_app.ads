@@ -1,3 +1,4 @@
+with Iour.Fibers.Race_Witness;
 ------------------------------------------------------------------------------
 --  Echo_Client_App -- the client's fiber bodies.
 --
@@ -24,6 +25,17 @@ package Echo_Client_App with SPARK_Mode => On is
 
    --  Fiber body: fan out the sessions, wait for them, stop the runtime.
    procedure Driver (Arg : Fiber_Argument);
+
+   --  Every fiber body this program registers.  Never executed: it is
+   --  reached only through Races.Never_Runs, which the main subprogram
+   --  calls once and which is guarded by a flag nothing ever sets.
+   --
+   --  A body missing from here is a body checked for nothing, and nothing
+   --  will say so.  Keep it in step with the Iour.Fibers.Job instances.
+   procedure All_Fiber_Bodies;
+
+   package Races is new Iour.Fibers.Race_Witness (All_Fiber_Bodies);
+
 
    --  Start Driver as a fiber.  The instantiation of Iour.Fibers.Job that
    --  makes this possible has to be at library level, so it lives in this

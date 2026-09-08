@@ -13,13 +13,43 @@ package body Echo_Server_App with SPARK_Mode => On is
    package Acceptor_Job is new Iour.Fibers.Job (Work => Acceptor);
 
    --  Set once by the environment task before any shard runs, read by many
-   --  fibers afterwards.  Atomic so the sharing is declared, not assumed.
-   --  One listener per shard: they share a port through SO_REUSEPORT, and
-   --  all of them have to be shut down to stop the server.
-   type Listener_Table is array (Active_Shard) of Descriptor
-     with Atomic_Components;
+   --  fibers afterwards.  One listener per shard: they share a port through
+   --  SO_REUSEPORT, and all of them have to be shut down to stop the
+   --  server.
+   --
+   --  A protected object, not an array with Atomic_Components.  That was
+   --  what this used to be, and it is not synchronized: SPARK counts an
+   --  Atomic *object* as synchronized and an array of atomic components as
+   --  an ordinary variable, which Iour.Per_Shard's header says at length
+   --  and which is why that package holds Max_Shards separate scalars
+   --  rather than one array.  The race witness at the bottom of this body
+   --  reported it as soon as it could see the acceptors, and it was right.
+   --  Nothing here is on a hot path: written once per listener at start-up
+   --  and read once per listener at shutdown.
+   type Listener_Table is array (Active_Shard) of Descriptor;
 
-   Listeners : Listener_Table := [others => Invalid_Descriptor];
+   protected Listeners
+     with Priority => Runtime_Priority
+   is
+      procedure Put (Shard : Active_Shard; Listener : Descriptor);
+      procedure Get (Shard : Active_Shard; Listener : out Descriptor);
+   private
+      Table : Listener_Table := [others => Invalid_Descriptor];
+   end Listeners;
+
+   protected body Listeners is
+
+      procedure Put (Shard : Active_Shard; Listener : Descriptor) is
+      begin
+         Table (Shard) := Listener;
+      end Put;
+
+      procedure Get (Shard : Active_Shard; Listener : out Descriptor) is
+      begin
+         Listener := Table (Shard);
+      end Get;
+
+   end Listeners;
 
    --  Whether an acceptor deals its connections round the cores instead of
    --  keeping them.  Set before any shard runs, read by acceptors after.
@@ -36,16 +66,27 @@ package body Echo_Server_App with SPARK_Mode => On is
           Effective_Reads => False, Effective_Writes => False;
 
    --  Where the next dealt connection goes.  Shared by every acceptor
-   --  fiber, and a plain variable on purpose: it is read and written only
-   --  when Distribute is set, and Distribute is set only in the
-   --  one-listener configuration, where every acceptor fiber lives on the
-   --  same shard.  Fibers on one shard run one at a time and switch only
-   --  at an explicit suspension point, so this increment cannot be
-   --  interleaved with another's.  Giving each acceptor its own counter
-   --  instead would be no simpler and would deal badly: thirty-two
-   --  counters all starting at the first core would send thirty-two
-   --  connections there before any went to the second.
-   Next_Core : Active_Shard := Active_Shard'First;
+   --  fiber.
+   --
+   --  This used to be a plain variable, on the argument that it is touched
+   --  only when Distribute is set, that Distribute is set only in the
+   --  one-listener configuration, and that every acceptor fiber then lives
+   --  on the same shard -- where fibers run one at a time and switch only
+   --  at an explicit suspension point, so the increment cannot be
+   --  interleaved.  Every step of that is true, and the whole of it rests
+   --  on a configuration invariant that nothing checks and that SPARK
+   --  cannot express.  Atomic instead: it is one scalar, the increment
+   --  happens once per accepted connection and never on the data path, and
+   --  the argument goes away.  The race witness at the bottom of this body
+   --  is what reported it.
+   --
+   --  Giving each acceptor its own counter instead would be no simpler and
+   --  would deal badly: thirty-two counters all starting at the first core
+   --  would send thirty-two connections there before any went to the
+   --  second.
+   Next_Core : Active_Shard := Active_Shard'First
+     with Atomic, Async_Writers => True, Async_Readers => False,
+          Effective_Reads => False, Effective_Writes => False;
 
    protected Stats
      with Priority => Runtime_Priority
@@ -172,7 +213,7 @@ package body Echo_Server_App with SPARK_Mode => On is
       Target   : Natural;
       Spread   : Boolean := False) is
    begin
-      Listeners (Shard) := Listener;
+      Listeners.Put (Shard, Listener);
       Stats.Set_Goal (Target);
       Distribute := Spread;
    end Configure;
@@ -206,8 +247,9 @@ package body Echo_Server_App with SPARK_Mode => On is
          --  assignment and nowhere else, so it cannot be the operand of a
          --  comparison or an actual parameter.
          declare
-            Listener : constant Descriptor := Listeners (S);
+            Listener : Descriptor;
          begin
+            Listeners.Get (S, Listener);
             if Listener /= Invalid_Descriptor then
                Stop_One (Listener);
             end if;
@@ -265,7 +307,13 @@ package body Echo_Server_App with SPARK_Mode => On is
             exit;
          end if;
 
-         Frames := Frames + 1;
+         --  Saturating.  A connection is not bounded in how many frames
+         --  it may exchange, so this really can reach the top; the race
+         --  witness is what made it a visible obligation, by getting
+         --  Serve analysed on its own rather than only where it is called.
+         if Frames < Natural'Last then
+            Frames := Frames + 1;
+         end if;
       end loop;
 
       Net.Close (Conn, Status);
@@ -305,8 +353,12 @@ package body Echo_Server_App with SPARK_Mode => On is
    --  increment is statically outside the subtype, and the compiler
    --  rejects it even on the branch that never runs.
    procedure Advance_Core is
+      --  Read into a local before it is used: a volatile object may appear
+      --  only as the whole right-hand side of an assignment, SPARK RM
+      --  7.1.3(9), so it cannot be an operand of the arithmetic below.
+      Core : constant Active_Shard := Next_Core;
    begin
-      Next_Core := Active_Shard ((Integer (Next_Core) + 1) mod Shard_Count);
+      Next_Core := Active_Shard ((Integer (Core) + 1) mod Shard_Count);
    end Advance_Core;
 
    procedure Acceptor (Arg : Fiber_Argument) is
@@ -324,8 +376,9 @@ package body Echo_Server_App with SPARK_Mode => On is
       Dealing  : Boolean;
 
       --  The same, for the protected function that says when the target
-      --  has been met.
+      --  has been met, and for the shard the next connection is dealt to.
       Enough   : Boolean;
+      Target   : Active_Shard;
    begin
       if Arg not in Fiber_Argument (Net.Socket'First)
                  .. Fiber_Argument (Net.Socket'Last)
@@ -357,8 +410,9 @@ package body Echo_Server_App with SPARK_Mode => On is
                --  Spawn_On rather than Spawn: it names the core, and it
                --  needs no future, which matters for a fiber that nothing
                --  will ever await.
+               Target := Next_Core;
                Serve_Job.Spawn_On
-                 (Next_Core, Fiber_Argument (Incoming), Started);
+                 (Target, Fiber_Argument (Incoming), Started);
                Advance_Core;
             else
                --  Run the handler on this core.  The socket was accepted
@@ -396,5 +450,14 @@ package body Echo_Server_App with SPARK_Mode => On is
    begin
       Stats.Read (Accepted, Completed, Rejected, Frames, Errors, Concurrent);
    end Snapshot;
+
+
+   --  The list the race witness in the spec is instantiated with; see
+   --  Iour.Fibers.Race_Witness.  Never executed.
+   procedure All_Fiber_Bodies is
+   begin
+      Serve (0);
+      Acceptor (0);
+   end All_Fiber_Bodies;
 
 end Echo_Server_App;

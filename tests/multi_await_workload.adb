@@ -42,7 +42,8 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       procedure Take_Index (Who : out Natural);
       procedure Append (Who : Natural; Step : Natural; Shard : Shard_Ref);
       procedure Finished_Weaver (Count : out Natural);
-      procedure Read_Log (Out_Log : out Event_Log; Count : out Natural);
+      procedure Read_Log (Out_Log : out Event_Log; Count : out Natural)
+        with Post => Count <= Max_Events;
 
       procedure Set_Batch (Submitted, Resolved, Peak : Natural);
       procedure Get_Batch (Submitted, Resolved, Peak : out Natural);
@@ -56,7 +57,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
    private
       Next_Index  : Natural := 0;
       Log         : Event_Log;
-      Used        : Natural := 0;
+      Used        : Natural range 0 .. Max_Events := 0;
       Done_Weaver : Natural := 0;
 
       B_Submitted : Natural := 0;
@@ -69,6 +70,18 @@ package body Multi_Await_Workload with SPARK_Mode => On is
    end Book;
 
    protected body Book is
+
+      --  Saturating, so the arithmetic is total and therefore provable.
+      --  Declared inside the protected body rather than beside it because
+      --  no protected body in this program calls anything outside itself;
+      --  see *What SPARK proves about deadlock and data races* in
+      --  CLAUDE.md.
+      procedure Bump (Counter : in out Natural) is
+      begin
+         if Counter < Natural'Last then
+            Counter := Counter + 1;
+         end if;
+      end Bump;
 
       procedure Take_Index (Who : out Natural) is
       begin
@@ -88,7 +101,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
 
       procedure Finished_Weaver (Count : out Natural) is
       begin
-         Done_Weaver := Done_Weaver + 1;
+         Bump (Done_Weaver);
          Count := Done_Weaver;
       end Finished_Weaver;
 
@@ -114,7 +127,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
 
       procedure Kid_Ran is
       begin
-         Kids_Ran := Kids_Ran + 1;
+         Bump (Kids_Ran);
       end Kid_Ran;
 
       procedure Set_Joined (Count : Natural) is
@@ -204,7 +217,12 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       end loop;
 
       Book.Finished_Weaver (Done);
-      if Done = Weavers and then Arg >= 0 then
+      --  Arg carries the promise handle back through the trampoline, so
+      --  both ends of its range are checked here rather than assumed.
+      if Done = Weavers
+        and then Arg in Fiber_Argument (Future_Id'First)
+                     .. Fiber_Argument (Future_Id'Last)
+      then
          Iour.Promises.Fulfil (Future_Id (Arg), Io_Result (Done));
       end if;
    end Weaver;
@@ -235,15 +253,18 @@ package body Multi_Await_Workload with SPARK_Mode => On is
 
       --  Batch: Batch futures alive at once inside this one procedure.
       Handles   : array (1 .. Batch) of Future_Ref := [others => No_Future];
-      Submitted : Natural := 0;
-      Resolved  : Natural := 0;
+
+      --  Bounded by the arrays they count, so the increments below are
+      --  provable from the subtype rather than from a loop invariant.
+      Submitted : Natural range 0 .. Batch := 0;
+      Resolved  : Natural range 0 .. Batch := 0;
       Live      : Natural := 0;
       Peak      : Natural := 0;
       Queued    : Boolean;
 
       --  Join: Kids spawned futures, all held here at once.
       Kid_Handles : array (1 .. Kids) of Future_Ref := [others => No_Future];
-      Joined      : Natural := 0;
+      Joined      : Natural range 0 .. Kids := 0;
    begin
       pragma Unreferenced (Arg);
 
@@ -298,6 +319,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
             Handles (I) := No_Future;
             exit;
          end if;
+         exit when Submitted = Batch;
          Submitted := Submitted + 1;
       end loop;
 
@@ -307,7 +329,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       for I in Handles'Range loop
          if Handles (I) /= No_Future then
             Fibers.Await (Future_Id (Handles (I)), Value);
-            if Value >= 0 then
+            if Value >= 0 and then Resolved < Batch then
                Resolved := Resolved + 1;
             end if;
          end if;
@@ -324,7 +346,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       end loop;
 
       for I in Kid_Handles'Range loop
-         if Kid_Handles (I) /= No_Future then
+         if Kid_Handles (I) /= No_Future and then Joined < Kids then
             Fibers.Await (Future_Id (Kid_Handles (I)), Value);
             Joined := Joined + 1;
          end if;
@@ -351,7 +373,10 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       First : Shard_Ref;
 
       --  Step each weaver has reached, walking the log in order.
-      Reached : array (Weaver_Index) of Natural := [others => 0];
+      --  Bounded by Steps, which is what makes "Reached (W) + 1" provable
+      --  from the subtype rather than from a fact about the log.
+      Reached : array (Weaver_Index) of Natural range 0 .. Steps :=
+        [others => 0];
    begin
       Book.Read_Log (Log, Count);
       Recorded := Count;
@@ -389,7 +414,8 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       --  any weaver ran its whole line before another began.
       for I in 1 .. Count loop
          if Log (I).Who in Weaver_Index then
-            Reached (Log (I).Who) := Log (I).Step;
+            Reached (Log (I).Who) :=
+              (if Log (I).Step > Steps then Steps else Log (I).Step);
             for W in Weaver_Index loop
                if Reached (W) + 1 < Log (I).Step then
                   Interleaved := False;
@@ -402,14 +428,19 @@ package body Multi_Await_Workload with SPARK_Mode => On is
    procedure Weave_Trace (Text : out String; Last : out Natural) is
       Log    : Event_Log;
       Count  : Natural;
-      Cursor : Natural := Text'First;
+
+      --  Bounded by the buffer's last index plus one, which is the "buffer
+      --  full" position; Text'First = 1 is the precondition that makes the
+      --  bound expressible.  Same shape as Smoke_Workload.Result.
+      Cursor : Natural range 1 .. Text'Last + 1 := 1;
       Names  : constant String := "ABCDEFGH";
    begin
       Text := [others => ' '];
-      Last := Text'First - 1;
+      Last := 0;
       Book.Read_Log (Log, Count);
 
       for I in 1 .. Count loop
+         pragma Loop_Invariant (Last <= Text'Last);
          declare
             Who   : constant Natural := Log (I).Who;
             Tag   : constant Character :=
@@ -418,7 +449,9 @@ package body Multi_Await_Workload with SPARK_Mode => On is
             Piece : constant String :=
               Tag & Digit (Digit'First + 1 .. Digit'Last) & " ";
          begin
-            exit when Cursor + Piece'Length - 1 > Text'Last;
+            --  A subtraction, so nothing is added before it has been
+            --  shown to fit.
+            exit when Piece'Length > Text'Last - Cursor + 1;
             Text (Cursor .. Cursor + Piece'Length - 1) := Piece;
             Cursor := Cursor + Piece'Length;
             Last := Cursor - 1;
@@ -448,5 +481,15 @@ package body Multi_Await_Workload with SPARK_Mode => On is
    begin
       Root_Job.Spawn (0, Handle);
    end Start_Root;
+
+
+   --  The list the race witness in the spec is instantiated with; see
+   --  Iour.Fibers.Race_Witness.  Never executed.
+   procedure All_Fiber_Bodies is
+   begin
+      Weaver (0);
+      Kid (0);
+      Root (0);
+   end All_Fiber_Bodies;
 
 end Multi_Await_Workload;

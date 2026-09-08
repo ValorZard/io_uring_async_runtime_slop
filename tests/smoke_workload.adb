@@ -225,4 +225,13 @@ package body Smoke_Workload with SPARK_Mode => On is
       Root_Job.Spawn (0, Handle);
    end Start_Root;
 
+
+   --  The list the race witness in the spec is instantiated with; see
+   --  Iour.Fibers.Race_Witness.  Never executed.
+   procedure All_Fiber_Bodies is
+   begin
+      Worker (0);
+      Root (0);
+   end All_Fiber_Bodies;
+
 end Smoke_Workload;

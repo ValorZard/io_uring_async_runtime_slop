@@ -18,6 +18,19 @@ with Multi_Await_Workload;
 
 procedure Multi_Await with SPARK_Mode => On, CPU => 1 is
 
+   --  Every path here ends in Exit_Process, which is No_Return, so
+   --  gnatprove reports that this procedure never returns normally.  That
+   --  is the design and not a defect: a Jorvik partition never ends on its
+   --  own, because the environment task would block forever waiting on
+   --  tasks that No_Task_Termination forbids to terminate.  Exiting the
+   --  process is how such a program stops, and the README says so.
+   pragma Annotate
+     (GNATprove, Intentional,
+      "all paths",
+      "A Jorvik partition ends by calling Exit_Process; returning from the "
+      & "main subprogram would hang on tasks that may not terminate.");
+
+
    Handle : Future_Ref;
    Failed : Boolean := False;
 
@@ -59,6 +72,12 @@ begin
    end if;
 
    Scheduler.Wait_For_Shutdown;
+   --  Does nothing at run time: one atomic read and a branch never taken.
+   --  It is here so the environment task is in the call graph of this
+   --  program's fiber bodies, which is what lets SPARK check them for data
+   --  races at all.  See the race witness in Multi_Await_Workload's body.
+   Multi_Await_Workload.Races.Never_Runs;
+
    Fibers.Release_All_Stacks;
 
    Multi_Await_Workload.Weave_Result
