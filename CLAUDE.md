@@ -1958,6 +1958,47 @@ Ranked by expected payoff:
    frames. Listed so that "the context switch is proved" is not read as more
    than it is. See *The context switch is proved*.
 
+6. **`Switch`'s `Always_Terminates` is not true, and the comment beside it
+   says so.** `Iour.Ffi.Fiber.Switch` carries
+   `Global => (In_Out => Kernel), Always_Terminates`, and its own comment
+   admits the exception: a finished fiber's last switch never returns,
+   because the slot is recycled underneath it. `Iour.Fibers` makes that safe
+   with a loop that cannot be left -- safe by construction, not by proof,
+   and meanwhile every caller above is verified against a claim that is
+   false in that one case.
+
+   Whether this is fixable is genuinely open. Dropping `Always_Terminates`
+   costs the termination proofs of everything that calls it, which is most
+   of the scheduler. Splitting it into a terminating `Suspend` and a
+   `No_Return` `Finish` is the obvious shape and has not been tried; the two
+   differ only in what the *caller* intends, which is not something the
+   callee's contract can see. Start by measuring what breaks: drop the
+   aspect, run `--mode=all`, and count.
+
+7. **Fiber interleaving is outside SPARK's model entirely, and nothing says
+   so in the contracts.** SPARK's concurrency reasoning is about Ada tasks.
+   It sees `Switch` as an ordinary procedure that perturbs `Kernel` and
+   returns; it has no notion that control resumes on a different stack in a
+   different fiber. So the data-race freedom SPARK establishes is a result
+   about *tasks* -- shards -- and says nothing about fibers.
+
+   In practice fibers on one shard are cooperatively scheduled and cannot
+   preempt each other, so the property probably holds; the point is that it
+   holds by design rather than by proof, and nothing in the source records
+   the distinction where a reader would trip over it. At minimum this wants
+   writing down next to `Switch`. Whether it can be *modelled* is the same
+   wall as item 5: SPARK has no way to describe a control transfer that
+   returns into another context.
+
+8. **`Ffi.Identity` is analysed as a different program, and shard identity
+   is what the shared-nothing argument rests on.** SPARK ignores
+   `pragma Thread_Local_Storage` and would model the one per-thread slot as
+   one shared variable, which is why the body is `Off` -- see *Why the Linux
+   trusted base is exactly these four*. That is the right call, but it means
+   the single fact the whole design depends on ("a shard knows which shard
+   it is, and no two agree") is asserted, not verified. No fix is known.
+   Listed so it is not mistaken for something the proof covers.
+
 Not open, and deliberately: **registering buffers, or anything else that
 needs the IoRing back.** `REGISTER_BUFFERS` was the one registration Windows
 offered that this runtime could have used, and it is not worth reinstating a

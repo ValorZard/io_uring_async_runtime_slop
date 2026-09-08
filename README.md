@@ -636,6 +636,68 @@ Two modelling decisions deserve a sentence each:
   otherwise would be false. Reactor operations keep the claim: a flush that
   waits is always backed by an armed timer.
 
+### What the proof says about concurrency, and what it does not
+
+Worth stating plainly, because "a concurrent runtime, proved with SPARK" is
+easy to read as more than it is. Three separate claims, of decreasing
+strength.
+
+**Data races between tasks are ruled out statically, by construction.** This
+is the strongest concurrency result here and it is not a run-time check.
+SPARK rejects unsynchronized shared state outright: an object two tasks can
+reach must be a protected object, an atomic object, or `Part_Of` a
+synchronized abstract state. Everything shared here is one of those —
+`Registry`, `Table`, `Cells` and `Engines` are `Abstract_State (… with
+Synchronous, External)`, and their mutable interiors are protected types. A
+plain global that two shards wrote would have been *rejected*, not merely
+left unproved. That class of bug is gone rather than absent.
+
+**One family of deadlocks is unrepresentable, by profile rather than by
+proof.** Jorvik forbids nested entry calls, allows one entry per protected
+object, and forbids potentially-blocking operations inside a protected
+action; ceiling locking does the rest. The classic lock-ordering deadlock
+has nowhere to live. That is a structural argument, not a theorem, and a
+ceiling violation is a run-time `Program_Error`.
+
+**Deadlock and livelock in general are not proved, and neither is progress.**
+SPARK establishes partial correctness and absence of run-time errors. Nothing
+here rules out a fiber awaiting a future no one resolves, or every shard
+asleep with work outstanding. The runtime is careful about this — see
+*Nothing that waits on a peer claims `Always_Terminates`* above — but careful
+is not proved.
+
+**And fibers are outside the model entirely.** This is the limit specific to
+this design, and the one most worth knowing. SPARK's concurrency reasoning is
+about Ada *tasks*. The context switch reaches it as
+
+```ada
+procedure Switch (From : C_Long; To : C_Long)
+  with Global => (In_Out => Kernel), Always_Terminates;
+```
+
+— an ordinary procedure that perturbs some state and returns. SPARK has no
+notion that it exchanges stacks, that control resumes in another fiber, or
+that a finished fiber's last switch never returns at all. So the data-race
+result above is a result about *shards*; the interleaving that fibers create
+is invisible to it. In practice fibers on one shard cannot preempt each
+other, so the property very likely holds — but it holds by design, not
+because anything checked it.
+
+Two smaller gaps in the same direction. `Switch`'s `Always_Terminates` is
+false in exactly one case, which its own comment admits and which
+`Iour.Fibers` makes safe with a loop that cannot be left. And
+`Iour.Ffi.Identity` is analysed as a *different program*: SPARK ignores
+`pragma Thread_Local_Storage` and would model the one per-thread slot as one
+shared variable, which is why that body is `SPARK_Mode => Off` — so "a shard
+knows which shard it is", the fact the whole shared-nothing design rests on,
+is asserted rather than verified.
+
+The honest summary: **free of data races in the analysed portion by
+construction, free of lock-ordering deadlock by profile, not proved free of
+deadlock or livelock, and with fiber-level interleaving outside the model.**
+The first clause is more than most concurrent runtimes can say. It is not
+"no concurrency bugs".
+
 ### Bugs the proof found
 
 Getting to zero meant fixing defects gnatprove found and the compiler did
