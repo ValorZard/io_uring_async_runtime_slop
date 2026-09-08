@@ -47,7 +47,34 @@ library project Io_Uring_Async_Runtime is
          "-g",
          "-gnatwa",         --  all warnings
          "-gnatw.X",        --  quiet about No_Exception_Propagation
-         "-gnatf");         --  full error detail
+         "-gnatf",          --  full error detail
+         --  One frame this large is worth a human look.  Fiber stacks are
+         --  Fiber_Stack_Bytes -- 64 KiB, one guard page below -- and in a
+         --  runtime with no heap every buffer is a static local, so an
+         --  oversized local array is the realistic way to overrun one.
+         --  Whole-call-graph analysis would be better and is not available
+         --  here: it needs GNATstack over -fcallgraph-info, which the
+         --  Alire FSF toolchain does not ship.  A per-frame bound is what
+         --  is left, and it catches the case that actually happens.
+         --
+         --  Not -Wstack-usage, which bounds the same thing and also warns
+         --  when a frame is dynamically sized.  That sounds better and is
+         --  unusable here: `"n =" & X'Image` builds a temporary whose
+         --  size is computed, so every subprogram that formats a message
+         --  reports "stack usage might be unbounded" -- six of them
+         --  across the examples and tests, none of them a defect.  The
+         --  cost of the narrower flag is that a runaway dynamic frame on
+         --  a fiber stack is not caught; the guard page is what catches
+         --  that one.
+         --
+         --  16 KiB is a quarter of a fiber stack and fires on nothing
+         --  today.  The largest frame measured on Windows is
+         --  Scheduler.Run at 8432 bytes, then Reactor.Drain at 4240 and
+         --  Harvest at 4176 -- all three on a shard's thread stack, not
+         --  on a fiber's.  Everything reached from a fiber is in the
+         --  hundreds of bytes.  Add -fstack-usage for the per-subprogram
+         --  .su files those numbers came from.
+         "-Wframe-larger-than=16384");
    end Compiler;
 
    package Linker is

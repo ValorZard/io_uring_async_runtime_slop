@@ -449,6 +449,20 @@ description; it cannot prove the description is right for the machine. The
 argument for the arrangement is that what is left trusted is a line each and
 reviewable by eye.
 
+The first of the three can at least be cross-checked against something that
+is not this model, and it is worth doing because the failure it guards
+against is silent rather than loud: a register the switch drops corrupts
+data, and faults only if the value happened to be a pointer. GCC emits
+`.seh_pushreg` and `.seh_savexmm` only for registers it is *obliged* to
+preserve, so two throwaway C functions with enough live values will name the
+Win64 callee-saved set without anyone typing it — `rbx`, `rbp`, `rdi`,
+`rsi`, `r12`–`r15` and `xmm6`–`xmm15`, which is exactly `Location` minus
+`L_Rip`, `L_Rsp`, the two control words and the three TEB fields. Eighteen
+of the twenty-five locations, agreed by an oracle that does not derive from
+`Location`. That last part is the whole value of it: every other artefact
+here does derive from `Location`, so none of them can disagree with it. The
+remaining seven are still read off the ABI by a human.
+
 **On stack-based TAL, and what this model does not do.** Behind the POPL paper
 is Morrisett, Crary and Glew's *Stack-Based Typed Assembly Language* (JFP
 13(5), 2003; TIC '98 before that). It is the closer ancestor of this
@@ -830,6 +844,16 @@ make prove        # SPARK proof of everything analysable (expected clean)
 compiles the other backend without generating code, so a change to shared
 code that would only break over there is caught before it is pushed. There is
 no cross toolchain involved.
+
+The three project files carry `-Wframe-larger-than=16384`, a compile-time
+bound on any single stack frame. Fiber stacks are 64 KiB with a guard page
+below and nothing is heap-allocated, so an oversized local array is the one
+realistic way to overrun one; 16 KiB is a quarter of a fiber stack and fires
+on nothing today, the largest frame in the runtime being `Scheduler.Run` at
+8432 bytes, on a shard's thread stack rather than a fiber's. It is
+deliberately not `-Wstack-usage`, which also warns on dynamically sized
+frames and so fires on every subprogram that builds a message out of `&`
+and `'Image`.
 
 Run the demo by hand (`.exe` on Windows):
 

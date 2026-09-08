@@ -589,6 +589,65 @@ initial one; every frame after that is GCC's. Do not describe the switch as
 "proved" without that qualification -- the README states it at length and the
 sentence is load-bearing.
 
+### What a missing register actually does
+
+Worth knowing before hunting one, because it is almost never the
+segmentation fault people expect. A register the switch fails to preserve
+comes back holding the *other* fiber's value, and what that costs depends
+entirely on which register it was:
+
+* **`rsp`** is the one that faults immediately and unmistakably.
+* **`rbx`, `rbp`, `r12`-`r15`, `rdi`, `rsi`** corrupt silently. A crash
+  needs the value to have been a pointer that something then dereferences,
+  and it then lands far from the switch with an innocent-looking stack
+  trace. A loop counter or an index gives wrong answers and no crash at
+  all.
+* **`xmm6`-`xmm15`** corrupt vectorised code, which on a modern compiler
+  includes `memcpy`. Wrong *data*, essentially never a fault.
+* **`mxcsr` and the x87 control word** leak rounding modes and exception
+  masks between fibers. Completely silent: arithmetic that is subtly
+  wrong, or a spurious FP exception thousands of switches later.
+* **The three TEB fields** are the likeliest to fault, because
+  `___chkstk_ms` reads `StackLimit` and the unwinder reads `StackBase`. A
+  fiber running on another fiber's bounds either faults inside the probe
+  or breaks exception propagation, in both cases somewhere
+  unrecognisable.
+
+So the dominant mode is silent wrongness rather than a crash, which is the
+argument for checking the set mechanically instead of waiting to be told.
+
+### Asking GCC what the callee-saved set is
+
+GCC emits `.seh_pushreg` and `.seh_savexmm` only for registers it is
+*obliged* to preserve, so the compiler will state the ABI's callee-saved
+set if you apply enough register pressure. Two throwaway C functions --
+one holding a dozen live doubles across calls, one holding ten live longs
+-- produced exactly this on this machine:
+
+```
+rbx rbp rdi rsi r12 r13 r14 r15
+xmm6 xmm7 xmm8 xmm9 xmm10 xmm11 xmm12 xmm13 xmm14 xmm15
+```
+
+which is `Location`'s general set minus `L_Rip` and `L_Rsp`, plus its
+whole xmm range. Eighteen of the twenty-five locations, agreed by an
+oracle nobody typed. That is the property worth having: every other
+artefact here derives from `Location`, so they cannot disagree with it,
+and this one does not.
+
+Measured on Win64. The SysV analogue is `.cfi_offset` and has not been
+tried here.
+
+What it does not reach: `L_Mxcsr`, `L_Fpu_Cw` and the three TEB fields are
+not prologue-saved registers and never appear in the directives, and
+`L_Rip`/`L_Rsp` are structural rather than preserved. Those seven still
+rest on a human reading the ABI -- though they are also the ones hardest
+to omit unnoticed, being conspicuous rather than one of a numbered series,
+which is where an omission is actually plausible.
+
+Not wired into `make`; it was run by hand, and it is two `gcc -O2 -S` runs
+and a `grep -oE "seh_pushreg|seh_savexmm"` over the output.
+
 ### How coverage is guaranteed, and why not the obvious way
 
 `Location` is the ABI's callee-saved set as an enumeration **in ascending
@@ -648,7 +707,10 @@ What is still trusted input, and cannot be checked from inside:
   `Location` to the context record and to the emitted text; nothing ties any
   of them to what the System V or Win64 ABI actually requires. If a target's
   author never knew xmm11 was callee-saved, every artefact here is
-  consistent and wrong together.
+  consistent and wrong together. This is the one of the three that does
+  not have to stay that way: eighteen of the twenty-five locations can be
+  cross-checked against the compiler rather than reasoned about. See
+  *Asking GCC what the callee-saved set is*.
 * **That `Apply` means what the instruction means.** `Op_Store_Reg` is
   *defined* as `Out_Ctx (L) := Live (L)`. That it corresponds to what
   `movq %reg, off(%base)` does on the machine is a claim in a comment.
@@ -899,6 +961,32 @@ The fourth row is the one that has to be done properly: breaking only the
 body is a test of the *target*, not of the interface, because the target's
 own postcondition catches it first and the interface never gets a chance to.
 
+**Re-run against the Win64 target, on Windows (2026-09-07)**, because the
+table above was built on the SysV one and the two templates share no text:
+
+| mutation | caught by | message |
+|---|---|---|
+| swap `r13`'s and `r14`'s save displacements | start-up text walk | `smoke` FAIL, character 131 |
+| break `Save_One`'s body *and* its `Post` together | `Target.Save_Obligation` | `assertion might fail`, in `iour-ffi-fiber-target.adb:30`, reported at the instantiation `iour-ffi-fiber-machine.ads:335` |
+
+The first of those also exercises the gate that matters, which `smoke`
+only reports on. Built with the swapped displacements, `echo_server`
+starts, every shard reports zero completions, zero resumes and zero kernel
+sleeps, and the process exits without serving a connection:
+`Reserve_Contexts` refused all four. **It exits 0 and prints an ordinary
+banner**, so outside `smoke` a broken switch is silent -- the per-shard
+counters are the tell.
+
+**The one link the start-up check cannot see** was closed by hand at the
+same time. That check compares the template constant against the model,
+and `Asm` consumes that same constant, but nothing in the program looks at
+what the assembler actually produced. `objdump -d obj/iour-ffi-fiber.o` on
+Windows is the template instruction for instruction: ascending saves from
+0x00 to 0x100, descending restores, the TEB fields through `rax`,
+`jmp *(%rdx)`, and `lea 0x13f(%rip),%rax` resolving to the `1:` label at
+0x146. The context stride is 0x110, which is `Context_Bytes`. Worth
+redoing after any change to the template, and it is one command.
+
 * **Back the file up before mutating it, and restore from the backup, not
   from git.** `git checkout <file>` restores from HEAD, which after a
   mid-session commit is the *committed* version and not the working one; it
@@ -995,6 +1083,71 @@ own postcondition catches it first and the interface never gets a chance to.
   for documentation value.
 - Overload the same name across unrelated things and the prover's diagnostics
   become unreadable. `Fill_Sqe` is named apart from `Encode` for that reason.
+
+---
+
+## Stack budgets, and the flag that guards them
+
+Fiber stacks are `Fiber_Stack_Bytes` -- 64 KiB, with one `PAGE_NOACCESS`
+guard page below on Windows and an `mmap` guard on Linux. Nothing is
+heap-allocated anywhere, so the only way to overrun one is a stack frame,
+and in a runtime with no heap every buffer is a static local.
+
+All three project files therefore carry **`-Wframe-larger-than=16384`**: a
+compile-time bound on any single frame, a quarter of a fiber stack, and it
+fires on nothing today.
+
+Measured on Windows with `-fstack-usage`, largest first:
+
+| subprogram | frame | which stack |
+|---|---|---|
+| `Scheduler.Run` | 8432 | shard thread |
+| `Reactor.Drain` | 4240 | shard thread |
+| `Reactor.Harvest` | 4176 | shard thread |
+| `Fibers.Pop_Many` | 2112 | shard thread |
+| everything reached from a fiber | <= 320 | fiber |
+
+The last column is the point. The large frames are on the shard's own
+thread stack -- `Iour.Shards` calls `Scheduler.Run` there -- and are
+nowhere near a 64 KiB fiber stack. The fiber budget has enormous headroom;
+the flag exists to keep it that way, not because it is tight.
+
+**Not `-Wstack-usage`, which is the obvious choice and is unusable here.**
+It bounds the same thing and *also* warns when a frame is dynamically
+sized -- and `"n =" & X'Image` builds a temporary whose size is computed,
+so every subprogram that formats a message reports "stack usage might be
+unbounded". Six of them across the examples and tests, not one a defect.
+Permanent noise teaches people to ignore warnings, which is worse than no
+check at all. The price of the narrower flag is that a runaway *dynamic*
+frame is not caught; the guard page is what catches that one.
+
+**Whole-call-graph analysis is what would actually answer the question,
+and it is not available.** It needs GNATstack over
+`-fcallgraph-info=su,da`: the flag is in this GCC, GNATstack is an AdaCore
+Pro tool the Alire FSF toolchain does not ship. The `.ci` files are plain
+text and this call graph is small and static, so a homegrown consumer is
+realistic if it ever matters. It could never be complete regardless --
+fiber bodies arrive as `'Access` values, so the runtime cannot know a user
+fiber's depth, and the guard page stays the backstop.
+
+**The guard page is sound against a large frame**, because GCC emits
+`___chkstk_ms` for frames over a page and probes downward. Verified in
+`Scheduler.Run`'s prologue: `mov $0x20a8,%eax; call ___chkstk_ms; sub
+%rax,%rsp`. Unprobed, an 8 KiB frame could step clean over a 4 KiB guard
+page and land in whatever is below it. In the object file the call is an
+unresolved relocation, so `objdump -d | grep chkstk` finds nothing and
+`objdump -r | grep chkstk` finds it.
+
+**Checking that the flag still fires** is a one-line mutation: a
+`pragma Volatile` array of 40,000 bytes in a fiber-reachable subprogram
+gives `the frame size of 40096 bytes is larger than 16384 bytes`. Without
+`Volatile` it is optimised away at `-O2` and nothing is reported -- which
+looks exactly like a flag that was never wired up.
+
+The Linux frames are **unmeasured**: `make check-linux` compiles with
+`-gnatc` and generates no code, so it produces no `.su` files. If a Linux
+frame exceeds 16 KiB the flag will warn there first. Warnings are not
+errors here, so it cannot break that build.
 
 ---
 

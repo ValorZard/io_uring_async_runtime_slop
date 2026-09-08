@@ -10,7 +10,10 @@ project Tests is
    end Builder;
    package Compiler is
       for Default_Switches ("Ada") use
-        ("-gnat2022", "-O2", "-g", "-gnatwa", "-gnatw.X", "-gnatf");
+        ("-gnat2022", "-O2", "-g", "-gnatwa", "-gnatw.X", "-gnatf",
+         --  Fiber bodies live here too, so the same bound applies; see
+         --  io_uring_async_runtime.gpr for what it is and why 16 KiB.
+         "-Wframe-larger-than=16384");
    end Compiler;
    package Binder is
       for Switches ("Ada") use ("-Es");
