@@ -1,5 +1,6 @@
 with Interfaces; use Interfaces;
 with Iour.Fibers;
+with Iour.Fibers.Job;
 with Iour.Futures;
 with Iour.Reactor;
 with Iour.Scheduler;
@@ -11,6 +12,13 @@ package body Multi_Await_Workload with SPARK_Mode => On is
    package Fibers renames Iour.Fibers;
    package Futures renames Iour.Futures;
    package Reactor renames Iour.Reactor;
+
+   --  The jobs this workload spawns.  All three are declared in the spec,
+   --  so the instances can stand here; an Iour.Fibers.Job instance has to
+   --  be at library level because it registers from its own elaboration.
+   package Weaver_Job is new Iour.Fibers.Job (Work => Weaver);
+   package Kid_Job    is new Iour.Fibers.Job (Work => Kid);
+   package Root_Job   is new Iour.Fibers.Job (Work => Root);
 
    Max_Events : constant := Weavers * Steps;
 
@@ -259,7 +267,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       --  Spawn_Here, so every weaver lands on this core and nothing else
       --  can be running when they interleave.
       for I in 1 .. Weavers loop
-         Fibers.Spawn_Here (Weaver'Access, Fiber_Argument (Woven), Started);
+         Weaver_Job.Spawn_Here (Fiber_Argument (Woven), Started);
          exit when not Started;
       end loop;
 
@@ -312,7 +320,7 @@ package body Multi_Await_Workload with SPARK_Mode => On is
       ------------------------------------------------------------------
 
       for I in Kid_Handles'Range loop
-         Fibers.Spawn (Kid'Access, Fiber_Argument (I), Kid_Handles (I));
+         Kid_Job.Spawn (Fiber_Argument (I), Kid_Handles (I));
       end loop;
 
       for I in Kid_Handles'Range loop
@@ -435,5 +443,10 @@ package body Multi_Await_Workload with SPARK_Mode => On is
    begin
       Book.Get_Join (Joined, Ran);
    end Join_Result;
+
+   procedure Start_Root (Handle : out Future_Ref) is
+   begin
+      Root_Job.Spawn (0, Handle);
+   end Start_Root;
 
 end Multi_Await_Workload;

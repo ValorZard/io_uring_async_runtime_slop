@@ -23,7 +23,7 @@ else
 endif
 
 .PHONY: all lib examples tests abi-check smoke multi-await demo bench \
-        prove check-linux clean help
+        prove prove-consumers check-linux check-aarch64 clean help
 
 all: examples abi-check
 
@@ -81,6 +81,23 @@ bench: examples
 prove:
 	alr gnatprove -P io_uring_async_runtime.gpr --mode=all --level=3 -j0
 
+# Proof of the library's *consumers*: the echo server and client, the smoke
+# test and the await test, all of which are SPARK_Mode => On and none of
+# which "make prove" ever looked at.
+#
+# This is the target that answers "can a program that uses this library be
+# proved too", and it is not a formality.  Until it was first run the answer
+# was no: Iour.Fibers.Spawn took an access-to-subprogram, and SPARK rejects
+# 'Access of any subprogram with global effects -- which every fiber body
+# has, since doing I/O is the point.  Every spawn site in this repository
+# was illegal SPARK and nothing said so, because nothing asked.  See *Fiber
+# bodies are numbers, not pointers* in CLAUDE.md.
+#
+# Keep it green.  A consumer-visible API that only the library's own proof
+# exercises will drift back out of SPARK without a single warning.
+prove-consumers:
+	alr gnatprove -P examples.gpr --mode=all --level=2 -j0
+
 # Compile the other system's backend without running it: catches anything
 # that would only break over there, and needs no cross toolchain because
 # nothing is generated.  Run it before pushing a change to shared code.
@@ -113,6 +130,7 @@ help:
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers (Linux)"
 	@echo "make check-linux     compile the Linux backend from anywhere"
 	@echo "make check-aarch64   compile the AArch64 backend from anywhere"
-	@echo "make prove           SPARK proof of everything"
+	@echo "make prove           SPARK proof of the library"
+	@echo "make prove-consumers SPARK proof of the examples and tests"
 	@echo
 	@echo "host detected as $(HOST)"

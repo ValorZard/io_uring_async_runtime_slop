@@ -52,7 +52,7 @@ begin
    Put_Line ("multi_await: starting" & Shard_Count'Image & " shards");
    Scheduler.Wait_Until_Ready;
 
-   Fibers.Spawn (Multi_Await_Workload.Root'Access, 0, Handle);
+   Multi_Await_Workload.Start_Root (Handle);
    if Handle = No_Future then
       Put_Line ("multi_await: FAIL -- could not spawn the root fiber");
       Ffi.Sys.Exit_Process (1);

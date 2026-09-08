@@ -84,6 +84,12 @@ package Echo_Server_App with SPARK_Mode => On is
    --  told to spread.  Several of these may share one listener.
    procedure Acceptor (Arg : Fiber_Argument);
 
+   --  Start an acceptor on a named shard.  As with the client, the
+   --  Iour.Fibers.Job instance must be at library level and so lives in
+   --  this package's body.
+   procedure Start_Acceptor
+     (Shard : Active_Shard; Listener : Descriptor; Started : out Boolean);
+
    procedure Snapshot
      (Accepted   : out Natural;
       Completed  : out Natural;

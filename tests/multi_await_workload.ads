@@ -43,6 +43,10 @@ package Multi_Await_Workload with SPARK_Mode => On is
    procedure Kid (Arg : Fiber_Argument);
    procedure Root (Arg : Fiber_Argument);
 
+   --  Start Root as a fiber; the Iour.Fibers.Job instance is in the body,
+   --  which is where library-level instantiation is available.
+   procedure Start_Root (Handle : out Future_Ref);
+
    ---------------------------------------------------------------------------
    --  Results, read by the environment task after shutdown
    ---------------------------------------------------------------------------

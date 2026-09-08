@@ -25,6 +25,11 @@ package Echo_Client_App with SPARK_Mode => On is
    --  Fiber body: fan out the sessions, wait for them, stop the runtime.
    procedure Driver (Arg : Fiber_Argument);
 
+   --  Start Driver as a fiber.  The instantiation of Iour.Fibers.Job that
+   --  makes this possible has to be at library level, so it lives in this
+   --  package's body rather than in the main procedure's declarations.
+   procedure Start_Driver (Handle : out Future_Ref);
+
    procedure Snapshot
      (Started    : out Natural;
       Succeeded  : out Natural;

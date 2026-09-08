@@ -327,9 +327,17 @@ is
    --  Reporting
    ---------------------------------------------------------------------------
 
+   --  Longest a backend name may be.  A bound rather than a comment,
+   --  because a caller building a banner line out of this has to prove the
+   --  concatenation stays inside Natural, and cannot without one.
+   Max_Backend_Name : constant := 32;
+
    --  Which backend this build got, for the banner a server prints at
    --  start-up.  A compile-time fact, so a plain function.
-   function Backend_Name return String with Global => null;
+   function Backend_Name return String
+     with Global => null,
+          Post   => Backend_Name'Result'First = 1
+                    and then Backend_Name'Result'Length <= Max_Backend_Name;
 
    --  Whether this shard's data plane goes through a submission ring.
    --

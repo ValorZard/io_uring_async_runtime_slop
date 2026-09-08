@@ -13,7 +13,7 @@ with Iour.Trace;
 package body Iour.Fibers with
   SPARK_Mode    => On,
   Refined_State =>
-    (Registry => (Banks, Shard_Cells,
+    (Registry => (Banks, Shard_Cells, Jobs,
                   Currents.Cells, Exits.Cells, Results.Cells,
                   Inbox_Flags.Cells))
 is
@@ -218,6 +218,105 @@ is
    end Shard_Cell;
 
    Shard_Cells : array (Shard_Id) of Shard_Cell;
+
+   ---------------------------------------------------------------------------
+   --  Registered fiber bodies
+   ---------------------------------------------------------------------------
+
+   --  Job number to subprogram.  Written only while the partition
+   --  elaborates -- Iour.Fibers.Job registers from its instance's
+   --  elaboration, and Sequential elaboration puts every one of those
+   --  before the first shard task exists -- and read once per spawn
+   --  afterwards.
+   --
+   --  A protected object rather than a plain array, because SPARK requires
+   --  every object two tasks can reach to be synchronized and this one is
+   --  reachable from all of them.  Constant_After_Elaboration says exactly
+   --  what is true here and would have cost nothing, but SPARK RM
+   --  6.1.4(22) forbids such a variable from being an output of any
+   --  subprogram at all, and registration necessarily is one -- so the
+   --  lock stays.  It is taken once per fiber start, on a path that
+   --  already takes Fiber_Bank.Allocate, and never on the I/O path.
+   type Job_Table is array (Job_Id) of Fiber_Body;
+
+   protected type Job_Registry
+     with Priority => Runtime_Priority
+   is
+      procedure Install (Work : Fiber_Body; Id : out Job_Ref);
+      procedure Look_Up (Id : Job_Id; Work : out Fiber_Body);
+   private
+      Table : Job_Table := [others => null];
+      Count : Natural range 0 .. Max_Jobs := 0;
+   end Job_Registry;
+
+   Jobs : Job_Registry;
+
+   protected body Job_Registry is
+
+      procedure Install (Work : Fiber_Body; Id : out Job_Ref) is
+      begin
+         if Count = Max_Jobs or else Work = null then
+            Id := No_Job;
+            return;
+         end if;
+         Table (Job_Id (Count)) := Work;
+         Id := Job_Id (Count);
+         Count := Count + 1;
+      end Install;
+
+      procedure Look_Up (Id : Job_Id; Work : out Fiber_Body) is
+      begin
+         Work := Table (Id);
+      end Look_Up;
+
+   end Job_Registry;
+
+   procedure Register (Work : Fiber_Body; Id : out Job_Ref) is
+   begin
+      Jobs.Install (Work, Id);
+   end Register;
+
+   --  The runtime's one indirect call, and the one place SPARK's model of
+   --  it is wrong on purpose.
+   --
+   --  SPARK reads a call through an access-to-subprogram as having no
+   --  global effects whatever.  A fiber body has them by definition -- it
+   --  does the I/O the runtime exists for -- so that reading is false, and
+   --  leaving it inline in Fiber_Main made it false invisibly: everything
+   --  above was proved against a fiber body that touches nothing.
+   --
+   --  Confining it here does not make the assumption true.  It makes it
+   --  one named subprogram with the assumption written on it -- the same
+   --  arrangement Iour.Ffi.Fiber's Asm body has -- and it lets the Global
+   --  below over-approximate honestly instead: the union of everything in
+   --  this library a fiber body can reach, which is every state the
+   --  runtime owns, because it can spawn, it can await, it can submit to
+   --  its shard's engine and it can trace.  Over-approximating is the same
+   --  union rule the portable Ffi specs use for two bodies that do
+   --  different amounts.
+   --
+   --  What the Global still cannot name is the consumer's own state,
+   --  because this library cannot see it.  A fiber body that touches a
+   --  variable of the program that spawned it is invisible here, and that
+   --  is the one thing a consumer has to reason about itself; see *What
+   --  SPARK proves about deadlock and data races* in CLAUDE.md, and the
+   --  README section of the same name.
+   procedure Invoke (Work : Fiber_Body; Arg : Fiber_Argument)
+     with Pre    => Work /= null,
+          Global => (In_Out => (Banks, Shard_Cells, Jobs,
+                                Currents.Cells, Exits.Cells,
+                                Results.Cells, Inbox_Flags.Cells,
+                                Futures.Table,
+                                Run_Queue.Queue,
+                                Reactor.Engines,
+                                Trace.Switch,
+                                Ffi.Kernel));
+
+   procedure Invoke (Work : Fiber_Body; Arg : Fiber_Argument)
+     with SPARK_Mode => Off is
+   begin
+      Work.all (Arg);
+   end Invoke;
 
    ---------------------------------------------------------------------------
    --  Pool body
@@ -724,7 +823,7 @@ is
    ---------------------------------------------------------------------------
 
    procedure Spawn
-     (Work   : Fiber_Body;
+     (Work   : Job_Id;
       Arg    : Fiber_Argument;
       Handle : out Future_Ref)
    is
@@ -733,10 +832,16 @@ is
       Me       : constant Shard_Ref := Self;
       Fiber    : Fiber_Ref;
       Accepted : Boolean;
+      Body_Of  : Fiber_Body;
    begin
       Handle := No_Future;
 
-      Slot_Allocate (Me, Work, Arg, Fiber);
+      Jobs.Look_Up (Work, Body_Of);
+      if Body_Of = null then
+         return;  --  a job number nothing was ever registered under
+      end if;
+
+      Slot_Allocate (Me, Body_Of, Arg, Fiber);
       if Fiber = No_Fiber then
          return;  --  fiber table full
       end if;
@@ -853,20 +958,26 @@ is
    --  release -- off the path.
 
    procedure Spawn_Here
-     (Work    : Fiber_Body;
+     (Work    : Job_Id;
       Arg     : Fiber_Argument;
       Started : out Boolean)
    is
-      Me    : constant Shard_Ref := Self;
-      Fiber : Fiber_Ref;
-      Ok    : Boolean;
+      Me      : constant Shard_Ref := Self;
+      Fiber   : Fiber_Ref;
+      Ok      : Boolean;
+      Body_Of : Fiber_Body;
    begin
       Started := False;
       if Me not in Active_Shard then
          return;  --  not on a shard: there is no "here"
       end if;
 
-      Slot_Allocate (Me, Work, Arg, Fiber);
+      Jobs.Look_Up (Work, Body_Of);
+      if Body_Of = null then
+         return;
+      end if;
+
+      Slot_Allocate (Me, Body_Of, Arg, Fiber);
       if Fiber = No_Fiber then
          return;  --  fiber table full
       end if;
@@ -885,19 +996,25 @@ is
 
    procedure Spawn_On
      (Shard   : Active_Shard;
-      Work    : Fiber_Body;
+      Work    : Job_Id;
       Arg     : Fiber_Argument;
       Started : out Boolean)
    is
-      Me    : constant Shard_Ref := Self;
-      Fiber : Fiber_Ref;
-      Ok    : Boolean;
+      Me      : constant Shard_Ref := Self;
+      Fiber   : Fiber_Ref;
+      Ok      : Boolean;
+      Body_Of : Fiber_Body;
    begin
       Started := False;
 
+      Jobs.Look_Up (Work, Body_Of);
+      if Body_Of = null then
+         return;
+      end if;
+
       --  Allocate out of the target's bank, since that is the core that
       --  will bind, run and recycle the slot.
-      Slot_Allocate (Shard, Work, Arg, Fiber);
+      Slot_Allocate (Shard, Body_Of, Arg, Fiber);
       if Fiber = No_Fiber then
          return;
       end if;
@@ -1078,7 +1195,7 @@ is
                          & " nothing, and the handler exists for the case"
                          & " where that proof no longer holds.");
             begin
-               Work.all (Param);
+               Invoke (Work, Param);
             exception
                --  SPARK proves fiber bodies raise nothing, so this is
                --  unreachable by construction.  It is here because the

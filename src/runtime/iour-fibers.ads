@@ -33,6 +33,18 @@
 --  contexts are not this package's state: they live in Iour.Ffi.Fiber and
 --  are named by slot index, which is what leaves this package with nothing
 --  to race over and no address to hand out.
+--
+--  A fiber body is named by a Job_Id rather than passed as a pointer, and
+--  the reason is SPARK rather than taste: an access-to-subprogram type
+--  carries an implicit Global of null, so 'Access of anything that does
+--  I/O is rejected outright and no SPARK program could spawn a fiber at
+--  all.  Jobs are registered by instantiating Iour.Fibers.Job, which is
+--  where the one 'Access in this runtime lives.  The table of them is the
+--  third kind of state here: written only while the partition elaborates,
+--  read once per spawn, and behind a protected object because SPARK has no
+--  way to say "written during elaboration only" about a variable some
+--  other package's elaboration writes.  See *Fiber bodies are numbers, not
+--  pointers* in CLAUDE.md.
 ------------------------------------------------------------------------------
 
 with Iour.Ffi;
@@ -105,10 +117,9 @@ is
    --  queue is full.  The runtime never blocks to obtain a handle: doing so
    --  on a shard would stall the very core that could free one.
    procedure Spawn
-     (Work   : Fiber_Body;
+     (Work   : Job_Id;
       Arg    : Fiber_Argument;
-      Handle : out Future_Ref)
-     with Pre => Work /= null;
+      Handle : out Future_Ref);
 
    --  Spawn onto the calling shard, without a future and without going
    --  near the global run queue.
@@ -124,10 +135,9 @@ is
    --  fiber table is full.  There is no handle: nothing can await a
    --  detached fiber, so nothing has to release one either.
    procedure Spawn_Here
-     (Work    : Fiber_Body;
+     (Work    : Job_Id;
       Arg     : Fiber_Argument;
-      Started : out Boolean)
-     with Pre => Work /= null;
+      Started : out Boolean);
 
    --  The same, onto a named shard, and callable from the environment
    --  task -- which is how a server puts one acceptor on every core
@@ -136,10 +146,9 @@ is
    --  straight onto its ready queue.
    procedure Spawn_On
      (Shard   : Active_Shard;
-      Work    : Fiber_Body;
+      Work    : Job_Id;
       Arg     : Fiber_Argument;
-      Started : out Boolean)
-     with Pre => Work /= null;
+      Started : out Boolean);
 
    ---------------------------------------------------------------------------
    --  Suspension
@@ -259,5 +268,29 @@ is
 
    --  Release every stack.  Called once, after the shards have stopped.
    procedure Release_All_Stacks;
+
+private
+
+   ---------------------------------------------------------------------------
+   --  The registration edge
+   ---------------------------------------------------------------------------
+
+   --  The runtime's only access type, and it is private so that no
+   --  consumer can name it.  Declaring it is legal SPARK; what is not is
+   --  taking 'Access of a subprogram that touches anything, and the one
+   --  place that happens is the private part of Iour.Fibers.Job, which is
+   --  SPARK_Mode => Off for exactly that reason.
+   type Fiber_Body is access procedure (Arg : Fiber_Argument);
+
+   --  Give a fiber body a number.  Called once per instantiation of
+   --  Iour.Fibers.Job, during elaboration -- which, under this partition's
+   --  Sequential elaboration policy, is before any shard task exists.
+   --
+   --  Id is No_Job if the table is full, which means a program has more
+   --  than Max_Jobs kinds of fiber; that is a build-time fact about the
+   --  program, not a runtime condition, so it is reported rather than
+   --  raised and the instantiating package can decide.
+   procedure Register (Work : Fiber_Body; Id : out Job_Ref)
+     with Global => (In_Out => Registry), Pre => Work /= null;
 
 end Iour.Fibers;

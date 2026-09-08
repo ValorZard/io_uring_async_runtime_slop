@@ -1,13 +1,16 @@
 with Echo_Protocol;   use Echo_Protocol;
-with Iour.Fibers;
+with Iour.Fibers.Job;
 with Iour.Net;
 with Iour.Scheduler;
 with Iour.Time;
 
 package body Echo_Client_App with SPARK_Mode => On is
 
-   package Fibers renames Iour.Fibers;
    package Net renames Iour.Net;
+
+   --  Driver is declared in the spec, so its job instance can stand here.
+   --  Session's is further down, after the forward declaration it needs.
+   package Driver_Job is new Iour.Fibers.Job (Work => Driver);
 
    Max_Host : constant := 46;   --  enough for any dotted quad
 
@@ -18,10 +21,31 @@ package body Echo_Client_App with SPARK_Mode => On is
      with Atomic_Components;
 
    Host_Chars  : Host_Text := [others => ' '];
-   Host_Length : Natural := 0 with Atomic;
-   Server_Port : Natural := 0 with Atomic;
-   Session_Count : Natural := 0 with Atomic;
-   Round_Count : Natural := 0 with Atomic;
+
+   --  The same sharing, one scalar at a time -- and with the external
+   --  properties spelled out rather than defaulted, because they say what
+   --  these actually are: written by one thread, read by others, Atomic
+   --  for the synchronisation.
+   --
+   --  Defaulted, Atomic means External with all four True, and that is a
+   --  different object.  Effective_Reads => True says reading is itself an
+   --  act that changes the thing read -- true of a hardware FIFO, of
+   --  nothing here -- and it forbids reading one inside a larger
+   --  expression (E0004); Effective_Writes => True with Async_Readers
+   --  makes the variable an output of any function that reads it, which
+   --  SPARK forbids outright (E0005).  SPARK RM 7.1.2(6) then requires at
+   --  least one of Async_Readers and Async_Writers, so the shape is
+   --  Async_Writers alone -- which is also how Iour.Trace declares its
+   --  Enabled flag, for the same reasons.
+   Host_Length : Natural := 0
+     with Atomic, Async_Writers => True, Async_Readers => False,
+          Effective_Reads => False, Effective_Writes => False;
+   Server_Port : Natural := 0
+     with Atomic, Async_Writers => True, Async_Readers => False,
+          Effective_Reads => False, Effective_Writes => False;
+   Round_Count : Natural := 0
+     with Atomic, Async_Writers => True, Async_Readers => False,
+          Effective_Reads => False, Effective_Writes => False;
 
    protected Stats
      with Priority => Runtime_Priority
@@ -37,7 +61,15 @@ package body Echo_Client_App with SPARK_Mode => On is
          N_Mismatched : out Natural;
          N_Concurrent : out Natural);
       function All_Finished return Boolean;
+      --  How many sessions the run is for, set once by Configure before
+      --  any shard runs.  Protected state rather than an Atomic variable
+      --  beside the others, because All_Finished reads it and SPARK
+      --  forbids a function from reading a volatile object (E0005) -- and
+      --  because it is compared with counters held under this same lock.
+      procedure Set_Session_Count (Count : Natural);
+      procedure Session_Goal (Count : out Natural);
    private
+      Session_Count    : Natural := 0;
       Total_Started    : Natural := 0;
       Total_Ok         : Natural := 0;
       Total_Failed     : Natural := 0;
@@ -49,10 +81,27 @@ package body Echo_Client_App with SPARK_Mode => On is
 
    protected body Stats is
 
+      --  Statistics only, and saturating, so the arithmetic is total and
+      --  therefore provable.  Iour.Scheduler counts the same way.
+      --
+      --  Declared here rather than beside the package's other helpers on
+      --  purpose: no protected body in this program calls anything outside
+      --  itself, which is what makes the absence of nested protected calls
+      --  -- and so of lock cycles -- checkable by reading one screen.  See
+      --  *What SPARK proves about deadlock and data races* in CLAUDE.md.
+      procedure Bump (Counter : in out Natural; By : Natural := 1) is
+      begin
+         if Natural'Last - Counter >= By then
+            Counter := Counter + By;
+         else
+            Counter := Natural'Last;
+         end if;
+      end Bump;
+
       procedure Started_One is
       begin
-         Total_Started := Total_Started + 1;
-         Live := Live + 1;
+         Bump (Total_Started);
+         Bump (Live);
          if Live > Peak_Live then
             Peak_Live := Live;
          end if;
@@ -61,23 +110,36 @@ package body Echo_Client_App with SPARK_Mode => On is
       procedure Finished_One
         (Frames : Natural; Ok : Boolean; Mismatch : Boolean) is
       begin
-         Total_Frames := Total_Frames + Frames;
+         Bump (Total_Frames, Frames);
          if Ok then
-            Total_Ok := Total_Ok + 1;
+            Bump (Total_Ok);
          else
-            Total_Failed := Total_Failed + 1;
+            Bump (Total_Failed);
          end if;
          if Mismatch then
-            Total_Mismatched := Total_Mismatched + 1;
+            Bump (Total_Mismatched);
          end if;
          if Live > 0 then
             Live := Live - 1;
          end if;
       end Finished_One;
 
+      --  Written so the sum cannot overflow: Total_Ok and Total_Failed are
+      --  each at most Natural'Last, and comparing the difference is the
+      --  same question with no addition in it.
       function All_Finished return Boolean is
         (Total_Started >= Session_Count
-         and then Total_Ok + Total_Failed >= Total_Started);
+         and then Total_Ok >= Total_Started - Total_Failed);
+
+      procedure Set_Session_Count (Count : Natural) is
+      begin
+         Session_Count := Count;
+      end Set_Session_Count;
+
+      procedure Session_Goal (Count : out Natural) is
+      begin
+         Count := Session_Count;
+      end Session_Goal;
 
       procedure Read
         (N_Started    : out Natural;
@@ -109,27 +171,42 @@ package body Echo_Client_App with SPARK_Mode => On is
         (if Host'Length > Max_Host then Max_Host else Host'Length);
    begin
       for I in 1 .. Length loop
-         Host_Chars (I) := Host (Host'First + I - 1);
+         pragma Loop_Invariant (Length <= Host'Length);
+         Host_Chars (I) := Host (Host'First + (I - 1));
       end loop;
       Host_Length   := Length;
       Server_Port   := Port;
-      Session_Count := Connections;
       Round_Count   := Rounds;
+      Stats.Set_Session_Count (Connections);
    end Configure;
 
-   function Host_String return String is
+   --  A procedure rather than a function returning String, because SPARK
+   --  forbids a function from reading a volatile object at all (E0005)
+   --  and Host_Chars is one.  The caller supplies the buffer, which also
+   --  keeps the whole thing on the fiber's own stack.
+   procedure Host_String (Result : out String; Last : out Natural)
+     with Pre => Result'First = 1 and then Result'Length >= Max_Host
+   is
       Length : constant Natural := Host_Length;
-      Result : String (1 .. Length);
    begin
-      for I in 1 .. Length loop
+      Result := [others => ' '];
+      Last   := (if Length > Max_Host then Max_Host else Length);
+      for I in 1 .. Last loop
          Result (I) := Host_Chars (I);
       end loop;
-      return Result;
    end Host_String;
 
    ---------------------------------------------------------------------------
    --  Session -- one whole conversation
    ---------------------------------------------------------------------------
+
+   --  Declared ahead of its body so the Iour.Fibers.Job instance below can
+   --  name it.  A generic actual has to be declared before the
+   --  instantiation, and the instance has to be at library level because
+   --  it registers from its own elaboration.
+   procedure Session (Arg : Fiber_Argument);
+
+   package Session_Job is new Iour.Fibers.Job (Work => Session);
 
    procedure Session (Arg : Fiber_Argument) is
       Rounds : constant Natural := Round_Count;
@@ -142,6 +219,14 @@ package body Echo_Client_App with SPARK_Mode => On is
       Opened   : Io_Result;
       Sock     : Net.Socket;
       Status   : Io_Result;
+
+      --  The server's address, copied out of the shared, Atomic store
+      --  onto this fiber's own stack.  A volatile object may not be an
+      --  actual parameter (SPARK RM 7.1.3(9)), so Server_Port comes the
+      --  same way.
+      Host_Buf : String (1 .. Max_Host);
+      Host_Len : Natural;
+      Port     : Natural;
       Kind     : Message_Kind;
       Sequence : Natural;
 
@@ -161,7 +246,9 @@ package body Echo_Client_App with SPARK_Mode => On is
 
       --  Suspends here, and at every I/O below.  Meanwhile this core is
       --  driving other sessions.
-      Net.Connect (Sock, Host_String, Server_Port, Status);
+      Host_String (Host_Buf, Host_Len);
+      Port := Server_Port;
+      Net.Connect (Sock, Host_Buf (1 .. Host_Len), Port, Status);
       if Failed (Status) then
          Net.Close (Sock, Status);
          Stats.Finished_One (0, False, False);
@@ -209,14 +296,16 @@ package body Echo_Client_App with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    procedure Driver (Arg : Fiber_Argument) is
-      Total  : constant Natural := Session_Count;
-      Handle : Future_Ref;
+      Total    : Natural;
+      Handle   : Future_Ref;
+      Finished : Boolean;
    begin
       pragma Unreferenced (Arg);
+      Stats.Session_Goal (Total);
 
       for I in 1 .. Total loop
          loop
-            Fibers.Spawn (Session'Access, Fiber_Argument (I), Handle);
+            Session_Job.Spawn (Fiber_Argument (I), Handle);
             exit when Handle /= No_Future;
 
             --  The runtime is momentarily at capacity.  Sleep this fiber --
@@ -228,7 +317,13 @@ package body Echo_Client_App with SPARK_Mode => On is
       --  Wait by sleeping rather than by queueing on a protected entry: an
       --  entry call from a fiber would block the whole shard, stopping
       --  every other session running on this core.
-      while not Stats.All_Finished loop
+      --
+      --  Done through a local because a protected function is a volatile
+      --  function, and SPARK RM 7.1.3(9) allows a call to one only as the
+      --  whole right-hand side of an assignment.
+      loop
+         Finished := Stats.All_Finished;
+         exit when Finished;
          Iour.Time.Sleep_Milliseconds (1);
       end loop;
 
@@ -236,6 +331,11 @@ package body Echo_Client_App with SPARK_Mode => On is
    end Driver;
 
    ---------------------------------------------------------------------------
+
+   procedure Start_Driver (Handle : out Future_Ref) is
+   begin
+      Driver_Job.Spawn (0, Handle);
+   end Start_Driver;
 
    procedure Snapshot
      (Started    : out Natural;

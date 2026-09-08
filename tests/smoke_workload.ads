@@ -26,14 +26,25 @@ package Smoke_Workload with SPARK_Mode => On is
    --  Fans out the workers, waits for them, then stops the runtime.
    procedure Root (Arg : Fiber_Argument);
 
+   --  Start Root as a fiber.  The Iour.Fibers.Job instance it needs must
+   --  be at library level, so it lives in this package's body.
+   procedure Start_Root (Handle : out Future_Ref);
+
    --  A promise the environment task fulfils, to prove a wake posted from a
    --  thread with no ring reaches its fiber.  Set by Root before it awaits.
    procedure Handshake (Handle : out Future_Ref);
 
    --  How many workers finished, and how they were spread over the shards.
+   --  Spread'First = 1 rather than any lower bound: the arithmetic below
+   --  walks a cursor through it, and a String whose 'First is Natural'First
+   --  makes "Spread'First - 1" and "Cursor + Length - 1" unprovable rather
+   --  than merely awkward.  Every caller passes a 1-based buffer.
    procedure Result
      (Finished : out Natural;
       Spread   : out String;
-      Last     : out Natural);
+      Last     : out Natural)
+     with Pre  => Spread'First = 1
+                  and then Spread'Last in 1 .. Natural'Last - 1,
+          Post => Last <= Spread'Last;
 
 end Smoke_Workload;

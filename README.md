@@ -514,6 +514,97 @@ a binary whose assembly and whose proof had drifted apart refuses to run
 rather than switching contexts wrongly. `make smoke` reports it, and names the
 character where a divergence begins.
 
+### Spawning from SPARK, and why it is a number rather than a pointer
+
+A fiber body reaches the runtime by instantiating a generic, not by handing
+over a subprogram pointer:
+
+```ada
+procedure Serve (Arg : Fiber_Argument);
+package Serve_Job is new Iour.Fibers.Job (Work => Serve);
+...
+Serve_Job.Spawn_Here (Fiber_Argument (Conn), Started);
+```
+
+That shape is forced, and the reason is worth knowing before reaching for
+`'Access`. SPARK gives an access-to-subprogram type an implicit
+`Global => null` and then allows `'Access` only on a subprogram that meets
+it. A fiber body that does any I/O has global effects by definition, so
+`Spawn (Handler'Access, ...)` is **rejected outright** —
+
+```
+error: access to subprogram with global effects is not allowed in SPARK
+```
+
+— and a runtime whose spawn takes a pointer cannot be called from SPARK at
+all, for the one thing it exists to do. So `Spawn`, `Spawn_Here` and
+`Spawn_On` take a `Job_Id`: a small integer into a table, the same shape as
+every other handle here. The one `'Access` in the whole runtime lives in the
+private part of `Iour.Fibers.Job`, and that private part is the only
+`SPARK_Mode => Off` a consumer's code is ever anywhere near.
+
+`make prove-consumers` is what keeps this true. It proves the echo server,
+the echo client, `smoke` and `multi_await` — all four `SPARK_Mode => On`,
+and none of them covered by `make prove`, which sees only the library.
+`CLAUDE.md` has the full account, including the three Ada rules that shape
+the generic.
+
+## Deadlock and data races: what is proved, and what is not
+
+"Written in SPARK" is often taken to mean "proved concurrency-safe". Here is
+what that actually amounts to.
+
+**Data-race freedom is checked.** SPARK's concurrency rules are legality
+rules — reported by `gnatprove --mode=check_all` and by flow analysis rather
+than as unproved checks — and what they establish is that no unsynchronized
+object is reachable from two tasks. Everything shared in this runtime is a
+protected object, an `Atomic` scalar (one per shard, through
+`Iour.Per_Shard` — an array with `Atomic_Components` is *not* itself a
+synchronized object, which is why that package holds `Max_Shards` separate
+scalars), or a `Synchronous` state abstraction made of those.
+
+**Deadlock freedom is structural rather than proved.** SPARK establishes no
+liveness property at all. What holds here is a consequence of the code's
+shape, and it rests on four premises, each cheap to re-check:
+
+1. **No protected body calls anything outside itself.** True of all eight —
+   the fiber banks, the ready cells, the job registry, the future banks, the
+   run queue, the scheduler's control block, the parking barrier and the
+   Linux reactor's ring cell. No nested protected call means no
+   lock-acquisition cycle, and it also makes "no potentially blocking
+   operation inside a protected action" true trivially rather than by
+   inspection. This is the property to preserve; nothing in the language
+   warns when it breaks.
+2. **One priority in the partition.** Every task runs at `Runtime_Priority`
+   and every protected object declares it as its ceiling, so under Jorvik's
+   ceiling locking there is no ceiling violation possible and no priority
+   inversion to invert.
+3. **Three entries, all pure barriers.** Two are monotone counters that
+   every shard advances exactly once on every path, including the path where
+   its ring failed to open — which is why that path counts itself in and out
+   rather than simply returning.
+4. **One barrier never opens, deliberately**: a surplus or finished shard
+   parks there for good, because Jorvik forbids a task body to run off its
+   end.
+
+**What neither covers: fibers.** SPARK's concurrency reasoning is about Ada
+tasks. A fiber body is reached through the assembly trampoline, so nothing
+in SPARK's call graph connects it to a shard task, and gnatprove analyses
+the fiber entry point as a subprogram nothing calls. The consequence is
+precise and it is a consumer's to act on: **state shared between fiber
+bodies is not checked for races.** Fibers on one shard cannot preempt each
+other — they switch only at explicit suspension points — so sharing within a
+shard is safe by construction. Fibers on different shards genuinely race,
+and a program that shares state between them has to synchronize it itself,
+the same way the runtime does.
+
+Two smaller gaps belong beside that one. `Ffi.Identity`'s body is `Off`
+because SPARK ignores `pragma Thread_Local_Storage` and would model one
+per-thread slot as one shared variable — so shard identity, the fact the
+whole shared-nothing design rests on, is asserted rather than verified. And
+`Iour.Ffi.Fiber.Switch` carries `Always_Terminates`, which its own comment
+admits is false for a finished fiber's last switch.
+
 ## SPARK status
 
 Every unit is `SPARK_Mode => On` except the platform boundary, which is the
@@ -527,6 +618,8 @@ trusted base by design:
 | `Iour.Ffi.Identity` | one thread-local: which shard this thread is | per-thread state SPARK has no model for |
 | `Iour.Ffi.Win32` body (Windows) | the two lazily resolved Winsock extension pointers | `Unchecked_Conversion` to access-to-subprogram |
 | `Iour.Reactor` (Windows) | the completion-port engine | overlays records on completion-port pointers, and is re-entered from thread-pool threads |
+| `Iour.Fibers.Job` (the generic) | one `'Access` per registered fiber body, and the wrappers around it | SPARK forbids `'Access` of a subprogram with global effects, and a fiber body has them |
+| `Iour.Fibers.Invoke`'s body | the one indirect call, from job number to fiber body | SPARK models a call through an access-to-subprogram as touching nothing |
 
 `Iour.Ffi.Fiber` is the one of these that has a proved companion rather than
 only a proved spec: `Iour.Ffi.Fiber.Machine` states what the assembly is meant
@@ -570,16 +663,16 @@ different Win32 mechanisms.
 included:
 
 ```
-Success: all checks proved (1196 checks).
+Success: all checks proved (1217 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
-Data Dependencies            131        129          .           2          .
+Data Dependencies            139        137          .           2          .
 Flow Dependencies             23         23          .           .          .
-Initialization               346        346          .           .          .
-Run-time Checks              392          .        392           .          .
-Assertions                    50          .         50           .          .
-Functional Contracts         125          .        125           .          .
-Termination                   94         90          4           .          .
+Initialization               354        354          .           .          .
+Run-time Checks              412          .        412           .          .
+Assertions                    52          .         52           .          .
+Functional Contracts         136          .        136           .          .
+Termination                  101         97          4           .          .
 ```
 
 The same command with `-XIOUR_OS=Windows_NT` proves the other backend, from
@@ -588,19 +681,33 @@ configurations share it, and a run that inherits the other one's session
 reports a check count several higher than a clean run does.
 
 ```
-Success: all checks proved (1017 checks).
+Success: all checks proved (1037 checks).
 
 SPARK Analysis results     Total       Flow    Provers   Justified   Unproved
-Data Dependencies             78         77          .           1          .
+Data Dependencies             87         86          .           1          .
 Flow Dependencies              9          9          .           .          .
-Initialization               230        230          .           .          .
-Run-time Checks              435          .        435           .          .
-Assertions                    47          .         47           .          .
-Functional Contracts         106          .        106           .          .
-Termination                   69         66          3           .          .
+Initialization               238        238          .           .          .
+Run-time Checks              459          .        459           .          .
+Assertions                    49          .         49           .          .
+Functional Contracts         118          .        118           .          .
+Termination                   77         74          3           .          .
 ```
 
-Zero unproved, zero warnings, zero data races, zero C.
+**`make prove-consumers`** — the same treatment for the programs that *use*
+the library, which is a different question and was never asked until now:
+
+```
+Success: all checks proved (1343 checks).
+```
+
+That covers the echo server, the echo client, `smoke` and `multi_await`,
+every one of them `SPARK_Mode => On`. The first time it ran it found eight
+legality errors, three of them the same one: no SPARK program could spawn a
+fiber. See *Spawning from SPARK* above.
+
+Zero unproved, zero warnings, zero C — and no data race that SPARK's rules
+can see, which is a narrower claim than "no data race" and is spelled out in
+*Deadlock and data races* above.
 
 Every justified check is the same one, and it is a consequence of having two
 backends behind one spec. `Ffi.Net.Initialize` and `Ffi.Sys.Bind_To_Cpu` both
@@ -718,7 +825,7 @@ protected body instead.
 
 ## Rules for code built on this runtime
 
-Three constraints are real, and two of them come from Jorvik rather than from
+Six constraints are real, and two of them come from Jorvik rather than from
 this design.
 
 **Buffers must outlive the call.** Anything handed to `Receive`, `Send` or
@@ -748,11 +855,27 @@ call from anywhere.
 
 **Fiber bodies and shared state live at library level.** Jorvik's
 `No_Local_Protected_Objects` puts protected objects at library level, and a
-fiber body is passed as an access-to-subprogram value, so a nested procedure is
-"deeper than the access type" and Ada will not let you take its access.
-Application code is therefore written as library-level packages, with the main
-subprogram reduced to starting the runtime and reporting. The examples show the
-shape.
+job registers itself when its `Iour.Fibers.Job` instance elaborates, so the
+instance has to be at library level too -- one that came and went with a
+stack frame would leave a dangling entry behind. Application code is
+therefore written as library-level packages, with the main subprogram
+reduced to starting the runtime and reporting. A main procedure's
+declarative part is not library level, so a program that wants to spawn from
+`main` puts the instance in a package body and exports a wrapper;
+`Echo_Server_App.Start_Acceptor` is that shape.
+
+**State shared between fibers on different shards must synchronize itself.**
+This is the one obligation SPARK will not remind you of. Two fibers on the
+*same* shard cannot preempt each other — they switch only where the code
+says `Await`, `Yield` or an I/O call — so sharing within a shard is safe by
+construction, and `Echo_Server_App.Next_Core` is a plain variable for
+exactly that reason. Two fibers on *different* shards are two Ada tasks and
+genuinely race. But gnatprove cannot see it either way: a fiber body is
+reached through the assembly trampoline, so nothing connects it to a task in
+SPARK's call graph, and the rules that would catch an unsynchronized shared
+variable never fire on it. Use a protected object, or an `Atomic` scalar, or
+a promise — the same three things the runtime uses. See *Deadlock and data
+races* above.
 
 One more, for main programs: a Jorvik partition never ends on its own. The
 environment task would block forever waiting on tasks that are not allowed to
@@ -767,9 +890,11 @@ primitive for fibers, and the reason a fiber never has to queue on a protected
 entry.
 
 ```ada
+package Worker_Job is new Iour.Fibers.Job (Work => Worker);
+...
 Done : Future_Ref;
 Iour.Promises.Create (Done);
-Iour.Fibers.Spawn (Worker'Access, Fiber_Argument (Done), Handle);
+Worker_Job.Spawn (Fiber_Argument (Done), Handle);
 Iour.Promises.Await (Done, Result);           --  this fiber sleeps alone
 
 --  in Worker, when finished:

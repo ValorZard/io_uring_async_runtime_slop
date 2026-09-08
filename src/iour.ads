@@ -266,6 +266,33 @@ package Iour with SPARK_Mode => On is
    --  Callers pass a descriptor, or an index into their own table.
    type Fiber_Argument is new Integer;
 
-   type Fiber_Body is access procedure (Arg : Fiber_Argument);
+   --  A fiber body is named by a job number, not by a subprogram pointer,
+   --  and the reason is SPARK rather than taste.
+   --
+   --  SPARK gives an access-to-subprogram type an implicit Global of null
+   --  and then refuses 'Access of any subprogram that has global effects
+   --  at all -- "access to subprogram with global effects is not allowed
+   --  in SPARK".  A fiber body that does any I/O has global effects by
+   --  definition, so a SPARK consumer could not name one: the old
+   --
+   --     Fibers.Spawn (Handler'Access, Arg, H);
+   --
+   --  is rejected outright, which made the whole runtime unusable from
+   --  SPARK for the one thing it exists to do.  Worse, it was silent from
+   --  inside: the library's own proof read Work.all as touching nothing,
+   --  so everything above it was verified against a fiber body that does
+   --  nothing at all.
+   --
+   --  So a job is registered once, by instantiating Iour.Fibers.Job with
+   --  an ordinary procedure, and spawned by number afterwards.  The single
+   --  'Access lives inside that generic's private part, which is the one
+   --  place in this runtime that has to be outside SPARK for it, and the
+   --  one indirect call lives in Iour.Fibers.Invoke.  Consumers hold a
+   --  scalar, which is what every other handle in this runtime is.
+   Max_Jobs : constant := 64;
+
+   type Job_Ref is range -1 .. Max_Jobs - 1;
+   subtype Job_Id is Job_Ref range 0 .. Max_Jobs - 1;
+   No_Job : constant Job_Ref := -1;
 
 end Iour;

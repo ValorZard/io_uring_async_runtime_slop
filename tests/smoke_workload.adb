@@ -1,5 +1,6 @@
 with Interfaces; use Interfaces;
 with Iour.Fibers;
+with Iour.Fibers.Job;
 with Iour.Futures;
 with Iour.Reactor;
 with Iour.Scheduler;
@@ -12,6 +13,13 @@ package body Smoke_Workload with SPARK_Mode => On is
    package Futures renames Iour.Futures;
    package Reactor renames Iour.Reactor;
    package Scheduler renames Iour.Scheduler;
+
+   --  The jobs this workload spawns.  Worker and Root are declared in the
+   --  spec, so the instances can stand here; an Iour.Fibers.Job instance
+   --  has to be at library level because it registers from its own
+   --  elaboration.
+   package Worker_Job is new Iour.Fibers.Job (Work => Worker);
+   package Root_Job   is new Iour.Fibers.Job (Work => Root);
 
    type Run_Counts is array (Shard_Id) of Natural;
 
@@ -32,16 +40,28 @@ package body Smoke_Workload with SPARK_Mode => On is
 
    protected body Tally is
 
+      --  Saturating, so the arithmetic is total and therefore provable.
+      --  Declared inside the protected body rather than beside it because
+      --  no protected body in this program calls anything outside itself;
+      --  see *What SPARK proves about deadlock and data races* in
+      --  CLAUDE.md.
+      procedure Bump (Counter : in out Natural) is
+      begin
+         if Counter < Natural'Last then
+            Counter := Counter + 1;
+         end if;
+      end Bump;
+
       procedure Record_Run (Shard : Shard_Ref) is
       begin
          if Shard in Shard_Id then
-            Runs (Shard) := Runs (Shard) + 1;
+            Bump (Runs (Shard));
          end if;
       end Record_Run;
 
       procedure Finished is
       begin
-         Completed := Completed + 1;
+         Bump (Completed);
       end Finished;
 
       function All_Done return Boolean is (Completed = Worker_Count);
@@ -108,7 +128,12 @@ package body Smoke_Workload with SPARK_Mode => On is
 
       Tally.Finished;
       Tally.Read (Done, Runs);
-      if Done = Worker_Count and then Arg >= 0 then
+      --  Arg carries the promise handle back through the trampoline, so
+      --  both ends of its range are checked here rather than assumed.
+      if Done = Worker_Count
+        and then Arg in Fiber_Argument (Future_Id'First)
+                     .. Fiber_Argument (Future_Id'Last)
+      then
          --  Last one out wakes the root, wherever its shard is.
          Iour.Text.Put_Line ("  worker on shard" & Shard'Image
                              & " is last; fulfilling the promise");
@@ -135,7 +160,7 @@ package body Smoke_Workload with SPARK_Mode => On is
       end if;
 
       for I in 1 .. Worker_Count loop
-         Fibers.Spawn (Worker'Access, Fiber_Argument (All_Done), Handle);
+         Worker_Job.Spawn (Fiber_Argument (All_Done), Handle);
       end loop;
 
       Iour.Promises.Await (All_Done, Value);
@@ -166,23 +191,38 @@ package body Smoke_Workload with SPARK_Mode => On is
       Last     : out Natural)
    is
       Runs   : Run_Counts;
-      Cursor : Natural := Spread'First;
+
+      --  Where the next piece goes.  Bounded by the buffer's last index
+      --  plus one, which is the "buffer full" position: the subtype is
+      --  what discharges the arithmetic below rather than a proof about
+      --  the loop, and Spread'First = 1 is the precondition that makes the
+      --  bound expressible at all.
+      Cursor : Natural range 1 .. Spread'Last + 1 := 1;
    begin
       Spread := [others => ' '];
       Tally.Read (Finished, Runs);
-      Last := Spread'First - 1;
+      Last := 0;
 
       for S in Active_Shard loop
+         pragma Loop_Invariant (Last <= Spread'Last);
          declare
             Piece : constant String :=
               " shard" & S'Image & ":" & Runs (S)'Image;
          begin
-            exit when Cursor + Piece'Length - 1 > Spread'Last;
+            --  Written as a subtraction rather than "Cursor + Length - 1 >
+            --  Spread'Last", so nothing is added before it has been shown
+            --  to fit.
+            exit when Piece'Length > Spread'Last - Cursor + 1;
             Spread (Cursor .. Cursor + Piece'Length - 1) := Piece;
             Cursor := Cursor + Piece'Length;
             Last := Cursor - 1;
          end;
       end loop;
    end Result;
+
+   procedure Start_Root (Handle : out Future_Ref) is
+   begin
+      Root_Job.Spawn (0, Handle);
+   end Start_Root;
 
 end Smoke_Workload;

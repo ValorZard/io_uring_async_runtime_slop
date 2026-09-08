@@ -1,12 +1,16 @@
 with Echo_Protocol;   use Echo_Protocol;
-with Iour.Fibers;
+with Iour.Fibers.Job;
 with Iour.Net;
 with Iour.Scheduler;
 
 package body Echo_Server_App with SPARK_Mode => On is
 
-   package Fibers renames Iour.Fibers;
    package Net renames Iour.Net;
+
+   --  Acceptor is declared in the spec, so its job instance can stand
+   --  here.  Serve's is further down, after the forward declaration it
+   --  needs.
+   package Acceptor_Job is new Iour.Fibers.Job (Work => Acceptor);
 
    --  Set once by the environment task before any shard runs, read by many
    --  fibers afterwards.  Atomic so the sharing is declared, not assumed.
@@ -16,11 +20,20 @@ package body Echo_Server_App with SPARK_Mode => On is
      with Atomic_Components;
 
    Listeners : Listener_Table := [others => Invalid_Descriptor];
-   Goal      : Natural := 0 with Atomic;
 
    --  Whether an acceptor deals its connections round the cores instead of
    --  keeping them.  Set before any shard runs, read by acceptors after.
-   Distribute : Boolean := False with Atomic;
+   --
+   --  The external properties are spelled out rather than defaulted, and
+   --  they say what this is: written by one thread and read by others,
+   --  Atomic for the synchronisation.  Defaulted, Atomic means External
+   --  with all four True, which forbids reading one from a function
+   --  (E0005) and inside a larger expression (E0004); SPARK RM 7.1.2(6)
+   --  requires at least one of the two Async properties, so it is
+   --  Async_Writers alone.  Iour.Trace's Enabled flag is the same shape.
+   Distribute : Boolean := False
+     with Atomic, Async_Writers => True, Async_Readers => False,
+          Effective_Reads => False, Effective_Writes => False;
 
    --  Where the next dealt connection goes.  Shared by every acceptor
    --  fiber, and a plain variable on purpose: it is read and written only
@@ -51,7 +64,16 @@ package body Echo_Server_App with SPARK_Mode => On is
          N_Errors     : out Natural;
          N_Concurrent : out Natural);
       function Accept_Limit_Reached return Boolean;
+      --  The connection target, set once by Configure before any shard
+      --  runs.  It lives here rather than in an Atomic variable beside
+      --  Listeners because the only things that read it are the two
+      --  operations just above: SPARK forbids a function from reading a
+      --  volatile object at all (E0005), and protected state is both the
+      --  simpler answer and the one that says what is true -- this is
+      --  read under the same lock as the counters it is compared with.
+      procedure Set_Goal (Target : Natural);
    private
+      Goal            : Natural := 0;
       Total_Accepted  : Natural := 0;
       Total_Completed : Natural := 0;
       Total_Rejected  : Natural := 0;
@@ -63,10 +85,30 @@ package body Echo_Server_App with SPARK_Mode => On is
 
    protected body Stats is
 
+      --  Statistics only, and a server runs for as long as the process
+      --  does, so an unguarded counter really would wrap.  Saturating
+      --  keeps the arithmetic total -- which is what makes it provable --
+      --  without pretending the number stays exact for ever.
+      --  Iour.Scheduler counts the same way, for the same reason.
+      --
+      --  Declared here rather than beside the package's other helpers on
+      --  purpose: no protected body in this program calls anything outside
+      --  itself, which is what makes the absence of nested protected calls
+      --  -- and so of lock cycles -- checkable by reading one screen.  See
+      --  *What SPARK proves about deadlock and data races* in CLAUDE.md.
+      procedure Bump (Counter : in out Natural; By : Natural := 1) is
+      begin
+         if Natural'Last - Counter >= By then
+            Counter := Counter + By;
+         else
+            Counter := Natural'Last;
+         end if;
+      end Bump;
+
       procedure Accepted_One is
       begin
-         Total_Accepted := Total_Accepted + 1;
-         Live := Live + 1;
+         Bump (Total_Accepted);
+         Bump (Live);
          if Live > Peak_Live then
             Peak_Live := Live;
          end if;
@@ -74,7 +116,7 @@ package body Echo_Server_App with SPARK_Mode => On is
 
       procedure Rejected_One is
       begin
-         Total_Rejected := Total_Rejected + 1;
+         Bump (Total_Rejected);
          if Live > 0 then
             Live := Live - 1;
          end if;
@@ -83,10 +125,10 @@ package body Echo_Server_App with SPARK_Mode => On is
       procedure Completed_One
         (Frames : Natural; Failed : Boolean; Last : out Boolean) is
       begin
-         Total_Completed := Total_Completed + 1;
-         Total_Frames := Total_Frames + Frames;
+         Bump (Total_Completed);
+         Bump (Total_Frames, Frames);
          if Failed then
-            Total_Errors := Total_Errors + 1;
+            Bump (Total_Errors);
          end if;
          if Live > 0 then
             Live := Live - 1;
@@ -96,6 +138,11 @@ package body Echo_Server_App with SPARK_Mode => On is
 
       function Accept_Limit_Reached return Boolean is
         (Goal > 0 and then Total_Accepted >= Goal);
+
+      procedure Set_Goal (Target : Natural) is
+      begin
+         Goal := Target;
+      end Set_Goal;
 
       procedure Read
         (N_Accepted   : out Natural;
@@ -126,7 +173,7 @@ package body Echo_Server_App with SPARK_Mode => On is
       Spread   : Boolean := False) is
    begin
       Listeners (Shard) := Listener;
-      Goal := Target;
+      Stats.Set_Goal (Target);
       Distribute := Spread;
    end Configure;
 
@@ -154,9 +201,17 @@ package body Echo_Server_App with SPARK_Mode => On is
    procedure Stop_Listening is
    begin
       for S in Active_Shard loop
-         if Listeners (S) /= Invalid_Descriptor then
-            Stop_One (Listeners (S));
-         end if;
+         --  Read into a local before testing it: SPARK RM 7.1.3(9) lets a
+         --  volatile object appear as the whole right-hand side of an
+         --  assignment and nowhere else, so it cannot be the operand of a
+         --  comparison or an actual parameter.
+         declare
+            Listener : constant Descriptor := Listeners (S);
+         begin
+            if Listener /= Invalid_Descriptor then
+               Stop_One (Listener);
+            end if;
+         end;
       end loop;
    end Stop_Listening;
 
@@ -167,6 +222,13 @@ package body Echo_Server_App with SPARK_Mode => On is
    --  Reads as a blocking conversation, and is not one.  Each Receive_Exact
    --  and Send_All below suspends this fiber and hands the core to another
    --  connection until the kernel has the answer.
+   --  Declared ahead of its body so the Iour.Fibers.Job instance below can
+   --  name it; see Echo_Client_App for why the instance is at library
+   --  level.
+   procedure Serve (Arg : Fiber_Argument);
+
+   package Serve_Job is new Iour.Fibers.Job (Work => Serve);
+
    procedure Serve (Arg : Fiber_Argument) is
       Conn : constant Net.Socket := Net.Socket (Arg);
 
@@ -248,12 +310,36 @@ package body Echo_Server_App with SPARK_Mode => On is
    end Advance_Core;
 
    procedure Acceptor (Arg : Fiber_Argument) is
-      Listener : constant Net.Socket := Net.Socket (Arg);
+      --  Arg arrives through the context switch's trampoline, so this is
+      --  the one boundary where the language has not carried its range.
+      --  Checked rather than converted blindly; Serve does not need the
+      --  same guard only because it is always called with a descriptor
+      --  that an accept has just returned.
+      Listener : Net.Socket;
       Incoming : Io_Result;
       Started  : Boolean;
+
+      --  Distribute read into a local before it is tested; see
+      --  Stop_Listening for why a volatile object cannot be a condition.
+      Dealing  : Boolean;
+
+      --  The same, for the protected function that says when the target
+      --  has been met.
+      Enough   : Boolean;
    begin
+      if Arg not in Fiber_Argument (Net.Socket'First)
+                 .. Fiber_Argument (Net.Socket'Last)
+      then
+         return;
+      end if;
+      Listener := Net.Socket (Arg);
+
       loop
-         exit when Stats.Accept_Limit_Reached;
+         --  A protected function is a volatile function, and SPARK RM
+         --  7.1.3(9) allows a call to one only as the whole right-hand
+         --  side of an assignment -- not as an exit condition.
+         Enough := Stats.Accept_Limit_Reached;
+         exit when Enough;
 
          Net.Accept_Connection (Listener, Incoming);
 
@@ -264,23 +350,22 @@ package body Echo_Server_App with SPARK_Mode => On is
          else
             Stats.Accepted_One;
 
-            if Distribute then
+            Dealing := Distribute;
+            if Dealing then
                --  One acceptor for the whole server, so the connections
                --  have to be dealt out or every other core sits idle.
                --  Spawn_On rather than Spawn: it names the core, and it
                --  needs no future, which matters for a fiber that nothing
                --  will ever await.
-               Fibers.Spawn_On
-                 (Next_Core, Serve'Access, Fiber_Argument (Incoming),
-                  Started);
+               Serve_Job.Spawn_On
+                 (Next_Core, Fiber_Argument (Incoming), Started);
                Advance_Core;
             else
                --  Run the handler on this core.  The socket was accepted
                --  here, so its reads and writes will go through this
                --  core's ring; sending it elsewhere would only mean
                --  another core doing the same work with a colder cache.
-               Fibers.Spawn_Here
-                 (Serve'Access, Fiber_Argument (Incoming), Started);
+               Serve_Job.Spawn_Here (Fiber_Argument (Incoming), Started);
             end if;
 
             if not Started then
@@ -294,6 +379,12 @@ package body Echo_Server_App with SPARK_Mode => On is
    end Acceptor;
 
    ---------------------------------------------------------------------------
+
+   procedure Start_Acceptor
+     (Shard : Active_Shard; Listener : Descriptor; Started : out Boolean) is
+   begin
+      Acceptor_Job.Spawn_On (Shard, Fiber_Argument (Listener), Started);
+   end Start_Acceptor;
 
    procedure Snapshot
      (Accepted   : out Natural;

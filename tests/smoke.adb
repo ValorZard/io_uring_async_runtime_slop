@@ -27,6 +27,18 @@ with Iour.Trace;
 
 procedure Smoke with SPARK_Mode => On, CPU => 1 is
 
+   --  Every path here ends in Exit_Process, which is No_Return, so
+   --  gnatprove reports that this procedure never returns normally.  That
+   --  is the design and not a defect: a Jorvik partition never ends on its
+   --  own, because the environment task would block forever waiting on
+   --  tasks that No_Task_Termination forbids to terminate.  Exiting the
+   --  process is how such a program stops, and the README says so.
+   pragma Annotate
+     (GNATprove, Intentional,
+      "all paths",
+      "A Jorvik partition ends by calling Exit_Process; returning from the "
+      & "main subprogram would hang on tasks that may not terminate.");
+
    Handle     : Future_Ref;
    Finished   : Natural;
    Spread     : String (1 .. 240);
@@ -70,7 +82,7 @@ begin
    Fibers.Context_Slots (Slots);
    Put_Line ("smoke: rings up," & Slots'Image & " machine-context slots");
 
-   Fibers.Spawn (Smoke_Workload.Root'Access, 0, Handle);
+   Smoke_Workload.Start_Root (Handle);
    if Handle = No_Future then
       Put_Line ("smoke: FAIL -- could not spawn the root fiber");
       Ffi.Sys.Exit_Process (1);

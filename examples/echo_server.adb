@@ -31,20 +31,54 @@ with Echo_Server_App;
 
 procedure Echo_Server with SPARK_Mode => On, CPU => 1 is
 
+   --  Every path here ends in Exit_Process, which is No_Return, so
+   --  gnatprove reports that this procedure never returns normally.  That
+   --  is the design and not a defect: a Jorvik partition never ends on its
+   --  own, because the environment task would block forever waiting on
+   --  tasks that No_Task_Termination forbids to terminate.  Exiting the
+   --  process is how such a program stops, and the README says so.
+   pragma Annotate
+     (GNATprove, Intentional,
+      "all paths",
+      "A Jorvik partition ends by calling Exit_Process; returning from the "
+      & "main subprogram would hang on tasks that may not terminate.");
+
+   --  Nothing on this command line is a large number, and bounding them
+   --  is what keeps the arithmetic below provable.
+   Max_Argument : constant := 1_000_000;
+
+   --  Hand-rolled rather than Integer'Value, and hand-rolled the same way
+   --  in both example mains.  Integer'Value carries a precondition SPARK
+   --  cannot discharge for an arbitrary command-line string, and the
+   --  exception handler that used to catch its Constraint_Error is not
+   --  something SPARK reasons about either.  Digits and a bound, and the
+   --  whole thing is provable and total.
    function Argument_Or (Index : Positive; Default : Natural) return Natural is
+      Value : Natural := 0;
    begin
       if Argument_Count < Index then
          return Default;
       end if;
       declare
-         Text  : constant String := Argument (Index);
-         Value : Integer;
+         Text : constant String := Argument (Index);
       begin
-         Value := Integer'Value (Text);
-         return (if Value < 0 then Default else Value);
-      exception
-         when others =>
+         if Text'Length = 0 then
             return Default;
+         end if;
+         for I in Text'Range loop
+            pragma Loop_Invariant (Value <= Max_Argument);
+            if Text (I) not in '0' .. '9' then
+               return Default;
+            end if;
+            if Value > (Max_Argument - (Character'Pos (Text (I))
+                                        - Character'Pos ('0'))) / 10
+            then
+               return Default;   --  too large to be meant
+            end if;
+            Value := Value * 10
+                     + (Character'Pos (Text (I)) - Character'Pos ('0'));
+         end loop;
+         return Value;
       end;
    end Argument_Or;
 
@@ -152,11 +186,8 @@ begin
       exit when not Shared_Port and then S /= Active_Shard'First;
 
       for I in 1 .. Echo_Server_App.Concurrent_Acceptors loop
-         Fibers.Spawn_On
-           (S,
-            Echo_Server_App.Acceptor'Access,
-            Fiber_Argument (Listeners (S)),
-            Started);
+         Echo_Server_App.Start_Acceptor
+           (S, Descriptor (Listeners (S)), Started);
 
          if not Started then
             Put_Line ("echo_server: could not start acceptor" & I'Image
