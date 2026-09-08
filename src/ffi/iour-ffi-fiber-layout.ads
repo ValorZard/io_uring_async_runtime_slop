@@ -69,4 +69,34 @@ package Iour.Ffi.Fiber.Layout with SPARK_Mode => On is
                   and then Return_Slot_Offset'Result + 8 + Reserve
                              <= Guard + Usable;
 
+   --  The same question on an ABI that passes the return address in a
+   --  register rather than on the stack, which is why it is a separate
+   --  function rather than a parameter of the one above.
+   --
+   --  Both x86 targets want 8 modulo 16 because a `call` has already
+   --  pushed a return address and the ABI's 16-byte guarantee is measured
+   --  before that push.  AAPCS64 puts the return address in x30 and
+   --  requires the stack pointer to be 16-byte aligned whenever it is
+   --  used to access memory -- the hardware faults otherwise if
+   --  SCTLR_EL1.SA is set -- so a fiber's first stack pointer is 0 modulo
+   --  16 and there is no return slot on the stack to leave room for.
+   --
+   --  The other two conjuncts are the same promises Return_Slot_Offset
+   --  makes: above the guard page, and with the ABI's reserve above it
+   --  still inside the mapping.  AAPCS64 defines no red zone, so its
+   --  Reserve is zero and the third conjunct is slack; it is stated
+   --  anyway so the function does not silently depend on that.
+   function Entry_Sp_Offset
+     (Guard   : Page_Bytes;
+      Usable  : Natural;
+      Reserve : Reserve_Bytes)
+     return Natural
+     with Global => null,
+          Pre  => Usable in 4 * Guard .. Stack_Bytes'Last
+                  and then Guard <= Stack_Bytes'Last - Usable,
+          Post => Entry_Sp_Offset'Result mod 16 = 0
+                  and then Entry_Sp_Offset'Result >= Guard
+                  and then Entry_Sp_Offset'Result + Reserve
+                             <= Guard + Usable;
+
 end Iour.Ffi.Fiber.Layout;

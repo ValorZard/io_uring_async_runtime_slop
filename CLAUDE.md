@@ -20,6 +20,7 @@ make smoke           # runtime self-test, and the context-switch model check
 make multi-await     # await/handover test
 make demo            # traced walkthrough, then 2000 connections
 make check-linux     # compile the Linux backend from anywhere, no codegen
+make check-aarch64   # compile the AArch64 backend from anywhere, no codegen
 make prove           # SPARK proof
 make abi-check       # io_uring UAPI mirrors vs headers    (Linux only)
 make bench           # vs tokio and Go                        (both systems)
@@ -28,6 +29,16 @@ make bench           # vs tokio and Go                        (both systems)
 The project file picks the backend from the `OS` environment variable, which
 Windows sets for every process and no Unix does. Override with
 `-XIOUR_OS=linux` or `-XIOUR_OS=Windows_NT`.
+
+Two more scenario variables, neither of which any environment variable can
+supply:
+
+* `-XIOUR_ARCH=x86_64|aarch64` -- which context switch. Nothing portable
+  exports the machine type, so it defaults to `x86_64` and an AArch64 build
+  asks for itself. Getting it wrong builds nothing subtly wrong: the
+  assembler rejects the other target's instructions.
+* `-XIOUR_SHARDS=1..8` -- how many shards. See *Shards, cores and the
+  build*.
 
 **Always run `make check-linux` before finishing a change to shared code.** It
 compiles the *other* backend without generating code, needs no cross toolchain,
@@ -39,6 +50,22 @@ alr exec -- gprbuild -P examples.gpr -XIOUR_OS=linux --subdirs=crosscheck \
   -j0 -c -f -cargs -gnatc
 ```
 
+The same trick checks the AArch64 backend, and it is the cheap answer to
+"does this compile over there": `-gnatc` is semantic analysis only, so the
+host compiler does it and no cross toolchain is involved. It catches
+everything the language catches, the static-string rule an `Asm` template
+has to meet included. **Run it before finishing any change to shared code,
+the same as `check-linux`.**
+
+```
+alr exec -- gprbuild -P examples.gpr -XIOUR_OS=linux \
+  -XIOUR_ARCH=aarch64 --subdirs=aarch64check -j0 -c -f -cargs -gnatc
+```
+
+What it cannot catch is whether the instruction text *assembles* -- that
+needs a real aarch64 `as`, and so needs the VM. See *Running on AArch64
+under qemu*.
+
 `gnatprove` also runs against the Linux backend from Windows — it generates no
 code either:
 
@@ -46,16 +73,19 @@ code either:
 alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=linux --mode=all --level=3 -j0
 ```
 
-Current state: **Linux 1196 checks proved, 0 unproved, 2 justified; Windows
-1017 proved, 0 unproved, 1 justified.** Every justification is `unused global
+Current state, all measured after deleting `obj/gnatprove`:
+**Linux x86_64 1205 checks proved, 2 justified; Linux AArch64 1240 proved,
+2 justified; Windows 1026 proved, 1 justified. Nothing unproved anywhere.**
+
+Every justification is `unused global
 "Ffi.Kernel"` on a portable spec whose two bodies do different amounts:
 `Ffi.Net.Initialize` and `Ffi.Sys.Bind_To_Cpu` on Linux, which do less than
 Windows, and `Ffi.Sys.Ignore_Broken_Pipe` on Windows, which does less than
 Linux. The contract is the union in each case. Do not "fix" them by narrowing
 it.
 
-**Delete `obj/gnatprove` before quoting a number.** The two configurations
-share it, and a run that inherits the other one's session reports a total
+**Delete `obj/gnatprove` before quoting a number.** The three configurations
+share it, and a run that inherits another one's session reports a total
 several checks higher than a clean run does.
 
 On this machine a whole-configuration `--mode=all --level=3 -j0` run takes
@@ -86,6 +116,8 @@ src/os/linux/       io_uring reactor, raw libc (Ffi.Posix), the mapped rings
 src/os/windows/     completion-port reactor, Win32/Winsock (Ffi.Win32)
 src/arch/x86_64-sysv/    context switch, SysV ABI, and its proved model
 src/arch/x86_64-win64/   context switch, Win64 ABI, and its proved model
+src/arch/aarch64-aapcs64/ context switch, AAPCS64, and its proved model
+src/config/shards-<n>/   one declaration of Iour_Config per shard count
 ```
 
 `Iour.Ffi.Fiber.Machine` is the second per-ABI unit, beside the switch it
@@ -898,6 +930,12 @@ the difference is what makes the whole arrangement possible:
 
 ### Adding a target
 
+There are three targets now -- x86-64 SysV, x86-64 Win64 and AArch64
+AAPCS64 -- and the AArch64 one is the worked example of a target whose
+*mechanism* differs, not just its register file: see *AArch64, the third
+target* before assuming a fourth can be a naked subprogram with an `Asm` in
+it.
+
 The five things a new `Iour.Ffi.Fiber.Machine` must get right, none of which
 are obvious from the interface's profiles:
 
@@ -927,8 +965,23 @@ are obvious from the interface's profiles:
    `with Ghost`; nothing is emitted for a type or a constant either way.
 
 Then instantiate `Iour.Ffi.Fiber.Target`, add the arch directory to
-`io_uring_async_runtime.gpr`, and write the `Asm` body against the same spec
-the other two use.
+`io_uring_async_runtime.gpr` -- under `Host_Arch`, which is what
+`-XIOUR_ARCH` selects -- and write the `Asm` body against the same spec the
+other three use.
+
+Two more things the AArch64 target had to establish that a fourth should
+check before assuming either way:
+
+6. **Does this target have naked subprograms?** x86-64 does; AArch64 does
+   not, and GCC says so only as an ignored-attribute *warning*. If it does
+   not, assemble the function whole inside `.pushsection`/`.popsection` and
+   bind it with `Import`, which keeps the template an Ada constant and so
+   keeps the render check.
+7. **Does the ABI want the entry frame at 8 or 0 modulo 16?** Both x86
+   targets want 8, because a `call` has pushed a return address.  A
+   link-register ABI wants 0 and has no return slot to leave room for;
+   `Layout.Entry_Sp_Offset` is the sibling of `Return_Slot_Offset` for
+   that case.
 
 ### Testing that the interface actually binds
 
@@ -960,6 +1013,14 @@ place named.
 The fourth row is the one that has to be done properly: breaking only the
 body is a test of the *target*, not of the interface, because the target's
 own postcondition catches it first and the interface never gets a chance to.
+
+**Re-run against the AArch64 target (2026-09-08).** Its templates share no
+text with either x86 one, so the character positions are its own. Swapping
+x21's and x22's save displacements gives `switch: MISMATCH at 99` and
+`Emitted_Matches_Model = FALSE`. That was done in the scratch project from
+*The Windows model can be exercised from Linux*, which works in this
+direction too: the AArch64 model depends on nothing AArch64-specific, so it
+can be rendered and checked on Windows without a cross toolchain.
 
 **Re-run against the Win64 target, on Windows (2026-09-07)**, because the
 table above was built on the SysV one and the two templates share no text:
@@ -1049,6 +1110,302 @@ redoing after any change to the template, and it is one command.
   model without a Windows machine, and it is worth redoing after any change
   to the Windows switch or to the portable half -- the answer to look for is
   `switch: MATCHES`.
+
+## AArch64, the third target
+
+`src/arch/aarch64-aapcs64/`, against the same `Iour.Ffi.Fiber` spec as the
+two x86 ones and instantiating the same `Iour.Ffi.Fiber.Target`. Everything
+in *The context switch is proved* applies unchanged; what follows is only
+what is different, and the first item is different enough to have shaped the
+whole file.
+
+### GCC has no naked subprograms here
+
+Both x86 bodies rely on `pragma Machine_Attribute (Swap, "naked")` to make
+the `Asm` template the entire function. **That attribute does not exist on
+AArch64.** GCC accepts it and ignores it:
+
+```
+warning: 'naked' attribute directive ignored [-Wattributes]
+```
+
+Measured on the target with GCC 12.2 and again with 14.2, not read off a
+document. A context switch with a compiler prologue around it is not a
+context switch: the prologue would save x29 and x30 onto the *outgoing*
+fiber's stack and the epilogue restore them from the *incoming* one.
+
+So the two functions are assembled whole, out of one `Asm` block bracketed
+by `.pushsection .text` / `.popsection`, and reached through `Import`:
+
+```ada
+procedure Emit_Switch_Code
+  with Convention => C, Export,
+       External_Name => "iour_aarch64_emit_switch_code";
+```
+
+The bracketing is what makes it safe: everything between the directives goes
+into `.text` as its own symbol and the enclosing subprogram's instruction
+stream is untouched, so it does not matter what GCC emits around it. It is
+`Export`ed and never called -- an exported subprogram cannot be dropped as
+unreferenced, where a local one could, and calling it would buy nothing.
+
+**The point is what survives.** The template is still an Ada constant of
+`Machine`, so `Emitted_Matches_Model` still walks the proved instruction
+sequence and compares it with the string handed to `Asm`, character for
+character. The verification argument is not weakened by the change of
+mechanism; only the wrapper directives are outside the check, and they
+contain no instructions.
+
+Verified on the target before the real file was written: a function defined
+this way out of `add x0, x0, #7` and `ret` returns its argument plus seven --
+which a prologue would have disturbed -- and the next symbol begins exactly
+eight bytes later, so those two instructions are the whole function.
+
+### Two escaping and staticness rules, both of which bite
+
+* **`%` in an Asm template.** GCC reads it as introducing an operand number,
+  so the `%function` a `.type` directive needs is written `%%`. Getting it
+  wrong is a compile error -- "operand number missing after %-letter" -- not
+  silent damage. This is the same doubling `Fiber.Text.Sigil` provides for
+  the x86 register names, needed here for an unrelated reason: AArch64
+  register names carry no sigil, so `Switch_Template` contains no `%` at all.
+
+* **A function call is never static** -- RM 4.9(6,18) -- and GNAT requires an
+  `Asm` template to be static. Building the wrapper with
+  `Head (Swap_Symbol) & ...` is the obvious way to avoid writing it out twice
+  per symbol, and it fails with "asm template argument is not static". The
+  four wrappers are written out as `constant String`s instead. Concatenation
+  of literals and of constants *is* static and folds, which is also what lets
+  `Machine.Switch_Template` live in another package.
+
+### The location set, and why it is 23 locations in 184 bytes
+
+```
+L_Pc  L_Sp  L_X19..L_X28  L_X29  L_X30  L_Fpcr  L_D8..L_D15
+```
+
+All eight bytes wide, so the model is uniform like the SysV one rather than
+four-width like the Win64 one. Four things differ from x86 and each forces
+something:
+
+* **The link register is a location.** x86 pushes a return address and `ret`
+  pops it; AArch64 keeps it in x30 and `ret` branches to it. So x30
+  round-trips like any other callee-saved register, and a resumed fiber
+  returns to *its* caller because its own x30 came back with it. `L_Pc` is
+  still separate and still `Location'First`: the resume label's address,
+  saved and never restored, and the incoming context's copy is the branch
+  that ends the sequence.
+* **The stack pointer is not addressable.** `str sp, [x0, #8]` does not
+  encode -- register 31 reads as the zero register in that position -- so
+  `L_Sp` goes through the scratch register both ways, exactly as the Win64
+  target's TEB fields do. `L_Fpcr` is the same shape because `mrs`/`msr`
+  name a system register, not memory.
+* **Only the low half of v8-v15 is callee-saved.** AAPCS64 obliges a callee
+  to preserve d8-d15, that is bits 0-63, and nothing above. So these are
+  eight-byte slots written with `str d8`, and the context is *smaller* than
+  the Win64 one despite covering more registers.
+* **The tail is four instructions, not three.** AArch64 has no branch
+  through memory, so the jump loads the target first: `ldr x16, [x1, #0]`
+  then `br x16`. `Max_Ops` is 4 here against 3 on both x86 targets.
+
+x16 is the scratch (IP0, which AAPCS64 lets a linker veneer destroy, so no
+caller can expect it to survive). `Fr.State`'s scratch field is named `Rax`
+for the target that was written first; here it stands for x16.
+
+### The one change to the portable half
+
+`Layout.Return_Slot_Offset` promises `mod 16 = 8`, which is an artefact of
+x86: a `call` has pushed a return address and the ABI's 16-byte guarantee is
+measured before that push. AAPCS64 keeps the return address in x30 and wants
+the stack pointer 16-byte aligned whenever it addresses memory -- the
+hardware faults otherwise with `SCTLR_EL1.SA` set -- so this target uses a
+sibling, `Layout.Entry_Sp_Offset`, whose postcondition is `mod 16 = 0` and
+which subtracts no return slot. It is additive; both x86 targets are
+untouched and `Layout` proves at 34 checks under either arch.
+
+`Entry_Reserve` is 0: AAPCS64 defines no red zone, where SysV reserves 128
+bytes and Win64 a 32-byte shadow store. And `Prime` writes nothing to the
+stack at all -- the "nothing ever returns here" sentinel goes in the
+context's x30 slot, which is where AAPCS64 returns through.
+
+### What is proved, and what was checked from Windows
+
+* **210 checks** for `iour-ffi-fiber-machine.adb` alone; **1240 for the whole
+  AArch64 configuration**, 0 unproved. (Linux x86_64 is 1205.) All of it from
+  Windows: the model is ordinary Ada and gnatprove generates no code.
+* **The template matches the model**, also checked from Windows, with the
+  scratch-project technique the Win64 section describes -- copy the portable
+  half plus this target's `Machine` into a throwaway project with a stub
+  `Iour.Ffi.Fiber` body and call `Check_Switch_Text`. It reports
+  `Context_Bytes = 184`, `template length = 964`, `switch: MATCHES`,
+  `trampoline: MATCHES`.
+* **The render check is load-bearing here too**: swapping x21's and x22's
+  save displacements in that scratch copy gives `switch: MISMATCH at 99` and
+  `Emitted_Matches_Model = FALSE`, which is what `Reserve_Contexts` gates a
+  shard's start on.
+
+None of that assembles the text. That took the VM, and it worked first
+time: the library built, `smoke` linked, and the start-up check passed on
+the target.
+
+---
+
+## Shards, cores and the build
+
+### Setting the shard count at build time
+
+`-XIOUR_SHARDS=<n>`, 1 to 8. It cannot be a plain GPR external passed
+through to Ada: `Shard_Count` has to arrive as a **static** constant --
+Jorvik requires each shard task's CPU aspect to be static, `Active_Shard` is
+a subtype bounded by it, and `Compile_Time_Error` checks it against
+`Max_Shards` -- and a GPR external is a string only the project file can
+see. So the project selects a *source directory* instead,
+`src/config/shards-<n>/`, each holding one declaration of `Iour_Config` with
+a different value, and `Iour.Shard_Count` takes it from there. Eight tiny
+files, no preprocessing, no generated source, and the same mechanism that
+already picks the OS and the arch.
+
+### Shards past Shard_Count, and the elaboration trap
+
+`Iour.Shards` declares `Max_Shards` tasks whatever `Shard_Count` is, because
+the profile gives no way to declare a variable number of them. The surplus
+ones disable themselves: `Scheduler.Run` returns immediately for any index
+`>= Shard_Count` and `Serve` then parks the task forever on a barrier that
+never opens. No CPU, no ring, no completions.
+
+**What they cannot opt out of is elaboration.** A task's CPU aspect is
+evaluated when the task is created, which is before any of this runtime's
+own code runs -- before `Scheduler.Run` is reached, so before anything can
+decide the shard is surplus. Asking for a core the machine does not have
+raises `TASKING_ERROR` there and the process dies at start-up. With eight
+declarations that meant **a four-shard build demanded eight cores merely to
+elaborate.**
+
+The fix is to fold the index back into the range actually in use, which
+keeps the expression static as the aspect requires:
+
+```ada
+task Shard_5
+  with CPU => First_Shard_Cpu + (5 mod Shard_Count),
+       Priority => Shard_Priority;
+```
+
+A surplus shard is pinned to a core an active shard already owns and never
+contends for it, because it parks immediately. With `First_Shard_Cpu` now 1
+-- shard 0 shares CPU 1 with the environment task, deliberately -- the
+runtime needs exactly `Shard_Count` cores and no more. It was 2 before, so
+an eight-shard build wanted nine.
+
+**This cannot reproduce on a machine with more cores than `Max_Shards`,**
+which is why it went unnoticed. It was found on an emulated aarch64 guest,
+where the core count is whatever qemu was told to provide. Test a
+shard-count change on a VM sized to `Shard_Count`, not on the workstation.
+
+### An array of shard tasks is rejected, not merely unidiomatic
+
+Worth knowing because it is the obvious way to delete the eight
+declarations, and the comments only said "Jorvik forbids dynamic CPU
+assignment" without saying what happens. Measured:
+
+```ada
+task type Shard_Task (Id : Shard_Id; Core : CPU) with CPU => Core;
+type Shard_Array is array (Shard_Id) of Shard_Task;
+```
+
+```
+error: violation of restriction "No_Dynamic_Cpu_Assignment"
+       from profile "Jorvik"
+error: unconstrained element type in array declaration
+```
+
+A task type carries **one** CPU aspect for every object of it, and threading
+the core through a discriminant is dynamic assignment by definition. An
+array of tasks that all share one core is legal and is not thread-per-core.
+The second error is incidental -- a discriminated task type without defaults
+cannot be an array element -- and defaults would fix it; the first is fatal.
+
+So the eight declarations are the price of static CPU pinning under the
+profile. Deleting them would need conditional compilation or eight copies of
+the task bodies, both worse than four parked tasks.
+
+---
+
+## Running on AArch64 under qemu
+
+Only needed to *run*; `make check-aarch64` and `gnatprove` answer everything
+else from Windows, in seconds. Reach for this when the question is "does the
+assembly assemble" or "does the switch actually switch".
+
+qemu is a scoop install and is **not on PATH** in the Bash tool:
+`C:\Users\sraya\scoop\apps\qemu\current\`. TCG only -- no KVM or WHPX for
+aarch64 on an x86 host -- so builds are slow, but a whole-library build is
+minutes rather than hours.
+
+The harness lives in the session scratchpad, not the repo: a Python driver
+that boots the guest, drives its serial console over a TCP socket, and runs
+a script of shell commands. Source goes in through a **vvfat** drive --
+`-drive file=fat:<dir>,format=raw,if=virtio,readonly=on` exposes a host
+directory as a FAT disk, mounted in the guest at `/dev/vdb1` -- which needs
+no tools on either side. Remember to mount it in *every* script: it does not
+survive a reboot.
+
+**Use Debian 13, not 12.** Debian 12 ships GNAT 12.2, which is older than
+this codebase: `Side_Effects` (GNAT 14) is unknown, so `Stack_Alloc`'s
+`In_Out` global is rejected outright; `Always_Terminates` (GNAT 13) is not a
+valid aspect; and `Ghost` on a generic formal subprogram is rejected in
+`Fiber.Target`. Backports has no newer one -- bookworm carries gnat-11 and
+gnat-12 and nothing else. Debian 13 has gnat-14, which is enough. The host
+is on GNAT 15.2.
+
+**Debian 13's nocloud image cannot be logged into as shipped.** Root has no
+password and its PAM no longer accepts an empty one, where Debian 12's did,
+so the console answers `Login incorrect` for ever. GRUB is reachable on the
+serial console with a five-second timeout: send `c` for its command line,
+then
+
+```
+set root=(hd0,gpt1)
+linux /boot/vmlinuz-<version> root=/dev/vda1 rw init=/bin/bash console=ttyAMA0
+initrd /boot/initrd.img-<version>
+boot
+```
+
+and `chpasswd` at the root shell it drops into. Debian 13 has **no
+`/vmlinuz` symlink**, so the version has to be named; `ls (hd0,gpt1)/boot/`
+at the GRUB prompt gives it. Root is partition 1, the ESP is 15.
+
+**Size the guest to the shard count.** `-smp` must be at least
+`First_Shard_Cpu + Shard_Count - 1`; below that every run dies in
+elaboration with `TASKING_ERROR: CPU not in range` before printing anything
+of its own. That is the whole reason the fold above exists, and a 4-shard
+build now runs on `-smp 4`.
+
+### Harness traps, one run each
+
+* **A readiness marker matches the terminal's echo of the command that
+  produced it.** Sending `echo MARK` and waiting for `MARK` succeeds at a
+  *login prompt*, because the console echoes what you type. The driver then
+  types shell commands at `login:` for a whole run and every exit status
+  reads back as the literal `$?`. Split the marker so the typed text does
+  not contain it: `echo "@@IOUR-""READY@@"`.
+* **GRUB has an `echo` of its own,** so even a split marker cannot tell a
+  GRUB prompt from a Linux shell -- the first version of the password script
+  cheerfully typed `chpasswd` at GRUB and reported success. Probe with
+  `uname -s` and require `Linux` in the answer.
+* **Two qemu processes on one qcow2 corrupt it,** and the second one's
+  failure reads as a console bug -- "could not attach to the serial port" --
+  rather than a collision. Refuse to start if the serial port is bound.
+* **`hostfwd=tcp::2222-:22` fails on Windows** with "could not set up host
+  forwarding rule". Give the host address:
+  `hostfwd=tcp:127.0.0.1:2222-:22`.
+* **`packages.debian.org` returns HTTP 200 for packages that do not exist,**
+  so checking the status code "confirmed" gnat-14 in bookworm-backports,
+  which is not there. Ask the guest's own `apt-cache policy` instead.
+* **`-serial mon:stdio` with piped stdin fails on Windows** with `OSError:
+  [Errno 22]`. Use `-serial tcp:127.0.0.1:<port>,server=on,wait=off` and a
+  socket.
+
+---
 
 ## Ada / GNAT / SPARK things hit in this codebase
 
@@ -1490,6 +1847,11 @@ Ranked by expected payoff:
 3. **Run the harness on Linux.** Nothing has been measured there since the
    port, though it compiles and proves clean. The interesting comparison is
    now the same runtime over io_uring against itself over completion ports.
+
+   Nothing has been *benchmarked* on AArch64 either. `smoke` passes there
+   under emulation, which says the switch is correct and says nothing at all
+   about its cost -- TCG timings are meaningless, and there is no aarch64
+   hardware here.
 4. **The last two Windows `Off` bodies.** See *Windows: what closed the gap,
    and what is left*. `Ffi.Win32`'s spec, `Ffi.Sys` and `Ffi.Net` are `On`;
    what remains is `Ffi.Win32`'s body, which needs a way to resolve an entry

@@ -102,7 +102,14 @@ figure. The same command on either system.
   by a *static* CPU aspect. Jorvik forbids dynamic CPU assignment and task
   hierarchies, so `Iour.Shards` writes out one task declaration per shard
   rather than declaring an array of them. That is what makes the
-  thread-to-core map checkable at compile time.
+  thread-to-core map checkable at compile time. An array is not merely
+  unidiomatic here, it is rejected: a task type carries one CPU aspect for
+  every object of it, and threading the core through a discriminant is a
+  `No_Dynamic_Cpu_Assignment` violation under the profile.
+
+  So `Max_Shards` declarations exist whatever `Shard_Count` is. A shard whose
+  index is `>= Shard_Count` takes no part — see *Shards past `Shard_Count`*
+  under Tuning, which is also where the one thing it cannot opt out of is.
 
 * **Rings and ports.** Each shard owns its completion machinery outright: one
   `io_uring` on Linux, one completion port on Windows. No other task submits
@@ -871,13 +878,13 @@ share a core with a shard.
 
 ## Tuning
 
-Everything is in `src/iour.ads`.
+Everything is in `src/iour.ads` except `Shard_Count`, which the build sets.
 
 | Constant | Default | What it costs |
 |---|---|---|
-| `Shard_Count` | 4 | One pinned thread and one ring each |
+| `Shard_Count` | 4 | One pinned thread and one ring each; set with `-XIOUR_SHARDS=<n>` |
 | `Max_Shards` | 8 | Task declarations in `Iour.Shards` |
-| `First_Shard_Cpu` | 2 | Ada CPU of shard 0; CPU 1 is left to the environment task |
+| `First_Shard_Cpu` | 1 | Ada CPU of shard 0, shared with the environment task |
 | `Max_Futures` | 16384 | Concurrent unresolved futures |
 | `Max_Fibers` | 4096 | Ceiling on concurrent tasks |
 | `Fiber_Stack_Bytes` | 64 KiB | Memory per *live* fiber; stacks are mapped lazily and recycled |
@@ -887,6 +894,50 @@ Everything is in `src/iour.ads`.
 Raising `Shard_Count` above `Max_Shards` is a compile-time error. Adding shards
 past 8 means adding task declarations to `Iour.Shards`, because Jorvik requires
 each CPU to be static.
+
+`Shard_Count` is chosen by the build rather than by editing a source file,
+because it must reach Ada as a *static* constant — the CPU aspects, and the
+`Active_Shard` subtype, both need it at compile time — and a GPR external is a
+string the project file can see and Ada cannot. So the project selects one of
+the `src/config/shards-<n>` directories, each holding one declaration of
+`Iour_Config` with a different value.
+
+### Shards past `Shard_Count`
+
+`Iour.Shards` declares `Max_Shards` tasks however many shards are actually
+wanted, because the profile gives no way to declare a variable number of them.
+The surplus ones **disable themselves**: `Scheduler.Run` returns immediately
+for any index `>= Shard_Count`, and `Serve` then parks the task forever on a
+barrier that never opens. Such a shard burns no CPU, owns no ring, and reaps
+no completions. The park is deliberate rather than a fall-through — Jorvik's
+`No_Task_Termination` makes running off the end of a task body a bounded
+error.
+
+There is one thing a surplus shard cannot opt out of, and it used to bite. A
+task's CPU aspect is elaborated when the task is created, which happens before
+any of this runtime's own code runs — before `Scheduler.Run` is reached and so
+before anything can decide the shard is surplus. Asking for a core the machine
+does not have raises `TASKING_ERROR` there, and the whole process dies at
+start-up. With eight declarations that meant **a four-shard build demanded
+eight cores merely to elaborate**.
+
+So the index is folded back into the range that is actually in use:
+
+```ada
+task Shard_5
+  with CPU => First_Shard_Cpu + (5 mod Shard_Count),
+       Priority => Shard_Priority;
+```
+
+A surplus shard is pinned to a core an active shard already owns, which it
+will never contend for because it parks immediately, and `mod` keeps the
+expression static as the aspect requires. The runtime therefore needs exactly
+`First_Shard_Cpu + Shard_Count - 1` cores to exist — with `First_Shard_Cpu` at
+1, exactly `Shard_Count` of them.
+
+This cannot show up on a machine with more cores than `Max_Shards`, which is
+why it went unnoticed: it was found on an emulated aarch64 guest, where the
+core count is whatever qemu was told to provide.
 
 ## Prior art
 

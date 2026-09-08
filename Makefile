@@ -88,6 +88,19 @@ check-linux:
 	alr exec -- gprbuild -P examples.gpr -XIOUR_OS=linux \
 	  --subdirs=crosscheck -j0 -c -f -cargs -gnatc
 
+# The AArch64 backend, checked without an AArch64 toolchain.  -gnatc is
+# semantic analysis only -- no code generation -- so the host compiler
+# does it, the same trick check-linux uses for the other backend.  It
+# catches everything the language can catch, the static-string rule an
+# Asm template has to meet included.
+#
+# What it cannot catch is whether the instruction text assembles: that
+# needs a real aarch64 `as`, and so needs the VM.  The proof and the
+# start-up render check cover the model; this covers the Ada.
+check-aarch64:
+	alr exec -- gprbuild -P examples.gpr -XIOUR_OS=linux \
+	  -XIOUR_ARCH=aarch64 --subdirs=aarch64check -j0 -c -f -cargs -gnatc
+
 clean:
 	rm -rf obj lib bin
 
@@ -99,6 +112,7 @@ help:
 	@echo "make bench           benchmark Ada, Tokio, and Go echo servers"
 	@echo "make abi-check       check the Ada kernel-ABI mirrors against the headers (Linux)"
 	@echo "make check-linux     compile the Linux backend from anywhere"
+	@echo "make check-aarch64   compile the AArch64 backend from anywhere"
 	@echo "make prove           SPARK proof of everything"
 	@echo
 	@echo "host detected as $(HOST)"

@@ -19,15 +19,54 @@ library project Io_Uring_Async_Runtime is
    type Os_Kind is ("linux", "Windows_NT");
    Host_Os : Os_Kind := external ("IOUR_OS", external ("OS", "linux"));
 
-   Portable_Dirs := ("src", "src/ffi", "src/runtime", "src/net");
+   --  Which instruction set, and so which context switch.  There is no
+   --  environment variable a build is entitled to read for this the way OS
+   --  serves above -- nothing portable exports the machine type -- so it
+   --  defaults to x86_64 and an AArch64 build asks for itself:
+   --
+   --     gprbuild -P io_uring_async_runtime.gpr -XIOUR_ARCH=aarch64
+   --
+   --  Getting it wrong does not build something subtly wrong: the assembler
+   --  rejects the other target's instructions.
+   type Arch_Kind is ("x86_64", "aarch64");
+   Host_Arch : Arch_Kind := external ("IOUR_ARCH", "x86_64");
+
+   --  How many shards, chosen by the build rather than by editing a
+   --  source file.  A GPR external is a string available only to the
+   --  project, and Shard_Count has to reach Ada as a *static* constant --
+   --  Jorvik requires each shard task's CPU aspect to be static, and
+   --  Active_Shard is a subtype bounded by it.  So the value cannot be
+   --  passed through; a directory holding one declaration of Iour_Config
+   --  is selected instead, and each of them declares a different value.
+   --
+   --     gprbuild -P io_uring_async_runtime.gpr -XIOUR_SHARDS=2
+   --
+   --  The runtime needs First_Shard_Cpu + Shard_Count - 1 CPUs to exist,
+   --  which with First_Shard_Cpu at 1 is exactly this many.
+   type Shards_Kind is ("1", "2", "3", "4", "5", "6", "7", "8");
+   Shards : Shards_Kind := external ("IOUR_SHARDS", "4");
+   Config_Dir := "src/config/shards-" & Shards;
+
+   Portable_Dirs := ("src", "src/ffi", "src/runtime", "src/net")
+                    & Config_Dir;
 
    case Host_Os is
       when "Windows_NT" =>
+         --  Only x86-64 here.  An AArch64 Windows build would need a
+         --  Win64-on-ARM context switch, which is a fourth ABI and not
+         --  merely a fourth file, and there is no toolchain for it here.
          for Source_Dirs use
            Portable_Dirs & ("src/os/windows", "src/arch/x86_64-win64");
       when "linux" =>
-         for Source_Dirs use
-           Portable_Dirs & ("src/os/linux", "src/arch/x86_64-sysv");
+         case Host_Arch is
+            when "x86_64" =>
+               for Source_Dirs use
+                 Portable_Dirs & ("src/os/linux", "src/arch/x86_64-sysv");
+            when "aarch64" =>
+               for Source_Dirs use
+                 Portable_Dirs
+                 & ("src/os/linux", "src/arch/aarch64-aapcs64");
+         end case;
    end case;
 
    for Object_Dir use "obj";

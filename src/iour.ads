@@ -38,6 +38,7 @@
 ------------------------------------------------------------------------------
 
 with System;
+with Iour_Config;
 
 package Iour with SPARK_Mode => On is
 
@@ -50,14 +51,26 @@ package Iour with SPARK_Mode => On is
    Max_Shards : constant := 8;
 
    --  Shards that actually run the event loop.  The remainder park forever.
-   --  Must be in 1 .. Max_Shards.
-   Shard_Count : constant := 4;
+   --  Must be in 1 .. Max_Shards, which Compile_Time_Error checks.
+   --
+   --  Set at build time rather than here: -XIOUR_SHARDS=<n> picks one of
+   --  the src/config/shards-<n> directories.  It has to reach Ada as a
+   --  static constant, and a GPR external cannot, so the project file
+   --  chooses a source directory instead.  See Iour_Config.
+   Shard_Count : constant := Iour_Config.Shard_Count;
 
    --  Ada CPU number (1-based; the system's CPU 0 is Ada CPU 1) that
-   --  shard 0 is pinned to.  Shard N takes First_Shard_Cpu + N.  Leaving
-   --  CPU 1 free keeps the environment task, which does start-up and
-   --  teardown, off the shard cores.
-   First_Shard_Cpu : constant := 2;
+   --  shard 0 is pinned to.  Shard N takes First_Shard_Cpu + N, so a
+   --  build needs exactly First_Shard_Cpu + Shard_Count - 1 CPUs to
+   --  exist -- with this at 1, exactly Shard_Count of them.
+   --
+   --  It is 1, which is the environment task's CPU too, so shard 0 shares
+   --  a core with start-up and teardown.  That is the deliberate trade:
+   --  reserving a core for the environment task instead means Shard_Count
+   --  of N needs N + 1 cores, and an eight-shard build then refuses to
+   --  start on an eight-core machine.  The environment task does almost
+   --  nothing once the shards are up.
+   First_Shard_Cpu : constant := 1;
 
    --  Concurrent fibers.  Each live fiber costs one stack (allocated lazily,
    --  then recycled), so this bounds memory rather than reserving it.

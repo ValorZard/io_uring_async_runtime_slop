@@ -63,22 +63,55 @@ package body Iour.Shards with SPARK_Mode => On is
    ---------------------------------------------------------------------------
 
    --  One declaration per shard, each with its own static CPU.  To change
-   --  how many cores the runtime uses, adjust Shard_Count in Iour; to raise
-   --  the ceiling, add a declaration here and bump Max_Shards.
+   --  how many cores the runtime uses, build with -XIOUR_SHARDS=<n>; to
+   --  raise the ceiling, add a declaration here and bump Max_Shards.
+   --
+   --  Max_Shards declarations exist whatever Shard_Count is, because
+   --  Jorvik requires each CPU aspect to be static and there is no way to
+   --  declare a variable number of tasks.  The surplus ones park forever
+   --  in Serve and cost nothing to run -- but their CPU aspects are still
+   --  elaborated, and asking for a CPU the machine does not have raises
+   --  TASKING_ERROR before any of this runtime's own code gets to start.
+   --
+   --  So the index is folded back into the active range: a surplus shard
+   --  is pinned to a core an active shard already owns, which it will
+   --  never contend for because it parks immediately.  `mod` keeps the
+   --  expression static, which the aspect requires.
+   --
+   --  Without the fold a four-shard build needed eight cores merely to
+   --  elaborate.  That cannot show up on a workstation with more cores
+   --  than Max_Shards; it was found on an emulated aarch64 machine, where
+   --  the core count is whatever qemu was told to provide.
 
    --  The same priority every protected object in the runtime declares as
    --  its ceiling, so entering one never changes the calling thread's
    --  scheduling parameters.  See Iour.Runtime_Priority.
    Shard_Priority : constant System.Priority := Runtime_Priority;
 
-   task Shard_0 with CPU => First_Shard_Cpu + 0, Priority => Shard_Priority;
-   task Shard_1 with CPU => First_Shard_Cpu + 1, Priority => Shard_Priority;
-   task Shard_2 with CPU => First_Shard_Cpu + 2, Priority => Shard_Priority;
-   task Shard_3 with CPU => First_Shard_Cpu + 3, Priority => Shard_Priority;
-   task Shard_4 with CPU => First_Shard_Cpu + 4, Priority => Shard_Priority;
-   task Shard_5 with CPU => First_Shard_Cpu + 5, Priority => Shard_Priority;
-   task Shard_6 with CPU => First_Shard_Cpu + 6, Priority => Shard_Priority;
-   task Shard_7 with CPU => First_Shard_Cpu + 7, Priority => Shard_Priority;
+   task Shard_0
+     with CPU => First_Shard_Cpu + (0 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_1
+     with CPU => First_Shard_Cpu + (1 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_2
+     with CPU => First_Shard_Cpu + (2 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_3
+     with CPU => First_Shard_Cpu + (3 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_4
+     with CPU => First_Shard_Cpu + (4 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_5
+     with CPU => First_Shard_Cpu + (5 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_6
+     with CPU => First_Shard_Cpu + (6 mod Shard_Count),
+          Priority => Shard_Priority;
+   task Shard_7
+     with CPU => First_Shard_Cpu + (7 mod Shard_Count),
+          Priority => Shard_Priority;
 
    task body Shard_0 is begin Serve (0); end Shard_0;
    task body Shard_1 is begin Serve (1); end Shard_1;
