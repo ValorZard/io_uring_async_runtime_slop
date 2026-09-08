@@ -391,8 +391,13 @@ been tried on any of them.
 Rechecked by flipping each to `On` and recording what came back. Do not retry
 them expecting a different answer:
 
-* `Ffi.Fiber` (per ABI) — inline `Asm` in `naked` subprograms, which is not
-  analysable code at all.  This is the one whose *content* has largely
+* `Ffi.Fiber` (per ABI) — the `Asm` call itself. Not "inline assembly is
+  unanalysable" as a matter of taste: `System.Machine_Code` is declared
+  `SPARK_Mode => Off` in the runtime, so `On` gives `"Asm" is not allowed in
+  SPARK (due to entity declared with SPARK_Mode Off)`, and the same for
+  `Asm_Input_Operand`, `Asm_Output_Operand` and their `No_*` companions.
+  The AArch64 body adds `E0002` for `'Address` on top.
+  This is the one whose *content* has largely
   escaped anyway: `Iour.Ffi.Fiber.Machine` is `On` and proved, and what is
   left in the `Off` body is the `Asm` calls, two slot addresses and one
   write through a computed address.  See the section below.
@@ -400,7 +405,7 @@ them expecting a different answer:
   on three of its four subprograms.
 * `Ffi.Uring.Memory` — `E0002` again, and `E0001` effectively volatile object
   not at library level for the atomic ring words.
-* `Ffi.Identity` — legality passes, and the result is wrong. See below.
+* `Ffi.Identity` — a `Global` that cannot be told the truth. See below.
 
 `Ffi.Memory.Advance` is the near miss, and it looks like a gap when it is not.
 It takes no address — it is `Base + Storage_Offset (By)` — and it is legal
@@ -411,10 +416,21 @@ will. `On` buys a permanently unproved check or a third justification, so it
 stays with the other three, where that postcondition is a promise about memory
 rather than a proof obligation.
 
-`Ffi.Identity` is the one to be careful with, because `check_all` **passes**
-it. The body is legal SPARK. It is simply not the same program: SPARK ignores
-`pragma Thread_Local_Storage` (`ignored-pragma`) and models the one per-thread
-slot as one shared variable, so `On` would prove a single-slot runtime this is
+`Ffi.Identity` is the one to be careful with, and the symptom has changed
+since this was first written -- so do not go looking for the old one. It used
+to pass `check_all` outright, which made it the subtle case. On GNAT 15.2 it
+fails instead, with
+
+```
+error: "Slot" is referenced in expression function but missing from the Global
+```
+
+because `Current` is declared `Global => null` while reading `Slot`. **The
+reason for `Off` is unchanged and the new error does not weaken it.** The
+error is trivially "fixable" -- put `Slot` in the `Global` -- and fixing it
+is the mistake: SPARK ignores `pragma Thread_Local_Storage`
+(`ignored-pragma`) and models the one per-thread slot as one shared
+variable, so `On` would prove a single-slot runtime this is
 not. `Current` is declared `Global => null` because it is a question about the
 *calling thread*, and per-thread state is something SPARK has no model for.
 Legality is necessary and not sufficient; the question is always whether the
@@ -423,11 +439,21 @@ analysed program is the one that runs.
 ### Windows: what closed the gap, and what is left
 
 `Ffi.Win32`'s **spec**, `Ffi.Sys` and `Ffi.Net` are `On` on Windows, as they
-are on Linux. What is still `Off` there is `Ffi.Win32`'s **body** — the
+are on Linux. What is still `Off` there is `Ffi.Win32`'s **body** and
+`Iour.Reactor`, and the two are *not* off for the same kind of reason --
+which this section used to claim and which is worth being precise about,
+because one of them is a live lead and the other is not.
+
+`Ffi.Win32`'s body has **three** independent hard errors, not just the
 `Unchecked_Conversion` from `System.Address` to access-to-subprogram that
-`Load_Socket_Extensions` is made of — and `Iour.Reactor`, which has a reason
-of the Linux kind. Both checks run against the Windows configuration from
-Linux; neither generates code:
+`Load_Socket_Extensions` is made of. Flipping it to `On` also gives `E0004`,
+a volatile object in an interfering context, and `E0002`, `'Address` outside
+an attribute definition clause. So solving the entry-point resolution would
+not by itself buy `On`; all three would have to go.
+
+`Iour.Reactor` is the one whose `Off` is **not established**. See *The
+Windows reactor is the one unestablished `Off`* below. Both checks run
+against the Windows configuration from Linux; neither generates code:
 
 ```
 alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=Windows_NT \
@@ -488,6 +514,67 @@ What would close the rest is a way to resolve an entry point without
 `Unchecked_Conversion` to an access-to-subprogram, and there is not one — so
 `Ffi.Win32`'s body is a trusted base of the same kind as the context switch,
 and its spec is what everything above is verified against.
+
+### The Windows reactor is the one unestablished `Off`
+
+Re-audited 2026-09-08 by flipping every `Off` body to `On` and running
+`--mode=check_all -j0 -U` in its own configuration -- the cheap question,
+seconds rather than minutes. Six of the seven answered with a language wall.
+This one did not, and the distinction is the point of the audit:
+
+| body | what `On` says |
+|---|---|
+| `Ffi.Fiber` x3 | `"Asm" is not allowed in SPARK` (`System.Machine_Code` is `Off`) |
+| `Ffi.Memory` | `E0002` `'Address` |
+| `Ffi.Uring.Memory` | `E0002` `'Address` |
+| `Ffi.Win32` body | unchecked conversion to access-to-subprogram, `E0004`, `E0002` |
+| `Ffi.Identity` | a `Global` that cannot be told the truth |
+| **`Iour.Reactor`** | **`state "Engines" requires refinement`** |
+
+That last is not an `E000x`. It is a missing `Refined_State`, which is
+ordinary contract work -- and the Linux reactor, which is `SPARK_Mode => On`,
+already has one. "A reason of the Linux kind" was exactly backwards as a
+description: the Linux reactor is the *worked example*, not the precedent for
+giving up.
+
+Two layers were cleared before this was stopped:
+
+1. **The refinement is writable.** The body's package-level state is only
+   `Engines_Data` and `Wake_Flags`; everything else at that level is a
+   constant. `Refined_State => (Engines => (Engines_Data, Wake_Flags))` gets
+   past the first error.
+2. **Then: `constituent of synchronized state "Engines" must be
+   synchronized`.** The shared spec declares `Abstract_State => (Engines with
+   External, Synchronous)`, so the constituents have to be synchronized
+   objects. Also contract shape, and also something the Linux side solved --
+   its constituents are the `Cells` of packages that declare them
+   appropriately.
+
+**What is not known** is what lies behind those two, because the run that
+would have said was killed before it finished. Full legality checking with
+the reactor `On` takes far longer than the Global-generation phase that
+reports the first two errors, which is itself a signal that it gets a good
+way in. At least one plausible wall is visible by inspection: the body
+instantiates `System.Address_To_Access_Conversions`, which is access-type
+machinery, and there are `'Address` uses in the slot-pool arithmetic of the
+kind that give `E0002` elsewhere.
+
+So the honest state is: **`Off` here has never been shown to be necessary**,
+where for the other six it has. Anyone picking this up should start by
+re-running the probe and letting it finish:
+
+```
+--  in the body
+package body Iour.Reactor with SPARK_Mode => On,
+  Refined_State => (Engines => (Engines_Data, Wake_Flags))
+is
+```
+
+then `--mode=check_all` against `-XIOUR_OS=Windows_NT`, and read what comes
+after the synchronization error. If it is `E0002`/`E0004` all the way down,
+write that here and close the question. If it is more contract work, the
+Linux reactor is the model. Either way the next person should not have to
+re-derive the first two layers.
 
 ## The context switch is proved; the assembly is checked against the proof
 
@@ -1852,11 +1939,15 @@ Ranked by expected payoff:
    under emulation, which says the switch is correct and says nothing at all
    about its cost -- TCG timings are meaningless, and there is no aarch64
    hardware here.
-4. **The last two Windows `Off` bodies.** See *Windows: what closed the gap,
-   and what is left*. `Ffi.Win32`'s spec, `Ffi.Sys` and `Ffi.Net` are `On`;
-   what remains is `Ffi.Win32`'s body, which needs a way to resolve an entry
-   point without `Unchecked_Conversion` to an access-to-subprogram and has
-   none, and `Iour.Reactor`.
+4. **`Iour.Reactor` on Windows, which is the only `Off` body whose
+   necessity is unestablished.** Its first two obstacles are contract shape,
+   not language walls -- see *The Windows reactor is the one unestablished
+   `Off`*. Worth an attempt; the Linux reactor is `On` and is the worked
+   example of what the contracts look like.
+
+   `Ffi.Win32`'s body is *not* worth attempting on the same evidence: it has
+   three independent hard errors and needs all three solved. `Ffi.Win32`'s
+   spec, `Ffi.Sys` and `Ffi.Net` are already `On`.
 5. **STAL's other half, if it is ever worth it.**
    `Iour.Ffi.Fiber.Machine` proves the register file is exchanged and proves
    the *initial* frame's placement; it says nothing about what is on a
