@@ -2490,10 +2490,14 @@ uploads `bench/results/http-ci`. Its environment selects the workload; do the
 arithmetic before increasing it: one scale with $C$ connections and $R$ rounds
 means $9 \times REPS \times C \times R$ requests. This is a full cross-pairing
 matrix, not a single server run, and large values quickly turn a completion gate
-into a long performance job. The current HTTP harness has no TCP-style
-`runwait` CPU/RSS measure, TIME_WAIT drain, port retry, summary, scaling sweep
-or tail histogram. Do not interpret wall-clock throughput as a fair CPU-cost
-comparison until those are deliberately designed for HTTP.
+into a long performance job. `bench_http.sh` randomizes its nine pairings per
+repetition and uses `bench/runwait` to record server user CPU, system CPU and
+peak RSS in its CSV; the console also prints server CPU microseconds per
+completed request and RSS in MiB. Windows accounts CPU on a 15.6 ms scheduler
+tick, so use at least 50,000 requests before comparing CPU cost. The HTTP
+harness still has no TCP-style TIME_WAIT drain, port retry, summary, scaling
+sweep or tail histogram. Do not interpret wall-clock throughput as a fair
+CPU-cost comparison until those are deliberately designed for HTTP.
 
 Validated after introducing the common CLI: a compact full nine-pairing
 Ada/Go/Axum loopback matrix, `make demo-http`, `make check-linux`, and

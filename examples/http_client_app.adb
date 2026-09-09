@@ -7,6 +7,8 @@ with Iour.Time;
 
 package body Http_Client_App with SPARK_Mode => On is
 
+   package Rt renames Ada.Real_Time;
+
    use type Iour.Future_Ref;
    use type Iour.Http.Parse_Status;
    use type Iour.Http.Status_Code;
@@ -60,17 +62,22 @@ package body Http_Client_App with SPARK_Mode => On is
 
    protected Stats with Priority => Iour.Runtime_Priority is
       procedure Set_Goal (Value : Natural);
-      procedure Finished (Ok : Boolean; Requests : Natural);
+         procedure Finished
+            (Ok : Boolean; Requests : Natural; At_Time : Rt.Time);
       procedure Read
         (Started : out Natural; Succeeded : out Natural;
          Failed : out Natural; Requests : out Natural);
       procedure Goal (Value : out Natural);
+         procedure Open_Window (At_Time : Rt.Time);
+         procedure Window (From, To : out Rt.Time);
    private
       Session_Goal : Natural := 1;
       Total_Started : Natural := 0;
       Total_Succeeded : Natural := 0;
       Total_Failed : Natural := 0;
       Total_Requests : Natural := 0;
+      Opened : Rt.Time := Rt.Time_First;
+      Last_End : Rt.Time := Rt.Time_First;
    end Stats;
 
    protected body Stats is
@@ -79,8 +86,10 @@ package body Http_Client_App with SPARK_Mode => On is
          Session_Goal := Value;
       end Set_Goal;
 
-      procedure Finished (Ok : Boolean; Requests : Natural) is
+      procedure Finished
+        (Ok : Boolean; Requests : Natural; At_Time : Rt.Time) is
       begin
+         Last_End := At_Time;
          Total_Started := Total_Started + 1;
          Total_Requests := Total_Requests + Requests;
          if Ok then
@@ -104,6 +113,17 @@ package body Http_Client_App with SPARK_Mode => On is
       begin
          Value := Session_Goal;
       end Goal;
+
+      procedure Open_Window (At_Time : Rt.Time) is
+      begin
+         Opened := At_Time;
+      end Open_Window;
+
+      procedure Window (From, To : out Rt.Time) is
+      begin
+         From := Opened;
+         To := Last_End;
+      end Window;
    end Stats;
 
    procedure Session (Arg : Iour.Fiber_Argument);
@@ -119,6 +139,7 @@ package body Http_Client_App with SPARK_Mode => On is
       Host : String (1 .. Max_Host);
       Requests : Natural := 0;
       Ok : Boolean := True;
+      Now : Rt.Time;
       Sock : Iour.Net.Socket;
       Code : Iour.Http.Status_Code;
       Parse_State : Iour.Http.Parse_Status;
@@ -149,15 +170,19 @@ package body Http_Client_App with SPARK_Mode => On is
          end if;
          Requests := Requests + 1;
       end loop;
-      Stats.Finished (Ok, Requests);
+      Now := Rt.Clock;
+      Stats.Finished (Ok, Requests, Now);
    end Session;
 
    procedure Driver (Arg : Iour.Fiber_Argument) is
       pragma Unreferenced (Arg);
       Total, Started, Succeeded, Failed, Requests : Natural;
       Handle : Iour.Future_Ref;
+      Now : Rt.Time;
    begin
       Stats.Goal (Total);
+      Now := Rt.Clock;
+      Stats.Open_Window (Now);
       for Index in 1 .. Total loop
          Session_Job.Spawn (Iour.Fiber_Argument (Index), Handle);
       end loop;
@@ -189,5 +214,11 @@ package body Http_Client_App with SPARK_Mode => On is
    begin
       Stats.Read (Started, Succeeded, Failed, Requests);
    end Result;
+
+   procedure Session_Window
+     (From : out Ada.Real_Time.Time; To : out Ada.Real_Time.Time) is
+   begin
+      Stats.Window (From, To);
+   end Session_Window;
 
 end Http_Client_App;

@@ -554,7 +554,8 @@ magnitude; the harness comment at `run_pair` says why.
 Six programs now exist: an Ada server/client pair, a Go `net/http`
 server/client pair, and an Axum/Reqwest server/client pair. The independent
 HTTP harness runs all nine server-client pairings. It currently has a matrix
-only; CPU/RSS accounting, scaling and latency stages remain future work.
+with randomized pairing order and server CPU/RSS accounting; scaling and
+latency stages remain future work.
 
 ### Keep the cross pairings, because HTTP needs them more
 
@@ -669,7 +670,9 @@ new connection for every round because the fixture deliberately emits
 `Connection: close`; a run with $C$ connections and $R$ rounds asks its server
 to complete $C \times R$ requests. The client starts one fiber per connection,
 counts completed sessions and successful requests, prints elapsed milliseconds
-and an integer requests-per-second rate, then requests scheduler shutdown.
+and an integer requests-per-second rate, then requests scheduler shutdown. Its
+elapsed window opens immediately before the driver spawns sessions and ends at
+the last session completion, excluding runtime shutdown and ring drain.
 The server's completion callback closes the listener and requests shutdown at
 the goal. A zero goal serves until killed.
 
@@ -709,11 +712,15 @@ workflow rather than inferring CI load from script defaults. Its artifact is
 `bench/results/http-ci`.
 
 The harness is a completion/regression tool and not yet a fair full HTTP
-comparison. It has no CPU/RSS accounting, TIME_WAIT drain, listener retry,
-summary, scaling stage or tail-latency histogram; those remain work to port or
-redesign from the TCP harness. It also compares the Ada fixture with framework
-servers that add their own headers, so byte-for-byte on-wire header equality,
-keep-alive, a raw Hyper row, POST bodies and a 64 KiB response are still open.
+comparison. It randomizes pair order per repetition and records server user
+CPU, system CPU and peak RSS with `bench/runwait`; its CSV fields are
+`srv_user_s`, `srv_sys_s` and `srv_maxrss_kb`. Windows CPU charges in 15.6 ms
+ticks, so small workloads cannot support a CPU-cost comparison. TIME_WAIT
+drain, listener retry, summary, scaling stage and tail-latency histogram remain
+work to port or redesign from the TCP harness. It also compares the Ada fixture
+with framework servers that add their own headers, so byte-for-byte on-wire
+header equality, keep-alive, a raw Hyper row, POST bodies and a 64 KiB response
+are still open.
 
 Validated on this tree: `alr exec -- gprbuild -P examples.gpr -j0`,
 `make demo-http`, compact full Ada/Go/Axum matrices, `make check-linux`, and
