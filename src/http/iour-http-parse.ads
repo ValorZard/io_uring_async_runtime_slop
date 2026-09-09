@@ -12,6 +12,13 @@ package Iour.Http.Parse with SPARK_Mode => On is
               with Pre    => Available <= Data'Length,
           Global => null;
 
+   procedure Find_Line_End
+     (Data      : Head_Buffer;
+      Available : Natural;
+      Status    : out Parse_Status;
+      End_At    : out Natural)
+     with Pre    => Available <= Data'Length,
+      Global => null;
    procedure Request_Line
        (Data         : Head_Buffer;
       First        : Natural;

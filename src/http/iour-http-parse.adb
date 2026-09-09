@@ -59,6 +59,31 @@ package body Iour.Http.Parse with SPARK_Mode => On is
       Status := Incomplete;
    end Find_Head_End;
 
+      procedure Find_Line_End
+        (Data      : Head_Buffer;
+         Available : Natural;
+         Status    : out Parse_Status;
+         End_At    : out Natural)
+      is
+      begin
+         End_At := 0;
+         if Available > Max_Request_Line then
+            Status := Too_Large;
+            return;
+         end if;
+         if Available < 2 then
+            Status := Incomplete;
+            return;
+         end if;
+         for Index in Data'First .. Available - 2 loop
+            if Data (Index) = Cr and then Data (Index + 1) = Lf then
+               End_At := Index;
+               Status := Complete;
+               return;
+            end if;
+         end loop;
+         Status := Incomplete;
+      end Find_Line_End;
    procedure Request_Line
    (Data           : Head_Buffer;
       First          : Natural;
