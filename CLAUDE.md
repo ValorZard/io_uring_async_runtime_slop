@@ -2443,6 +2443,21 @@ hangs the whole run.
 
 ### Measurement traps
 
+- **The three clients do not print elapsed time in the same unit, and the
+  matrix's `elapsed_s` column used to believe them all.** The Ada client
+  prints milliseconds: SPARK supports neither a fixed-to-floating
+  conversion nor a proof that `To_Duration`'s result fits in `Duration`,
+  so `Echo_Client` divides one `Time_Span` by another and gets an
+  `Integer` count of milliseconds. Go and Tokio print seconds. Read as
+  seconds that is a thousandfold, so every Ada row in the log showed a
+  number three orders of magnitude worse than its neighbours and the
+  fastest server in the matrix read as by far the slowest. `rt_per_s` was
+  never affected -- the client computes it -- so no conclusion in any
+  saved result is wrong, but the raw per-rep log lines from 1f1a43b
+  onwards are unreadable. `run_pair` now reads the unit off the line
+  rather than assuming it. **A new client, or a change to an existing
+  one's output, has to keep the unit in the text.**
+
 - **A stale variant build is the worst of these, because it is silent.**
   `scripts/bench.sh` builds one copy of the runtime per `Shard_Count`, and
   per client pinning, under `bench/build/`. It used to reuse any directory

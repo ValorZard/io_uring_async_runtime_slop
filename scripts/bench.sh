@@ -409,7 +409,18 @@ run_pair() {
     local sstatus=$?
 
     local elapsed rt frames failed ok ov su ss smax cu cs cmax
-    elapsed=$(grep -oP 'elapsed\s+\K[0-9.E+-]+' "$clog" | head -1)
+    # Read the unit, do not assume it.  The Ada client prints
+    # milliseconds and Go and Tokio print seconds: SPARK supports
+    # neither a fixed-to-floating conversion nor a proof that
+    # To_Duration's result fits in Duration, so the Ada client divides
+    # one Time_Span by another and gets an Integer count of
+    # milliseconds.  Taken as seconds that is a thousandfold, and the
+    # column then reports the fastest server in the matrix as the
+    # slowest by three orders of magnitude.  rt_per_s is unaffected --
+    # the client computes it -- so only this column and the log line
+    # ever lied.
+    elapsed=$(grep -oP 'elapsed\s+\K[0-9.E+-]+\s*m?s' "$clog" | head -1 |
+        awk '{ v = $1 + 0; if ($0 ~ /ms/) v /= 1000; printf "%.9f", v }')
     rt=$(grep -oP 'round trips per second\s*\K[0-9.E+-]+' "$clog" | head -1)
     frames=$(grep -oP 'frames exchanged\s*\K[0-9]+' "$clog" | head -1)
     # Sessions the client could not finish.  On Linux this is the same
