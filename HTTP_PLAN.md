@@ -21,10 +21,6 @@ conditions, the WebSocket sequencing table -- not its code.
 ---
 
 ## What aht is, and what of it survives
-**Use `scripts/bench_http.sh`; do not extend `scripts/bench_tcp.sh`.** HTTP
-needs its own harness, result directory and CI workflow. It may use the same
-process lifecycle and CSV conventions as the TCP harness, but it owns its
-own `run_pair`, summaries and protocol-specific workloads.
 controlled heap buffers, access-to-subprogram callbacks and exceptions. TLS
 is out of scope here by instruction, and dropping it removes the only
 reason its transport layer is class-wide.
@@ -56,9 +52,6 @@ whole streaming surface inverts:
       ...
    end loop;
 ```
-   Four programs: an Ada HTTP server, a Go `net/http` server, an axum server,
-   and one HTTP load client. The HTTP harness owns the matching matrix, scaling
-   and latency stages, with the same cross pairings.
 is the one place where this runtime makes the problem *smaller* than aht
 found it. Three of aht's packages exist only to manage the consequences of
 push-mode delivery in a task-based client, and have no counterpart here:
@@ -558,9 +551,10 @@ fine and the Ada client's integer rendering is fine. A new client that
 drops the unit from the text breaks that, silently and by three orders of
 magnitude; the harness comment at `run_pair` says why.
 
-Four programs: an Ada HTTP server, a Go `net/http` server, an axum server,
-and one HTTP load client. The HTTP harness owns the matching matrix, scaling
-and latency stages, with the same cross pairings.
+Six programs now exist: an Ada server/client pair, a Go `net/http`
+server/client pair, and an Axum/Reqwest server/client pair. The independent
+HTTP harness runs all nine server-client pairings. It currently has a matrix
+only; CPU/RSS accounting, scaling and latency stages remain future work.
 
 ### Keep the cross pairings, because HTTP needs them more
 
@@ -570,9 +564,10 @@ substantially more expensive than the echo client, so the risk is *higher*
 here, not lower. The tell is unchanged: if the other two servers do not
 separate on that row either, the client is the ceiling.
 
-**Write the load client in Rust or Go, not in Ada.** The Ada client is
-pinned to its own shards because that is what this runtime is, and that
-asymmetry is what made those six rows client-bound.
+Keep Go and Rust clients in the matrix as independent load generators. The
+Ada client is pinned to its own shards because that is what this runtime is,
+so its rows are necessary coverage but can be client-bound; compare server
+rows under the same non-Ada client before drawing throughput conclusions.
 
 ### What has to be held equal, and did not before
 
@@ -585,7 +580,7 @@ else to agree about. HTTP has plenty.
 | the `Date` header | Go and hyper both cache it and refresh once a second. A handler that formats it per response is doing strictly more work, and will look slower for a reason that is not the runtime |
 | keep-alive | verify it, do not assume it. Count accepts on the server side. Go's `http.Client` stops reusing a connection if the response body is not drained and closed, silently, and every request then measures a TCP handshake |
 | framing | fix everything on `Content-Length`. Chunked against non-chunked is not a comparison |
-| the router | axum is a framework over hyper, Go has `ServeMux`, and the Ada server would have neither. Run raw hyper as a fourth row so the framework layer is a visible number rather than a hidden asymmetry |
+| the router | Axum is a framework over Hyper, Go has `ServeMux`, and the Ada server has neither. A raw Hyper row is future work, needed to make the framework layer a visible number rather than a hidden asymmetry |
 
 `srv us/rt` remains the honest column and becomes microseconds of server
 CPU per request, for the reason the script's header gives at length: the
@@ -622,6 +617,107 @@ HTTP response written as head then body is the precise case Nagle delays.
 Any Linux number taken before that is fixed is measuring a 40 ms stall, not
 a runtime. Windows is unaffected, which would make it look like a backend
 difference.
+
+---
+
+## Implementation status, 2026-09-08
+
+The HTTP implementation is now a bounded, portable first slice above
+`Iour.Net`. It is not the complete HTTP/1.1 and WebSocket design described
+elsewhere in this document. The distinction matters when changing it or
+reading a benchmark result.
+
+### Implemented HTTP surface
+
+* `src/http/` is in `Portable_Dirs`. `Iour.Http` supplies bounded HTTP
+   vocabulary, methods, versions, parse states, an 8 KiB `Head_Buffer`, and
+   the pure no-body/chunked/content-length/until-close framing decision.
+* `Iour.Http.Parse` finds the head terminator and parses request/status
+   lines. It currently recognizes GET, HEAD and POST request lines.
+   `tests/http_parse_test.adb` is a standalone parser test; its focused proof
+   completed 1,145 checks.
+* `Iour.Http.Buffer` and `Iour.Http.Headers` exist as bounded foundations,
+   but neither is yet the public request/response body surface. `Wire.Read_Head`
+   returns both bytes received and the head boundary because one receive may
+   contain bytes after CRLF CRLF; callers do not yet consume that remainder.
+* `Iour.Http.Server` is a generic with a handler and completion callback.
+   One accepted connection is served by one fiber: read head, parse request
+   line, invoke the handler, write fixed-length `200 OK`, close. There is no
+   header dispatch, request-body read, response status control, response
+   headers, chunked encoding, or keep-alive.
+* `Iour.Http.Client.Request` sends a GET or empty POST over a socket supplied
+   by its caller and parses the response status line/head. It has no body API.
+   It accepts dotted-quad IPv4 literals through `Iour.Net`; DNS remains absent.
+* `examples/http_server` and `examples/http_client` are the executable
+   fixture. Their GET response body is exactly
+   `0123456789abcdef0123456789abcdef` (32 ASCII bytes), with `Content-Length`
+   and `Connection: close`. POST is still an example handler response, not a
+   benchmarked body-reader path.
+
+### Common benchmark CLI
+
+The Ada fixture now conforms to the same command contract as the Go and Rust
+peers:
+
+```
+http_server [port] [request-goal]
+http_client [host] [port] [connections] [rounds]
+```
+
+`request-goal` is a request count, not a connection count. The client opens a
+new connection for every round because the fixture deliberately emits
+`Connection: close`; a run with $C$ connections and $R$ rounds asks its server
+to complete $C \times R$ requests. The client starts one fiber per connection,
+counts completed sessions and successful requests, prints elapsed milliseconds
+and an integer requests-per-second rate, then requests scheduler shutdown.
+The server's completion callback closes the listener and requests shutdown at
+the goal. A zero goal serves until killed.
+
+The old no-argument path is retained: `make demo-http` starts the server and
+drives the default one-connection, one-round client through loopback.
+
+### Independent HTTP harness and peers
+
+HTTP intentionally has a separate harness: `scripts/bench_http.sh`.
+`scripts/bench_tcp.sh` remains the echo/TCP harness and must not gain HTTP
+stages. Both shell scripts are executable (`100755`) in Git so Linux Actions
+can invoke them directly; on Windows the Makefile chooses Git Bash rather than
+WSL Bash because the Windows Alire installation is not available to WSL.
+
+`bench_http.sh` builds and runs these peers:
+
+| implementation | server | client |
+|---|---|---|
+| Ada | `bin/http_server` | `bin/http_client` |
+| Go | `bench/go_http/go_http_server` | `bench/go_http/go_http_client` |
+| Rust | `bench/axum_http/target/release/axum_http_server` | `bench/axum_http/target/release/axum_http_client` |
+
+The Go peer uses `net/http`; the Rust server uses Axum and its client uses
+Reqwest. All accept the common CLI, validate status 200 plus the exact 32-byte
+body, disable/reject connection reuse through `Connection: close`, and report
+the four lines the harness scrapes. A matrix runs all nine Ada/Go/Axum
+server-client pairings. The harness normalizes milliseconds and seconds into
+`elapsed_s`, normalizes scientific/integer rates to an integer `rt_per_s`, and
+uses TCP's grouped rate and three-decimal elapsed display. A nonzero client
+failure makes its CSV row `no` and makes the harness fail after the matrix.
+
+The defaults (`BENCH_HTTP_REPS=3`, `BENCH_HTTP_SCALES="100:100 500:40"`) are
+for local measurements. `.github/workflows/http-bench.yml` is independent of
+the TCP workflow and supplies its own workload through `BENCH_HTTP_REPS`,
+`BENCH_HTTP_SCALES`, `BENCH_HTTP_RUN_TIMEOUT` and `BENCH_HTTP_OUT`; inspect the
+workflow rather than inferring CI load from script defaults. Its artifact is
+`bench/results/http-ci`.
+
+The harness is a completion/regression tool and not yet a fair full HTTP
+comparison. It has no CPU/RSS accounting, TIME_WAIT drain, listener retry,
+summary, scaling stage or tail-latency histogram; those remain work to port or
+redesign from the TCP harness. It also compares the Ada fixture with framework
+servers that add their own headers, so byte-for-byte on-wire header equality,
+keep-alive, a raw Hyper row, POST bodies and a 64 KiB response are still open.
+
+Validated on this tree: `alr exec -- gprbuild -P examples.gpr -j0`,
+`make demo-http`, compact full Ada/Go/Axum matrices, `make check-linux`, and
+`make check-aarch64` all passed after the common CLI was added.
 
 ---
 

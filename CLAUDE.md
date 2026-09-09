@@ -2441,6 +2441,67 @@ wrapper on Windows and orphan a server still holding the port. Without it, a
 server whose accept queue overflowed waits for connections that never arrive and
 hangs the whole run.
 
+### The HTTP benchmark is separate
+
+`scripts/bench_http.sh` is a separate HTTP-only harness. Do not add HTTP
+stages to `scripts/bench_tcp.sh`: their process contracts overlap, but their
+workloads and future protocol controls do not. `make bench-http` invokes the
+HTTP harness; `make bench-tcp` and the compatibility `make bench` invoke TCP.
+Both scripts are Git mode `100755`. On Windows, Make invokes Git Bash by its
+installed path, not the WSL `/bin/bash`, because Alire's Windows executable is
+not visible in WSL; the HTTP script also resolves the standard Windows Alire
+path when Git Bash's PATH exposes only a bare `alr` name.
+
+The implemented fixture is deliberately one request per TCP connection:
+`Connection: close`, `Content-Length: 32`, status 200 and body
+`0123456789abcdef0123456789abcdef`. Its common benchmark CLI is:
+
+```
+http_server [port] [request-goal]
+http_client [host] [port] [connections] [rounds]
+```
+
+The goal is requests, so the harness starts each server with
+`connections * rounds`. The Ada client creates one fiber per connection and
+opens a fresh socket for each round; this is intentional while the server has
+no keep-alive. The client prints `elapsed`, `round trips per second`, `frames
+exchanged` and `failed`; those labels are a machine contract with the harness.
+Its elapsed unit may be milliseconds (Ada) or seconds (Go/Rust), and the
+harness reads the unit rather than assuming one.
+
+`bench/go_http/` is a safe standard-library Go `net/http` server/client pair.
+`bench/axum_http/` is an Axum server and Reqwest client pair; `Cargo.lock` is
+part of the source, `target/` is generated output. The repository's old
+unanchored `bin` ignore rule also matches `bench/axum_http/src/bin`; use `/bin`
+for a root-only binary-output rule or Rust sources there will be silently
+ignored and never staged.
+
+`bench_http.sh` runs all nine Ada/Go/Axum server-client pairings for every
+`BENCH_HTTP_SCALES` cell and repetition. Its CSV is
+`pairing,connections,rounds,rep,elapsed_s,rt_per_s,frames,failed_sessions,ok`.
+Keep its numeric handling the same as TCP: normalize duration to seconds with
+nine decimal places, normalize rate to an integer before writing CSV, and use
+`group` and `fixed3` for human-readable log lines. Rust and Go deliberately
+emit scientific notation, while Ada emits an integer; formatting belongs in the
+harness, never in a client just to make a log attractive.
+
+`.github/workflows/http-bench.yml` owns the independent HTTP CI run and
+uploads `bench/results/http-ci`. Its environment selects the workload; do the
+arithmetic before increasing it: one scale with $C$ connections and $R$ rounds
+means $9 \times REPS \times C \times R$ requests. This is a full cross-pairing
+matrix, not a single server run, and large values quickly turn a completion gate
+into a long performance job. The current HTTP harness has no TCP-style
+`runwait` CPU/RSS measure, TIME_WAIT drain, port retry, summary, scaling sweep
+or tail histogram. Do not interpret wall-clock throughput as a fair CPU-cost
+comparison until those are deliberately designed for HTTP.
+
+Validated after introducing the common CLI: a compact full nine-pairing
+Ada/Go/Axum loopback matrix, `make demo-http`, `make check-linux`, and
+`make check-aarch64` all passed. The HTTP parser's standalone test passes and
+its focused SPARK proof reported 1,145 checks. HTTP remains a bounded first
+slice: no persistent connections, request-body or response-body API, header
+dispatch, status/header control, chunked decoder, DNS, or WebSocket support.
+
 ### Measurement traps
 
 - **The three clients do not print elapsed time in the same unit, and the
