@@ -22,7 +22,7 @@ else
   HOST := linux
 endif
 
-.PHONY: all lib examples tests abi-check smoke multi-await demo bench \
+.PHONY: all lib examples tests abi-check smoke multi-await demo demo-http bench \
         prove prove-consumers check-linux check-aarch64 clean help
 
 all: examples abi-check
@@ -63,6 +63,18 @@ multi-await: tests
 # 2000 simultaneous connections for the throughput figure.
 demo: examples
 	./scripts/run_demo.sh
+
+# One bounded HTTP request through the repository's own server and client.
+# The server itself is intentionally unbounded, so the recipe owns its PID.
+demo-http: examples
+ifeq ($(HOST),windows)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/demo_http.ps1
+else
+	@./bin/http_server$(EXE) > obj/http_server_demo.log 2>&1 & server=$$!; \
+	trap 'kill $$server 2>/dev/null || true' EXIT; \
+	until grep -q "listening on port" obj/http_server_demo.log; do sleep 0.05; done; \
+	./bin/http_client$(EXE)
+endif
 
 # The runtime's echo demo against the Tokio and Go equivalents: every
 # server against every client, then each server alone across core counts,

@@ -10,6 +10,7 @@ project Examples is
      ("echo_server.adb",
       "echo_client.adb",
       "http_server.adb",
+   "http_client.adb",
       "smoke.adb");
 
    package Builder is
