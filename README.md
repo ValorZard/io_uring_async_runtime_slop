@@ -69,7 +69,7 @@ interrupt onto a cold cache. The memory goes the other way — one 64 KiB fiber
 stack per live connection is what this runtime pays.
 
 `make bench` runs the whole matrix; `bench/results/` has the CSVs, and the
-header of `scripts/bench.sh` says exactly what is and is not held equal.
+header of `scripts/bench_tcp.sh` says exactly what is and is not held equal.
 
 Run it yourself with `make demo`, which shows a small traced run first so you
 can watch the scheduler work, then the full 2000-connection run for the

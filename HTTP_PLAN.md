@@ -21,9 +21,10 @@ conditions, the WebSocket sequencing table -- not its code.
 ---
 
 ## What aht is, and what of it survives
-
-aht is Ada 2022: a synchronous HTTP/1.1 client and a task-based WebSocket
-client, over TCP or TLS, with `Ada.Containers`, `Unbounded_String`,
+**Use `scripts/bench_http.sh`; do not extend `scripts/bench_tcp.sh`.** HTTP
+needs its own harness, result directory and CI workflow. It may use the same
+process lifecycle and CSV conventions as the TCP harness, but it owns its
+own `run_pair`, summaries and protocol-specific workloads.
 controlled heap buffers, access-to-subprogram callbacks and exceptions. TLS
 is out of scope here by instruction, and dropping it removes the only
 reason its transport layer is class-wide.
@@ -55,8 +56,9 @@ whole streaming surface inverts:
       ...
    end loop;
 ```
-
-That is not a workaround for the SPARK rule; it is strictly better, and it
+   Four programs: an Ada HTTP server, a Go `net/http` server, an axum server,
+   and one HTTP load client. The HTTP harness owns the matching matrix, scaling
+   and latency stages, with the same cross pairings.
 is the one place where this runtime makes the problem *smaller* than aht
 found it. Three of aht's packages exist only to manage the consequences of
 push-mode delivery in a task-based client, and have no counterpart here:
@@ -533,18 +535,18 @@ that target existing.
 
 ## Benchmarking against Go and axum
 
-**Extend `scripts/bench.sh`; do not write a second harness.** `run_pair`
-does not know what an echo frame is. It starts a server, runs a client,
-scrapes four numbers off the client's stdout and writes a CSV row. An HTTP
-stage is four new binaries and about twenty lines of shell, and the summary
-code needs no change at all.
+**Use `scripts/bench_http.sh`; do not extend `scripts/bench_tcp.sh`.** HTTP
+needs its own harness, result directory and CI workflow. It may use the same
+process lifecycle and CSV conventions as the TCP harness, but it owns its
+own `run_pair`, summaries and protocol-specific workloads.
 
 Everything under *Measurement traps* in `CLAUDE.md` applies unchanged and
 none of it is restated here. What follows is only what HTTP adds.
 
 ### The contract the new binaries have to meet
 
-`run_pair` appends arguments and greps output. Both halves are fixed:
+The HTTP harness's `run_pair` appends arguments and greps output. Both halves
+are fixed:
 
 | | gets appended | must print |
 |---|---|---|
@@ -557,8 +559,8 @@ drops the unit from the text breaks that, silently and by three orders of
 magnitude; the harness comment at `run_pair` says why.
 
 Four programs: an Ada HTTP server, a Go `net/http` server, an axum server,
-and one HTTP load client. Then an `http` stage beside `stage_matrix` with
-the same cross pairings.
+and one HTTP load client. The HTTP harness owns the matching matrix, scaling
+and latency stages, with the same cross pairings.
 
 ### Keep the cross pairings, because HTTP needs them more
 
@@ -640,8 +642,9 @@ should be fixed on its own, before step 3 produces something worth timing.
 5. **`Iour.Ws.Frames`, `Sha1`, `Base64`, `Utf8`, and the server-side
    upgrade.** Frames first, against the RFC vectors, before anything talks
    to a socket.
-6. **The benchmark stage**, once step 3 exists and the Nagle fix is in.
-   Four binaries and twenty lines of shell, per the section above.
+6. **The HTTP benchmark harness**, once step 3 exists and the Nagle fix is
+   in. It is separate from the TCP harness and has four binaries, its own
+   lifecycle code and its own CI workflow.
 7. **Then the remaining gaps, in value order**: bounded receive, then DNS,
    then the RNG for a WebSocket client.
 

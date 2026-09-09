@@ -17,12 +17,15 @@ SHELL := /bin/bash
 ifeq ($(OS),Windows_NT)
   EXE := .exe
   HOST := windows
+	BENCH_BASH := "C:/Program Files/Git/bin/bash.exe"
 else
   EXE :=
   HOST := linux
+	BENCH_BASH := /bin/bash
 endif
 
 .PHONY: all lib examples tests abi-check smoke multi-await demo demo-http bench \
+	bench-tcp bench-http \
         prove prove-consumers check-linux check-aarch64 clean help
 
 all: examples abi-check
@@ -81,11 +84,16 @@ endif
 # then latency.  Needs cargo and go.  Runs on both systems, but Windows
 # lacks the controls that make the numbers strictly comparable -- taskset,
 # ip_local_port_range and ListenOverflows -- so read the Windows caveats in
-# the header of scripts/bench.sh before comparing across systems.  That
+# the header of scripts/bench_tcp.sh before comparing across systems.  That
 # header also has the knobs, and why running it as root and unprivileged
 # gives different answers on Linux.
-bench: examples
-	./scripts/bench.sh
+bench: bench-tcp
+
+bench-tcp: examples
+	$(BENCH_BASH) scripts/bench_tcp.sh
+
+bench-http: examples
+	$(BENCH_BASH) scripts/bench_http.sh
 
 # Full proof of everything.  The Linux backend is the one written in SPARK
 # throughout; the Windows reactor is a trusted body, like the context

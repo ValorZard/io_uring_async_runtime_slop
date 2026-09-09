@@ -1,0 +1,47 @@
+name: http-bench
+
+on:
+  push:
+    paths:
+      - 'src/http/**'
+      - 'src/net/**'
+      - 'src/runtime/**'
+      - 'src/ffi/**'
+      - 'src/os/**'
+      - 'src/arch/**'
+      - 'examples/http_*'
+      - 'scripts/bench_http.sh'
+      - 'scripts/demo_http.ps1'
+      - 'Makefile'
+      - '**.gpr'
+      - 'gnat.adc'
+      - 'alire.toml'
+      - '.github/workflows/http-bench.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: http-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  loopback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IOUR_SHARDS: "1"
+      BENCH_HTTP_REPS: "3"
+      BENCH_HTTP_OUT: bench/results/http-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install liburing
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq liburing-dev
+      - uses: alire-project/setup-alire@v6
+      - name: HTTP loopback benchmark
+        run: make bench-http
+      - name: Upload HTTP results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: http-bench-${{ github.sha }}
+          path: bench/results/http-ci
+          if-no-files-found: warn

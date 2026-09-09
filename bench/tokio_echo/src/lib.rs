@@ -70,7 +70,7 @@ pub fn parse(from: &Frame) -> (Kind, u32) {
 //
 //  They are gone, and what is measured now is what someone would actually
 //  deploy: `#[tokio::main]`, `TcpListener::bind`, and whatever the runtime
-//  decides to do with the machine.  See scripts/bench.sh for what that does
+//  decides to do with the machine.  See scripts/bench_tcp.sh for what that does
 //  and does not make comparable.
 
 pub fn arg_or(args: &[String], index: usize, default: u32) -> u32 {

@@ -3,7 +3,7 @@
 # Benchmark this runtime's echo demo against the Tokio and Go equivalents
 # in bench/tokio_echo and bench/go_echo.
 #
-#   ./scripts/bench.sh [stage ...]        stages: build matrix scaling latency
+#   ./scripts/bench_tcp.sh [stage ...]    stages: build matrix scaling latency
 #                                         (default: all of them, in that order)
 #
 # What it measures

@@ -3,7 +3,7 @@
 
     ./scripts/bench_gate.py bench/results/<timestamp>
 
-scripts/bench.sh always exits 0.  That is correct for a measuring
+scripts/bench_tcp.sh always exits 0.  That is correct for a measuring
 instrument -- a slow run is still a run, and the script's job is to
 report, not to judge -- but a CI trigger needs a verdict, so the verdict
 is made here, over the CSVs it wrote.

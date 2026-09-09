@@ -2413,7 +2413,7 @@ errors here, so it cannot break that build.
 
 ## The benchmark
 
-`scripts/bench.sh` runs on both systems. Everything platform-dependent is in one
+`scripts/bench_tcp.sh` runs on both systems. Everything platform-dependent is in one
 "Platform" section near the top; the stages are the same code on both.
 `make bench` invokes it on both systems. Windows lacks the Linux fairness
 controls (`taskset`, `ip_local_port_range`, `ListenOverflows`), so read its
@@ -2491,7 +2491,7 @@ hangs the whole run.
   connect inside their windows too.
 
 - **A stale variant build is the worst of these, because it is silent.**
-  `scripts/bench.sh` builds one copy of the runtime per `Shard_Count`, and
+  `scripts/bench_tcp.sh` builds one copy of the runtime per `Shard_Count`, and
   per client pinning, under `bench/build/`. It used to reuse any directory
   that was already there. A run after a source change then measured the
   previous run's binaries for the entire scaling stage and for the Ada

@@ -25,7 +25,7 @@
 #     process gets a core to itself, because their environment tasks and
 #     every other thread on the box land on Linux CPU 0 as well.  That
 #     asymmetry is deliberate and documented at length in
-#     scripts/bench.sh, and it is why `srv us/rt` is the only column worth
+#     scripts/bench_tcp.sh, and it is why `srv us/rt` is the only column worth
 #     reading even on a quiet machine -- though on two contended cores
 #     even that column is a smoke signal rather than a measurement.
 #   * A third of the matrix measures the load generator, not the server.
@@ -47,7 +47,7 @@
 # If you ever want numbers you can quote, this needs a self-hosted runner
 # on a dedicated box, and the pinning below has to be rethought for it.
 
-name: bench
+name: tcp-bench
 
 on:
   push:
@@ -57,7 +57,7 @@ on:
       - 'examples/**'
       - 'tests/**'
       - 'bench/**'
-      - 'scripts/bench.sh'
+      - 'scripts/bench_tcp.sh'
       - '**.gpr'
       - 'gnat.adc'
       - 'alire.toml'
@@ -292,7 +292,7 @@ jobs:
           # limit reached mid-run reads as lost sessions, and lost
           # sessions are the one thing this workflow gates on.
           ulimit -n 65536
-          ./scripts/bench.sh
+          ./scripts/bench_tcp.sh
 
       # The gate.  scripts/bench.sh always exits 0 -- it is a measuring
       # instrument, and a slow run is still a run -- so the pass/fail
@@ -320,6 +320,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bench-${{ github.sha }}
+          name: tcp-bench-${{ github.sha }}
           path: bench/results/ci
           if-no-files-found: warn
