@@ -31,8 +31,8 @@ jobs:
       IOUR_SHARDS: "1"
       # CI gates completion across every server/client pairing. A full
       # performance run remains available through the local script defaults.
-      BENCH_HTTP_REPS: "1"
-      BENCH_HTTP_SCALES: "400:20"
+      BENCH_HTTP_REPS: "3"
+      BENCH_HTTP_SCALES: "400:20 600:70"
       BENCH_HTTP_RUN_TIMEOUT: "30"
       BENCH_HTTP_OUT: bench/results/http-ci
     steps:

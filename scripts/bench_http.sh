@@ -12,6 +12,10 @@ OUT=${BENCH_HTTP_OUT:-bench/results/http-$(date +%Y%m%d-%H%M%S)}
 RUN_TIMEOUT=${BENCH_HTTP_RUN_TIMEOUT:-120}
 mkdir -p "$OUT"
 
+group() { echo "$1" | sed -e :a -e 's/\(.*[0-9]\)\([0-9]\{3\}\)/\1,\2/;ta'; }
+
+fixed3() { awk -v v="$1" 'BEGIN { if (v != "") printf "%.3f", v + 0 }'; }
+
 EXE=""
 [[ ${OS:-} == Windows_NT ]] && EXE=.exe
 GO_HTTP=bench/go_http
@@ -67,15 +71,16 @@ run_pair() {
 
     local elapsed rate frames failed ok
     elapsed=$(grep -oP 'elapsed\s+\K[0-9.E+-]+\s*m?s' "$client_log" | head -1 |
-        awk '{ value = $1; if ($2 == "ms") value /= 1000; print value }' || true)
+        awk '{ value = $1 + 0; if ($2 == "ms") value /= 1000; printf "%.9f", value }' || true)
     rate=$(grep -oP 'round trips per second\s*\K[0-9.E+-]+' "$client_log" | head -1 || true)
+    rate=$(awk -v value="$rate" 'BEGIN { if (value != "") printf "%.0f", value + 0 }')
     frames=$(grep -oP 'frames exchanged\s*\K[0-9]+' "$client_log" | head -1 || true)
     failed=$(grep -oP 'failed\s*\K[0-9]+' "$client_log" | head -1 || true)
     [[ ${failed:-1} == 0 && $client_status == 0 ]] && ok=yes || ok=no
     echo "$label,$connections,$rounds,$rep,${elapsed:-},${rate:-},${frames:-},${failed:-$requests},$ok" >> "$csv"
-    printf '  %-22s %5s x %-5s rep %s  %11s rt/s  fail=%-5s %s\n' \
-        "$label" "$connections" "$rounds" "$rep" "${rate:-?}" \
-        "${failed:-?}" "$ok" | tee -a "$OUT/bench.log"
+    printf '  %-22s %5s x %-5s rep %s  %11s rt/s  %8ss  fail=%-5s %s\n' \
+        "$label" "$connections" "$rounds" "$rep" "$(group "${rate:-0}")" \
+        "$(fixed3 "$elapsed")" "${failed:-?}" "$ok" | tee -a "$OUT/bench.log"
 }
 
 csv=$OUT/matrix.csv
