@@ -2458,6 +2458,18 @@ hangs the whole run.
   rather than assuming it. **A new client, or a change to an existing
   one's output, has to keep the unit in the text.**
 
+  The same three clients disagree about *rendering* as well as unit, and
+  that half is harmless -- but it reached the log for a long time and made
+  a column unreadable. Given the same `%.8E`, Rust writes `2.23628137E5`
+  and Go writes `1.89083387E+05`, because the exponent's sign and padding
+  are not standardised; the Ada client prints an integer, for the SPARK
+  reason above. All three parse back correctly, so nothing downstream was
+  ever wrong, which is exactly why nobody noticed. `run_pair` now
+  normalises `rt_per_s` to a plain integer on the way into the CSV, and
+  the per-rep log line goes through `group` and `fixed3` so it is in the
+  summary tables' own format. **Format numbers in the harness, not in the
+  clients** -- the Ada one cannot be made to match the other two.
+
 - **The three clients have to measure the same window, and the Ada one did
   not.** It took `Clock` either side of `Iour.Scheduler.Wait_For_Shutdown`,
   so every shard draining its ring and stopping was inside the figure it

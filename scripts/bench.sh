@@ -354,6 +354,28 @@ server_bin() {  # server_bin <shards>
 # One run
 # ---------------------------------------------------------------------------
 
+# Display helpers.  Every number this harness prints goes through one of
+# these, because the three clients do not agree on how to render one and
+# the raw text used to reach the log unaltered.  Given the same `%.8E`
+# request Rust writes 2.23628137E5 and Go writes 1.89083387E+05 -- neither
+# is wrong, the exponent's sign and padding are simply not standardised --
+# and the Ada client cannot write a float at all, since SPARK supports
+# neither a fixed-to-floating conversion nor a proof that To_Duration's
+# result fits in Duration, so it prints an integer.  Three renderings of
+# one quantity in one column.  This is the elapsed-unit trap's harmless
+# twin and went unnoticed for the same reason: every one of them parses
+# back correctly, so only a human reading the log was ever affected.
+#
+# group turns 223628 into 223,628, which is what the summary tables print.
+# bash's printf has no thousands separator that is safe to rely on here:
+# %'d needs a locale and CI runs under LC_ALL=C.
+group() { echo "$1" | sed -e :a -e 's/\(.*[0-9]\)\([0-9]\{3\}\)/\1,\2/;ta'; }
+
+# Seconds to three decimals, matching the summary's `med s` column.  awk
+# rather than printf so that a missing value stays blank instead of
+# becoming 0.000 with a diagnostic on stderr.
+fixed3() { awk -v v="$1" 'BEGIN { if (v != "") printf "%.3f", v + 0 }'; }
+
 # run_pair <csv> <label> <conns> <rounds> <rep> <server cmd...> -- <client cmd...>
 #
 # A command may start with NAME=VALUE settings; runwait applies them to the
@@ -421,7 +443,14 @@ run_pair() {
     # ever lied.
     elapsed=$(grep -oP 'elapsed\s+\K[0-9.E+-]+\s*m?s' "$clog" | head -1 |
         awk '{ v = $1 + 0; if ($0 ~ /ms/) v /= 1000; printf "%.9f", v }')
-    rt=$(grep -oP 'round trips per second\s*\K[0-9.E+-]+' "$clog" | head -1)
+    # Normalised to a plain integer here rather than at the printf, for the
+    # reason in `group` above: the CSV then holds one format whatever client
+    # wrote the line, and a reader that is not python3's float() -- a
+    # spreadsheet, awk, an eye -- gets the same thing from every row.  The
+    # rounding costs nothing, since the summary reports this column to no
+    # decimals anyway.
+    rt=$(grep -oP 'round trips per second\s*\K[0-9.E+-]+' "$clog" | head -1 |
+        awk '{ printf "%.0f", $1 + 0 }')
     frames=$(grep -oP 'frames exchanged\s*\K[0-9]+' "$clog" | head -1)
     # Sessions the client could not finish.  On Linux this is the same
     # story ListenOverflows tells; on Windows, which has no such counter,
@@ -437,8 +466,9 @@ run_pair() {
     read -r cu cs cmax < "$ctime" 2>/dev/null || { cu=; cs=; cmax=; }
 
     echo "$label,$conns,$rounds,$rep,$elapsed,$rt,$frames,${failed:-},$su,$ss,$smax,$cu,$cs,$cmax,$ov,$ok" >> "$csv"
-    printf '  %-22s %5s x %-5s rep %s  %12s rt/s  %9ss  fail=%-5s %s\n' \
-        "$label" "$conns" "$rounds" "$rep" "$rt" "$elapsed" "${failed:-?}" "$ok" | tee -a "$OUT/bench.log"
+    printf '  %-22s %5s x %-5s rep %s  %11s rt/s  %8ss  fail=%-5s %s\n' \
+        "$label" "$conns" "$rounds" "$rep" "$(group "$rt")" "$(fixed3 "$elapsed")" \
+        "${failed:-?}" "$ok" | tee -a "$OUT/bench.log"
     sleep 0.3
 }
 
