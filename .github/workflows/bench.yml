@@ -100,10 +100,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # liburing-dev is for tests/abi_check.c only.  The runtime links no C
-      # at all: the io_uring UAPI is mirrored in Ada, and abi_check is what
-      # proves the mirrors have not drifted from the headers.
-      - name: Install the liburing headers
+      # liburing is a link-time dependency of the runtime, not just of the
+      # ABI test.  Almost all of it is `static inline` in <liburing.h> and
+      # exports no symbol, but three entry points are real and the runtime
+      # binds them: io_uring_setup, io_uring_enter and io_uring_register.
+      # Everything above those -- claiming a submission slot, filling in an
+      # operation, publishing the tail, harvesting completions -- is Ada in
+      # Iour.Reactor.  Without the package the link ends in `cannot find
+      # -luring`.  The headers are what tests/abi_check.c asserts the Ada
+      # mirrors against, which only the smoke job does.
+      - name: Install liburing
         run: sudo apt-get update -qq && sudo apt-get install -y -qq liburing-dev
 
       - uses: alire-project/setup-alire@v6
@@ -187,6 +193,18 @@ jobs:
       BENCH_OUT: bench/results/ci
     steps:
       - uses: actions/checkout@v4
+
+      # liburing is a link-time dependency of the runtime, not just of the
+      # ABI test.  Almost all of it is `static inline` in <liburing.h> and
+      # exports no symbol, but three entry points are real and the runtime
+      # binds them: io_uring_setup, io_uring_enter and io_uring_register.
+      # Everything above those -- claiming a submission slot, filling in an
+      # operation, publishing the tail, harvesting completions -- is Ada in
+      # Iour.Reactor.  Without the package the link ends in `cannot find
+      # -luring`.  The headers are what tests/abi_check.c asserts the Ada
+      # mirrors against, which only the smoke job does.
+      - name: Install liburing
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq liburing-dev
 
       - uses: alire-project/setup-alire@v6
 
