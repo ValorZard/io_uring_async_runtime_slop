@@ -8,8 +8,9 @@ the runtime is missing that this work needs.
 The short answer: **all of it sits above `Iour.Net` and none of it touches
 the platform seam.** Two new portable source directories, no change to
 `Iour.Reactor`, no new `Op_Kind`, and no new `SPARK_Mode => Off` body --
-with three exceptions, all listed under *What the runtime is missing*, only
-one of which blocks anything.
+with four exceptions, all listed under *What the runtime is missing*. One
+of them blocks the client, one is a latent defect in the Linux accept path
+that HTTP would be the first thing to notice, and two are optional.
 
 The longer answer is that aht is a *synchronous, heap-based,
 exception-raising client library*, and every one of those three traits is
@@ -373,8 +374,9 @@ Two consequences:
 
 ## What the runtime is missing
 
-Three things. Only the first blocks anything, and none of them is needed
-for a server that speaks HTTP to clients on an already-connected socket.
+Four things. The first blocks the client. The fourth is a latent defect
+rather than a missing feature, and it is the one to fix before taking any
+measurement at all.
 
 ### 1. No DNS, so the client takes IP literals
 
@@ -430,6 +432,41 @@ they differ in effects the spec takes the union and the weaker body carries
 an `Intentional` justification.
 
 Small, and only a WebSocket *client* needs it.
+
+### 4. Accepted sockets do not get TCP_NODELAY on Linux
+
+`Iour.Ffi.Net.Tcp_Socket` sets `TCP_NODELAY`, and it is the only place in
+the runtime that sets it. That covers every socket the runtime *creates*:
+`Iour.Net.New_Socket` on both systems, and on Windows the sockets the
+reactor makes in advance for `AcceptEx`. It does not cover a socket
+returned by `IORING_OP_ACCEPT`, and **Linux does not inherit the option
+from the listener**. So on Linux today every accepted connection has Nagle
+enabled and every accepted connection on Windows does not.
+
+Echo does not expose this. One 32-byte write per turn is rarely two small
+segments in flight at once, which is the condition Nagle actually delays
+on. HTTP exposes it immediately: a response head and a body written as two
+sends are exactly that condition, and the second send waits on the peer's
+delayed ACK for up to 40 ms. Against Go and axum, which have the option on
+by default, that is not a small regression; it is the whole measurement.
+
+Two fixes, and they are worth doing in both directions:
+
+1. **Write the head and the body in one send.** Correct regardless, and it
+   is one fewer submission per response. It is the reason the head buffer
+   exists in the budget above, and a small body should be copied into it
+   rather than sent separately.
+2. **Set the option on accepted sockets.** Awkward, and that is presumably
+   why it is not there: with direct accept the socket is a slot in the
+   ring's registered file table and there is no descriptor to hand to
+   `setsockopt`. It would have to happen on the non-direct path only, or
+   through `IORING_OP_SETSOCKOPT` where the kernel is new enough.
+
+The first alone is enough for a well-behaved HTTP server. The second is
+what stops a *badly* behaved one, or a WebSocket sending small frames, from
+hitting the same wall. Confirm the diagnosis with a capture before changing
+anything: a 40 ms gap between the head and the body on the wire is
+unmistakable.
 
 ---
 
@@ -494,10 +531,104 @@ that target existing.
 
 ---
 
+## Benchmarking against Go and axum
+
+**Extend `scripts/bench.sh`; do not write a second harness.** `run_pair`
+does not know what an echo frame is. It starts a server, runs a client,
+scrapes four numbers off the client's stdout and writes a CSV row. An HTTP
+stage is four new binaries and about twenty lines of shell, and the summary
+code needs no change at all.
+
+Everything under *Measurement traps* in `CLAUDE.md` applies unchanged and
+none of it is restated here. What follows is only what HTTP adds.
+
+### The contract the new binaries have to meet
+
+`run_pair` appends arguments and greps output. Both halves are fixed:
+
+| | gets appended | must print |
+|---|---|---|
+| server | `<port> <conns>` | a line containing `listening on port` |
+| client | `127.0.0.1 <port> <conns> <rounds>` | `elapsed <n> ms` or `s`, `round trips per second <n>`, `frames exchanged <n>`, `failed <n>` |
+
+The elapsed line's unit is read rather than assumed, so milliseconds are
+fine and the Ada client's integer rendering is fine. A new client that
+drops the unit from the text breaks that, silently and by three orders of
+magnitude; the harness comment at `run_pair` says why.
+
+Four programs: an Ada HTTP server, a Go `net/http` server, an axum server,
+and one HTTP load client. Then an `http` stage beside `stage_matrix` with
+the same cross pairings.
+
+### Keep the cross pairings, because HTTP needs them more
+
+Six of eighteen rows in the first Linux run measured the load generator
+rather than the server. An HTTP client parses responses, so it is
+substantially more expensive than the echo client, so the risk is *higher*
+here, not lower. The tell is unchanged: if the other two servers do not
+separate on that row either, the client is the ceiling.
+
+**Write the load client in Rust or Go, not in Ada.** The Ada client is
+pinned to its own shards because that is what this runtime is, and that
+asymmetry is what made those six rows client-bound.
+
+### What has to be held equal, and did not before
+
+Echo made this free: both ends agreed on 32 bytes and there was nothing
+else to agree about. HTTP has plenty.
+
+| what | why it bites |
+|---|---|
+| the response bytes | Go adds `Date` and sniffs `Content-Type`; hyper adds `date`. Fix the header set and diff the three responses byte for byte before any number counts |
+| the `Date` header | Go and hyper both cache it and refresh once a second. A handler that formats it per response is doing strictly more work, and will look slower for a reason that is not the runtime |
+| keep-alive | verify it, do not assume it. Count accepts on the server side. Go's `http.Client` stops reusing a connection if the response body is not drained and closed, silently, and every request then measures a TCP handshake |
+| framing | fix everything on `Content-Length`. Chunked against non-chunked is not a comparison |
+| the router | axum is a framework over hyper, Go has `ServeMux`, and the Ada server would have neither. Run raw hyper as a fourth row so the framework layer is a visible number rather than a hidden asymmetry |
+
+`srv us/rt` remains the honest column and becomes microseconds of server
+CPU per request, for the reason the script's header gives at length: the
+Ada server is on `Shard_Count` cores and the other two are on the whole
+machine, so wall-clock throughput is not a like-for-like measure.
+
+### Three workloads
+
+* a small fixed body, for the ceiling;
+* a POST with a body, which is the only thing that exercises the body
+  reader and the compaction path;
+* a 64 KiB response, for the write path.
+
+Skip JSON in a first pass. A JSON row compares serializers, and the Ada
+side would have to grow one first.
+
+### Add a tail-latency number
+
+The existing latency stage drives one connection with sequential round
+trips and reports a mean. **A mean hides exactly the effect this runtime
+exists to demonstrate.** Thread-per-core against work-stealing shows up in
+the tail, where a cross-core wakeup onto a cold cache costs, and the Windows
+run's own numbers say so: unpinned Go and Tokio burn two to four times the
+CPU per round trip while their medians stay close.
+
+A fixed-bucket histogram in the client is bounded, needs no heap and stays
+inside SPARK, so p99 is affordable. Report it beside the mean rather than
+instead of it.
+
+### Fix the Nagle defect first
+
+Gap 4 above. On Linux an accepted socket has `TCP_NODELAY` unset, and an
+HTTP response written as head then body is the precise case Nagle delays.
+Any Linux number taken before that is fixed is measuring a 40 ms stall, not
+a runtime. Windows is unaffected, which would make it look like a backend
+difference.
+
+---
+
 ## Order of work
 
 Each step is useful on its own, and the first four depend on nothing the
-runtime is missing.
+runtime is missing. Gap 4, the Nagle defect, is not on this list because it
+is not part of this work: it is a defect in the runtime as it stands and
+should be fixed on its own, before step 3 produces something worth timing.
 
 1. **`Iour.Http` and `Iour.Http.Parse`.** Pure, provable, testable with no
    socket. Everything else depends on the vocabulary being right.
@@ -509,8 +640,10 @@ runtime is missing.
 5. **`Iour.Ws.Frames`, `Sha1`, `Base64`, `Utf8`, and the server-side
    upgrade.** Frames first, against the RFC vectors, before anything talks
    to a socket.
-6. **Then the gaps, in value order**: bounded receive, then DNS, then the
-   RNG for a WebSocket client.
+6. **The benchmark stage**, once step 3 exists and the Nagle fix is in.
+   Four binaries and twenty lines of shell, per the section above.
+7. **Then the remaining gaps, in value order**: bounded receive, then DNS,
+   then the RNG for a WebSocket client.
 
 Rough size, in this repository's register, where comments are about half of
 every file:
@@ -522,6 +655,7 @@ every file:
 | client | 300 |
 | WebSockets including SHA-1, Base64 and UTF-8 | 800 |
 | examples and tests | 500 |
+| benchmark servers and load client | 400 |
 
 About the size of `src/net` and the examples together.
 
