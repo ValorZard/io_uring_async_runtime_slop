@@ -152,8 +152,6 @@ begin
    Put_Line ("echo_client: " & Shard_Count'Image & " shards"
              & ", descriptor limit" & Fd_Limit'Image);
 
-   Start_Time := Clock;
-
    Echo_Client_App.Start_Driver (Handle);
    if Handle = No_Future then
       Put_Line ("echo_client: could not start the driver");
@@ -162,11 +160,13 @@ begin
 
    Scheduler.Wait_For_Shutdown;
 
-   --  Clock is a volatile function, and SPARK RM 7.1.3(9) allows a call to
-   --  one only as the whole right-hand side of an assignment -- not as an
-   --  actual, and not inside a larger expression.  Hence the extra
-   --  variable rather than "To_Duration (Clock - Start_Time)".
-   Stop_Time := Clock;
+   --  The window the sessions occupied, not the window this procedure
+   --  occupied.  Taking Clock here would put the whole of
+   --  Wait_For_Shutdown inside it -- every shard draining its ring and
+   --  stopping -- which the Go and Tokio clients measure nothing of, and
+   --  which measured here as a seventh of the reported time at 100
+   --  connections.  See Echo_Client_App.Session_Window.
+   Echo_Client_App.Session_Window (Start_Time, Stop_Time);
 
    Elapsed_Ms := Elapsed_Milliseconds (Start_Time, Stop_Time);
 

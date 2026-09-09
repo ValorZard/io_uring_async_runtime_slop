@@ -8,6 +8,11 @@ package body Echo_Client_App with SPARK_Mode => On is
 
    package Net renames Iour.Net;
 
+   --  Renamed rather than "use"d.  This body withs Iour.Time and the spec
+   --  says "use Iour", so Time already denotes that package here; a use
+   --  clause for Ada.Real_Time would make every mention of Time ambiguous.
+   package Rt renames Ada.Real_Time;
+
    --  Driver is declared in the spec, so its job instance can stand here.
    --  Session's is further down, after the forward declaration it needs.
    package Driver_Job is new Iour.Fibers.Job (Work => Driver);
@@ -91,8 +96,13 @@ package body Echo_Client_App with SPARK_Mode => On is
      with Priority => Runtime_Priority
    is
       procedure Started_One;
+      --  At_Time is stamped by the finishing session, not read here: a
+      --  protected body in this program calls nothing outside itself, and
+      --  that property is what makes the absence of lock cycles checkable
+      --  by reading one screen.  Ada.Real_Time.Clock would be a call out.
       procedure Finished_One
-        (Frames : Natural; Ok : Boolean; Mismatch : Boolean);
+        (Frames : Natural; Ok : Boolean; Mismatch : Boolean;
+         At_Time : Rt.Time);
       procedure Read
         (N_Started    : out Natural;
          N_Ok         : out Natural;
@@ -108,6 +118,11 @@ package body Echo_Client_App with SPARK_Mode => On is
       --  because it is compared with counters held under this same lock.
       procedure Set_Session_Count (Count : Natural);
       procedure Session_Goal (Count : out Natural);
+      --  The measured window.  Opened once by Driver before it spawns
+      --  anything; Last_End is overwritten by every session as it
+      --  finishes, so the lock leaves the last finisher's stamp there.
+      procedure Open_Window (At_Time : Rt.Time);
+      procedure Window (From, To : out Rt.Time);
    private
       Session_Count    : Natural := 0;
       Total_Started    : Natural := 0;
@@ -117,6 +132,11 @@ package body Echo_Client_App with SPARK_Mode => On is
       Total_Mismatched : Natural := 0;
       Live             : Natural := 0;
       Peak_Live        : Natural := 0;
+      --  Both Time_First until something sets them, so a run in which no
+      --  session finished reports no throughput rather than a fabricated
+      --  one.
+      Opened           : Rt.Time := Rt.Time_First;
+      Last_End         : Rt.Time := Rt.Time_First;
    end Stats;
 
    protected body Stats is
@@ -148,8 +168,10 @@ package body Echo_Client_App with SPARK_Mode => On is
       end Started_One;
 
       procedure Finished_One
-        (Frames : Natural; Ok : Boolean; Mismatch : Boolean) is
+        (Frames : Natural; Ok : Boolean; Mismatch : Boolean;
+         At_Time : Rt.Time) is
       begin
+         Last_End := At_Time;
          Bump (Total_Frames, Frames);
          if Ok then
             Bump (Total_Ok);
@@ -175,6 +197,17 @@ package body Echo_Client_App with SPARK_Mode => On is
       begin
          Session_Count := Count;
       end Set_Session_Count;
+
+      procedure Open_Window (At_Time : Rt.Time) is
+      begin
+         Opened := At_Time;
+      end Open_Window;
+
+      procedure Window (From, To : out Rt.Time) is
+      begin
+         From := Opened;
+         To   := Last_End;
+      end Window;
 
       procedure Session_Goal (Count : out Natural) is
       begin
@@ -273,13 +306,20 @@ package body Echo_Client_App with SPARK_Mode => On is
       Frames   : Natural := 0;
       Ok       : Boolean := False;
       Mismatch : Boolean := False;
+
+      --  Stamped here rather than inside Stats, and read into a local
+      --  first because Ada.Real_Time.Clock is a volatile function: SPARK
+      --  RM 7.1.3(9) allows a call to one only as the whole right-hand
+      --  side of an assignment, never as an actual parameter.
+      Now      : Rt.Time;
    begin
       pragma Unreferenced (Arg);
       Stats.Started_One;
 
       Opened := Net.New_Socket;
       if Failed (Opened) then
-         Stats.Finished_One (0, False, False);
+         Now := Rt.Clock;
+         Stats.Finished_One (0, False, False, Now);
          return;
       end if;
       Sock := Net.Socket (Opened);
@@ -291,7 +331,8 @@ package body Echo_Client_App with SPARK_Mode => On is
       Net.Connect (Sock, Host_Buf (1 .. Host_Len), Port, Status);
       if Failed (Status) then
          Net.Close (Sock, Status);
-         Stats.Finished_One (0, False, False);
+         Now := Rt.Clock;
+         Stats.Finished_One (0, False, False, Now);
          return;
       end if;
 
@@ -332,7 +373,8 @@ package body Echo_Client_App with SPARK_Mode => On is
       Net.Send_All (Sock, Outgoing, Status);
 
       Net.Close (Sock, Status);
-      Stats.Finished_One (Frames, Ok, Mismatch);
+      Now := Rt.Clock;
+      Stats.Finished_One (Frames, Ok, Mismatch, Now);
    end Session;
 
    ---------------------------------------------------------------------------
@@ -343,9 +385,18 @@ package body Echo_Client_App with SPARK_Mode => On is
       Total    : Natural;
       Handle   : Future_Ref;
       Finished : Boolean;
+      Now      : Rt.Time;
    begin
       pragma Unreferenced (Arg);
       Stats.Session_Goal (Total);
+
+      --  Where the Go and Tokio clients take their start: immediately
+      --  before the sessions are spawned, and not one statement earlier.
+      --  Everything above this -- ring set-up, shard activation, reading
+      --  the descriptor limit -- is start-up cost neither of them pays
+      --  inside its measured window either.
+      Now := Rt.Clock;
+      Stats.Open_Window (Now);
 
       for I in 1 .. Total loop
          loop
@@ -373,6 +424,15 @@ package body Echo_Client_App with SPARK_Mode => On is
 
       Iour.Scheduler.Request_Shutdown;
    end Driver;
+
+   ---------------------------------------------------------------------------
+
+   procedure Session_Window
+     (From : out Ada.Real_Time.Time;
+      To   : out Ada.Real_Time.Time) is
+   begin
+      Stats.Window (From, To);
+   end Session_Window;
 
    ---------------------------------------------------------------------------
 

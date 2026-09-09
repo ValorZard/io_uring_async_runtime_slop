@@ -78,7 +78,7 @@ Current state, all measured after deleting `obj/gnatprove`:
 **Linux x86_64 1217 checks proved, 2 justified; Linux AArch64 1252 proved,
 2 justified; Windows 1037 proved, 1 justified. Nothing unproved anywhere.**
 
-And, separately, the *consumers*: **`make prove-consumers` proves 1715
+And, separately, the *consumers*: **`make prove-consumers` proves 1721
 checks**, covering the echo server, the echo client, `smoke` and
 `multi_await` against the library, with their fiber bodies race-checked
 through the witness every `Iour.Fibers.Job` instance carries. It was 1586
@@ -2458,6 +2458,26 @@ hangs the whole run.
   rather than assuming it. **A new client, or a change to an existing
   one's output, has to keep the unit in the text.**
 
+- **The three clients have to measure the same window, and the Ada one did
+  not.** It took `Clock` either side of `Iour.Scheduler.Wait_For_Shutdown`,
+  so every shard draining its ring and stopping was inside the figure it
+  called elapsed. The Go and Tokio clients stop their clock when the last
+  session task joins and shut nothing down before reading it. Measured
+  paired -- one server, the two Ada clients alternating rep by rep, 100
+  connections by 1000 rounds -- the reported window fell from a median of
+  897 ms to 769 ms and was shorter in 8 reps of 8, so a seventh of what it
+  reported was teardown and its throughput was understated by about a
+  sixth. `Echo_Client_App.Session_Window` is the fix: `Driver` stamps
+  `Clock` just before it spawns, each session stamps as it finishes, and
+  the protected object keeps the last finisher's stamp. **Every ada-cli row
+  recorded before 2026-09-09 is low by an unknown amount**, including the
+  whole of the first Linux run.
+  What is left in the window at one connection is still tens of
+  milliseconds for microseconds of work, and that part is not a bug: it is
+  the connect, which on Windows is a blocking `connect(2)` on a thread-pool
+  thread and costs a scheduler tick whenever it misses one. Go and Tokio
+  connect inside their windows too.
+
 - **A stale variant build is the worst of these, because it is silent.**
   `scripts/bench.sh` builds one copy of the runtime per `Shard_Count`, and
   per client pinning, under `bench/build/`. It used to reuse any directory
@@ -2729,6 +2749,114 @@ Latency, one connection and 5000 sequential round trips against an idle
 server, all three driven by the Tokio client: **Ada 22.0 us**, Tokio 21.5,
 Go 23.2. The 2026-09-04 report had Ada at 28.0 against 25.0 and 25.2.
 
+### The first Linux run, 2026-09-09 (`.github/workflows/bench.yml`)
+
+Open work item 3 was "nothing has been measured on Linux". This is that
+measurement, and it is worth reading for what it does and does not settle.
+It ran on a GitHub Actions runner: two vCPUs of an AMD EPYC 7763 on an
+oversubscribed Azure host, kernel 6.17, two repetitions. The Ada server is
+one shard on Linux CPU 0, the Ada client one shard on CPU 1, and Go and
+Tokio unconfigured across both. **Absolute numbers from a shared runner
+mean nothing** -- the workflow's own header says so at length -- but the
+within-run comparisons are the first evidence about this runtime over
+io_uring that anyone has.
+
+**Read the client column first, because a third of the matrix is
+client-bound.** Every pairing driven by the Ada client lands between 43k
+and 48k round trips a second *whatever server is on the other end*, and
+each of those servers reaches 70-92k under a different client:
+
+| server | under ada-cli | under tokio-cli | under go-cli |
+|---|---|---|---|
+| ada | 48,146 | 92,053 | 79,774 |
+| tokio | 46,882 | 90,216 | 80,935 |
+| go | 43,150 | 79,607 | 70,912 |
+
+The Ada client is pinned to one core because it is this runtime and this
+runtime pins; the other two help themselves to both. So six of the
+eighteen matrix rows measure the load generator, exactly as the whole
+scaling stage did on 2026-09-04. The tell is the same one: the *other*
+runtimes do not scale on those rows either.
+
+**Those six rows are also low by about a sixth**, on top of being
+client-bound, because this run predates the timing-window fix in
+*Measurement traps*: the Ada client was still counting the runtime's own
+shutdown as elapsed time. Correcting for it moves the ada-cli column from
+43-48k to roughly 50-56k, which does not change the reading -- 56k is
+still a long way under the 92k the same servers reach under the Tokio
+client -- but the numbers in this table will not reproduce.
+
+Holding the client constant, which is what the cross pairings are for --
+median of two repetitions, round trips per second:
+
+| load | client | Ada | Go | Tokio |
+|---|---|---|---|---|
+| 100x1000 | tokio | **92,053** | 79,607 | 90,216 |
+| 100x1000 | go | 79,774 | 70,912 | **80,935** |
+| 500x200 | tokio | **91,103** | 77,302 | 88,166 |
+| 500x200 | go | 76,655 | 70,477 | **82,530** |
+
+And the column that survives the asymmetry -- server CPU microseconds per
+round trip:
+
+| load | client | Ada | Go | Tokio |
+|---|---|---|---|---|
+| 100x1000 | tokio | **10.84** | 13.23 | 11.07 |
+| 100x1000 | go | 11.71 | 14.02 | **11.28** |
+| 500x200 | tokio | **10.78** | 13.04 | 11.23 |
+| 500x200 | go | **10.88** | 13.78 | 11.40 |
+
+**Ada and Tokio are within a few percent of each other and Go is 20-25%
+dearer**, which is a different picture from Windows in both directions:
+there, unpinned, Go and Tokio cost two to four times what this runtime
+does, and pinned to the same cores Go was as cheap as it is. Two contended
+cores is closer to the pinned arrangement than to the unpinned one, and
+the numbers agree.
+
+The scaling stage is a single Ada row here -- one shard is the only count
+that fits -- so it is a three-way comparison at a fixed offered load
+rather than a sweep, and it is the cleanest cell in the run because the
+load generator is the same for all three:
+
+```
+ada/1-cores    90,316 rt/s   10.88 us/rt   7.1 MB
+tokio/default  87,482 rt/s   11.31         3.6
+go/default     80,243 rt/s   13.12         7.7
+```
+
+**Latency is where this runtime loses, and it is the one result worth
+chasing.** One connection, 5000 sequential round trips against an idle
+server, driven by the Tokio client:
+
+| server | us per round trip |
+|---|---|
+| go | 47.2 |
+| tokio | 55.0 |
+| ada | 61.4 |
+
+All three are inflated -- the same measurement on Windows puts every
+runtime at 13-14 us -- so the shared host is most of the absolute figure.
+The *ordering* is what is new: on Windows this runtime is at or ahead of
+both, and here it is 30% behind Go. There is an obvious suspect and it has
+not been tested. The Ada server is pinned to Linux CPU 0, which is also
+where its own environment task, the runner's own threads and everything
+else on a two-vCPU VM sit, while Go and Tokio can move to CPU 1; at one
+connection there is no throughput to hide a scheduling delay behind. That
+is a hypothesis about the arrangement, not a finding about io_uring, and
+distinguishing the two needs a machine with cores to spare.
+
+**Resident memory is a genuine difference from Windows.** 5.5-7.1 MB at
+500 connections here against 25-32 MB there, for the same 64 KiB fiber
+stack per live connection. `mmap` gives a stack that costs nothing until
+it is touched and a fiber touches one page of it; `VirtualAlloc` plus the
+guard page does not behave the same way. Tokio is 3.6 MB throughout, which
+is what having no per-connection stack at all looks like.
+
+What this run does **not** settle: anything about more than one shard,
+because one is all that fits beside the client on two cores. Thread-per-core
+is the thing this runtime is, and the CI configuration cannot exercise it.
+That still needs a machine.
+
 ### A benchmark artifact that looks exactly like a regression
 
 Give the server a connection target and single-connection latency reads
@@ -2762,9 +2890,17 @@ Ranked by expected payoff:
    scheduler batch). Linux copies once. `Harvest` also clears the whole
    `Completion_Batch` on every call including the one that returns nothing,
    which is free to fix.
-3. **Run the harness on Linux.** Nothing has been measured there since the
-   port, though it compiles and proves clean. The interesting comparison is
-   now the same runtime over io_uring against itself over completion ports.
+3. **Run the harness on Linux somewhere with cores to spare.** The
+   workflow in `.github/workflows/bench.yml` has now run it -- see *The
+   first Linux run* -- so this is no longer "nothing has been measured".
+   What it measured is a **one-shard** runtime on two shared vCPUs, which
+   settles the cheap questions (it works, it completes every session, its
+   CPU per round trip is Tokio's) and cannot touch the expensive one:
+   thread-per-core is what this runtime is, and one shard is not it. The
+   two things that run wants answered are whether the shard count buys
+   anything over io_uring the way it does over completion ports, and why
+   single-connection latency there is 30% behind Go's when on Windows it
+   is ahead of it.
 
    Nothing has been *benchmarked* on AArch64 either. `smoke` passes there
    under emulation, which says the switch is correct and says nothing at all
