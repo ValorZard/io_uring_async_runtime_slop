@@ -10,6 +10,7 @@ generic
       Target         : String;
     Payload        : out Iour.Byte_Array;
     Payload_Length : out Natural);
+   with procedure Completed;
 
 package Iour.Http.Server with SPARK_Mode => On is
 

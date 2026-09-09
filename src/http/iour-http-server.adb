@@ -109,6 +109,7 @@ package body Iour.Http.Server with SPARK_Mode => On is
       Response_Used := Response_Used + Payload_Length;
       Wire.Write_All (Sock, Response (0 .. Response_Used - 1), Transport);
       Iour.Net.Close (Sock, Transport);
+      Completed;
    end Serve;
 
    procedure Acceptor (Arg : Iour.Fiber_Argument) is

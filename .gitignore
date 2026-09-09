@@ -1,5 +1,5 @@
 /alire/
-bin
+/bin
 build
 target
 /config/
@@ -13,3 +13,5 @@ target
 /bench/results/
 __pycache__
 *.exe
+.err 
+.log
