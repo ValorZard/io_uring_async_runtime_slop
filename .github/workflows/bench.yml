@@ -12,18 +12,22 @@
 # It is a regression gate, not a measurement.  Two things stop it being
 # one, and neither is fixable on a shared runner:
 #
-#   * The runner is a 4-vCPU VM on an oversubscribed host, and a different
+#   * The runner is a 2-vCPU VM on an oversubscribed host, and a different
 #     one every run.  CLAUDE.md already puts the drift between batches an
 #     hour apart on a dedicated workstation at a third; here it is worse,
 #     and no number from one run may be held against a number from
 #     another.
-#   * Four cores is not enough to hold the comparison equal.  The Ada
-#     server pins itself because thread-per-core is what it is, so it gets
-#     two of the four; the Ada client takes the other two; and Go and
-#     Tokio, which are unconfigured on purpose, help themselves to all
-#     four.  That asymmetry is deliberate and documented at length in
+#   * Two cores is not enough to hold the comparison equal, and not enough
+#     to keep the load generator out of the way either.  The Ada server
+#     pins itself because thread-per-core is what it is, so it gets one of
+#     the two; the Ada client takes the other; and Go and Tokio, which are
+#     unconfigured on purpose, help themselves to both.  Neither Ada
+#     process gets a core to itself, because their environment tasks and
+#     every other thread on the box land on Linux CPU 0 as well.  That
+#     asymmetry is deliberate and documented at length in
 #     scripts/bench.sh, and it is why `srv us/rt` is the only column worth
-#     reading even on a quiet machine.
+#     reading even on a quiet machine -- though on two contended cores
+#     even that column is a smoke signal rather than a measurement.
 #
 # What the gate below actually asserts is the thing that survives noise:
 # every session completes.  A run that loses sessions is not a slow run,
@@ -58,19 +62,22 @@ concurrency:
   group: bench-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Two shards, so the server takes CPUs 0-1 and leaves 2-3 for the Ada
-  # client.  Nothing in scripts/bench.sh checks that the CPUs it pins to
-  # exist, and asking for one that does not raises TASKING_ERROR during
-  # elaboration -- before the program prints anything of its own -- so
-  # these numbers and the runner's core count have to be kept in step by
-  # hand.  See "Shards past Shard_Count, and the elaboration trap".
-  #
-  # gprbuild reads an external from the environment when no -X gives it,
-  # and scripts/bench.sh reads IOUR_SHARDS the same way, so this one
-  # variable sets the shard count for the build and the harness's idea of
-  # it at once.
-  IOUR_SHARDS: "2"
+# IOUR_SHARDS is set per job rather than here, because the two jobs want
+# different values on a two-core runner: smoke and multi_await are whole
+# programs with no client beside them, so they can have both cores, while
+# the benchmark has to leave one for the load generator.
+#
+# Nothing in scripts/bench.sh checks that the CPUs it pins to exist, and
+# asking for one that does not raises TASKING_ERROR during elaboration --
+# before the program prints anything of its own -- so these numbers and
+# the runner's core count have to be kept in step by hand.  The "Check the
+# runner is big enough" step below is that check, and it derives what it
+# needs from these variables rather than repeating them.  See "Shards past
+# Shard_Count, and the elaboration trap".
+#
+# gprbuild reads an external from the environment when no -X gives it, and
+# scripts/bench.sh reads IOUR_SHARDS the same way, so one variable sets the
+# shard count for the build and the harness's idea of it at once.
 
 jobs:
   # The fast gate.  It settles two questions the benchmark would otherwise
@@ -81,7 +88,15 @@ jobs:
   # ordinary banner while serving nothing.
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      # Nothing runs beside these two programs, so they get the whole
+      # runner: two shards on Ada CPUs 1-2, which are Linux CPUs 0-1.
+      # This is also the only place in the workflow where more than one
+      # shard is exercised at all, which matters -- a one-shard build
+      # never crosses a shard boundary, so it never reaches the wakeup
+      # path a shard uses to reach another one.
+      IOUR_SHARDS: "2"
     steps:
       - uses: actions/checkout@v4
 
@@ -125,27 +140,50 @@ jobs:
   bench:
     needs: smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Half the cores the previous tuning assumed, so everything takes
+    # longer: the Alire, cargo and go builds are all -j0 on two threads.
+    timeout-minutes: 120
     env:
-      # The Ada client's shard 0 goes on Ada CPU 3, which is Linux CPU 2:
-      # the harness counts CPUs the way Ada does, one higher than Linux.
-      # With two shards each that is the server on Linux 0-1 and the client
-      # on Linux 2-3.  There is no fifth core for the client's environment
-      # task, which the harness pins one below its shards, so that lands on
-      # Linux 1 beside the server's second shard.  It mostly waits, and on
-      # four cores something has to share.
-      BENCH_CLIENT_FIRST_CPU: "3"
-      # Only 1 and 2 shards fit.  A four-shard build wants four cores and
-      # would leave the client nowhere to go; an eight-shard build cannot
-      # elaborate here at all.
-      BENCH_SHARDS: "1 2"
+      # One shard, because two processes have to be pinned and there are
+      # two cores.  The server's shard 0 is Ada CPU 1, which is Linux CPU
+      # 0 -- the harness counts CPUs the way Ada does, one higher than
+      # Linux -- and the client's is Ada CPU 2, which is Linux CPU 1.
+      #
+      # This is a one-shard runtime, so it is not thread-per-core in any
+      # interesting sense here.  A two-shard server would take both cores
+      # and leave the client on top of it, which measures contention
+      # rather than the runtime; the smoke job above is where more than
+      # one shard gets exercised.
+      IOUR_SHARDS: "1"
+      BENCH_CLIENT_FIRST_CPU: "2"
+      # Both environment tasks land on Linux CPU 0: the server's is
+      # CPU => 1 in echo_server.adb, and the harness pins the client
+      # variant's one below its shards, which is Ada CPU 1 and so the same
+      # core.  They mostly wait, and on two cores something has to share.
+      #
+      # One is the only shard count the sweep can hold, for the reason
+      # above, so the scaling stage is a single Ada row against the Go and
+      # Tokio reference lines rather than a sweep.  It stays because those
+      # reference lines are worth having and because the stage is what
+      # writes scaling.csv, which the gate requires to exist.
+      BENCH_SHARDS: "1"
       # Trimmed for CI.  The defaults are 3 repetitions over four
       # connection counts up to 5000, which is 108 matrix runs.
+      #
+      # The connection counts are lower than the core count alone would
+      # ask for, and deliberately: the gate asserts that every session
+      # completes, and a thousand simultaneous connections against a
+      # one-shard server that shares two cores with its own load
+      # generator is where that stops being a statement about the runtime
+      # and starts being one about the runner.  Both scales still exchange
+      # 100,000 frames, so the runs are long enough to mean something.
       BENCH_REPS: "2"
-      BENCH_SCALES: "100:1000 1000:100"
-      BENCH_CONNS: "1000"
-      BENCH_ROUNDS: "100"
-      BENCH_RUN_TIMEOUT: "60"
+      BENCH_SCALES: "100:1000 500:200"
+      BENCH_CONNS: "500"
+      BENCH_ROUNDS: "200"
+      # Everything is slower on two contended cores, and this deadline is
+      # only here to stop a stuck run holding the job up.
+      BENCH_RUN_TIMEOUT: "90"
       BENCH_OUT: bench/results/ci
     steps:
       - uses: actions/checkout@v4
@@ -175,16 +213,43 @@ jobs:
       # disagree is a TASKING_ERROR with no output before it.  Say so here
       # rather than letting it surface as an unexplained failed run forty
       # minutes in.
+      #
+      # Derived from the variables above rather than written out, because
+      # a check that repeats the numbers it is checking goes stale the
+      # first time someone changes one of them and stops checking anything
+      # at all -- silently, which is the failure mode this whole step
+      # exists to prevent.
       - name: Check the runner is big enough for the pinning
         run: |
           ncpu=$(nproc)
-          echo "runner has $ncpu CPUs"
-          if (( ncpu < 4 )); then
-            echo "::error::this workflow pins a 2-shard server to CPUs 0-1 and a 2-shard client to CPUs 2-3, which needs 4 CPUs; the runner has $ncpu. Lower IOUR_SHARDS and BENCH_CLIENT_FIRST_CPU together."
+
+          # Ada numbers CPUs from 1 and Linux from 0, so Ada CPU n is
+          # Linux CPU n - 1.  First_Shard_Cpu is 1 in src/iour.ads, so the
+          # server's shards sit on Linux 0 .. IOUR_SHARDS - 1, and each
+          # variant the scaling sweep builds starts from Linux 0 too.  The
+          # client's shards start at BENCH_CLIENT_FIRST_CPU, and its
+          # environment task one Ada CPU below them, which is never the
+          # highest of the three.
+          need=$IOUR_SHARDS
+          client_top=$(( BENCH_CLIENT_FIRST_CPU - 1 + IOUR_SHARDS ))
+          if (( client_top > need )); then need=$client_top; fi
+          for n in $BENCH_SHARDS; do
+            if (( n > need )); then need=$n; fi
+          done
+
+          srv_last=$(( IOUR_SHARDS - 1 ))
+          cli_first=$(( BENCH_CLIENT_FIRST_CPU - 1 ))
+          cli_last=$(( client_top - 1 ))
+          echo "runner has $ncpu CPUs; this needs $need"
+          echo "  server shards on Linux CPUs 0-$srv_last"
+          echo "  client shards on Linux CPUs $cli_first-$cli_last"
+
+          if (( ncpu < need )); then
+            echo "::error::this configuration pins to $need CPUs and the runner has $ncpu. Lower IOUR_SHARDS, BENCH_CLIENT_FIRST_CPU and BENCH_SHARDS together -- they have to move as a set, and BENCH_CLIENT_FIRST_CPU must stay above the server's last shard."
             exit 1
           fi
-          if (( ncpu > 4 )); then
-            echo "::warning::runner has $ncpu CPUs, not the 4 this workflow is tuned for; Go and Tokio spread over all of them while the Ada server stays on 2, so the throughput asymmetry is wider than the comments say."
+          if (( ncpu > need )); then
+            echo "::warning::runner has $ncpu CPUs, not the $need this workflow is tuned for. Go and Tokio spread over all of them while the Ada server stays on $IOUR_SHARDS, so the throughput asymmetry is wider than the comments say, and $(( ncpu - need )) cores sit idle on the Ada side."
           fi
 
       # Built as its own step so a compile failure is not buried in one of
@@ -194,8 +259,11 @@ jobs:
 
       - name: Benchmark
         run: |
-          # A thousand simultaneous connections on each side, and nothing
-          # raises the limit for the Rust binaries.
+          # Five hundred simultaneous connections on each side, and
+          # nothing raises the limit for the Rust binaries.  Far more
+          # headroom than that needs, which is the point: a descriptor
+          # limit reached mid-run reads as lost sessions, and lost
+          # sessions are the one thing this workflow gates on.
           ulimit -n 65536
           ./scripts/bench.sh
 
