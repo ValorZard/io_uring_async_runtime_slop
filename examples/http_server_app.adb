@@ -55,11 +55,13 @@ package body Http_Server_App with SPARK_Mode => On is
 
    procedure Health
      (Request_Method : Iour.Http.Method;
-      Target         : String;
+      Head           : Iour.Http.Head_Buffer;
+      Target_First   : Natural;
+      Target_Last    : Natural;
       Payload        : out Iour.Byte_Array;
       Payload_Length : out Natural)
    is
-      pragma Unreferenced (Target);
+      pragma Unreferenced (Head, Target_First, Target_Last);
       Text : constant String :=
       (if Request_Method = Iour.Http.Get then "0123456789abcdef0123456789abcdef"
          elsif Request_Method = Iour.Http.Post then "POST ok" & ASCII.LF

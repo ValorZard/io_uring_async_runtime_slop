@@ -9,6 +9,15 @@ with Iour.Shards;
 with Http_Client_App;
 
 procedure Http_Client with SPARK_Mode => On, CPU => 1 is
+   pragma Annotate
+     (GNATprove, Intentional,
+      "all paths",
+      "A Jorvik partition ends by calling Exit_Process; returning from the "
+      & "main subprogram would hang on tasks that may not terminate.");
+
+   Max_Argument : constant := 1_000_000;
+   Max_Host_Arg : constant := 46;
+
    function Elapsed_Milliseconds (From, To : Time) return Integer
      with Global => null;
 
@@ -22,12 +31,43 @@ procedure Http_Client with SPARK_Mode => On, CPU => 1 is
    end Elapsed_Milliseconds;
 
    function Argument_Or (Index : Positive; Default : Natural) return Natural is
+      Value : Natural := 0;
    begin
-      if Argument_Count < Index then return Default; end if;
-      return Natural'Value (Argument (Index));
-   exception when Constraint_Error => return Default;
+      if Argument_Count < Index then
+         return Default;
+      end if;
+      declare
+         Text : constant String := Argument (Index);
+      begin
+         if Text'Length = 0 then
+            return Default;
+         end if;
+         for Character_At in Text'Range loop
+            pragma Loop_Invariant (Value <= Max_Argument);
+            if Text (Character_At) not in '0' .. '9' then
+               return Default;
+            end if;
+            if Value > (Max_Argument - (Character'Pos (Text (Character_At))
+                                        - Character'Pos ('0'))) / 10
+            then
+               return Default;
+            end if;
+            Value := Value * 10
+              + (Character'Pos (Text (Character_At)) - Character'Pos ('0'));
+         end loop;
+         return Value;
+      end;
    end Argument_Or;
-   Host : constant String := (if Argument_Count = 0 then "127.0.0.1" else Argument (1));
+
+   function Host_Argument return String is
+     (if Argument_Count = 0 then "127.0.0.1"
+      elsif Argument (1)'Length = 0 then "127.0.0.1"
+      elsif Argument (1)'Length > Max_Host_Arg
+      then Argument (1) (Argument (1)'First
+                         .. Argument (1)'First + Max_Host_Arg - 1)
+      else Argument (1));
+
+   Host : constant String := Host_Argument;
    Port : constant Natural := Argument_Or (2, 8080);
    Connections : constant Natural := Argument_Or (3, 1);
    Rounds : constant Natural := Argument_Or (4, 1);
@@ -56,7 +96,7 @@ begin
       Elapsed : constant Integer := Elapsed_Milliseconds (From, To);
    begin
       Put_Line ("http_client: elapsed" & Elapsed'Image & " ms");
-      if Elapsed > 0 then
+      if Elapsed > 0 and then Requests <= Natural'Last / 1000 then
          Put_Line ("http_client: round trips per second"
                    & Natural'Image (Requests * 1000 / Natural (Elapsed)));
       end if;

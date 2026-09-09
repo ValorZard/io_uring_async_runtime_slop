@@ -7,9 +7,11 @@ with Iour.Reactor;
 generic
    with procedure Handle
      (Request_Method : Method;
-      Target         : String;
-    Payload        : out Iour.Byte_Array;
-    Payload_Length : out Natural);
+         Head           : Head_Buffer;
+         Target_First   : Natural;
+         Target_Last    : Natural;
+      Payload        : out Iour.Byte_Array;
+      Payload_Length : out Natural);
    with procedure Completed;
 
 package Iour.Http.Server with SPARK_Mode => On is

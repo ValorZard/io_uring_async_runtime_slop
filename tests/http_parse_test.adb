@@ -16,12 +16,16 @@ procedure Http_Parse_Test with SPARK_Mode => On, CPU => 1 is
 
    procedure Load
      (Text : String; Data : out Byte_Array; Available : out Natural)
-     with Pre => Text'Length <= Data'Length
+    with Pre  => Text'Length <= Data'Length,
+       Post => Available = Text'Length and then Available <= Data'Length
    is
-      Position : Natural := Data'First;
+    Position : Natural := 0;
    begin
       Data := [others => 0];
       for Index in Text'Range loop
+      pragma Loop_Invariant
+        (Position = Natural (Index - Text'First));
+      pragma Loop_Invariant (Position <= Data'Last);
          Data (Position) := Byte (Character'Pos (Text (Index)));
          Position := Position + 1;
       end loop;

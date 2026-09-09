@@ -71,7 +71,9 @@ package body Iour.Http.Server with SPARK_Mode => On is
          return;
       end if;
       Parse.Find_Line_End (Head, Used, Parse_State, Line_End);
-      if Parse_State /= Complete or else Line_End = 0 then
+         if Parse_State /= Complete or else Line_End = 0
+            or else Line_End > Head'Last
+         then
          Iour.Net.Close (Sock, Transport);
          return;
       end if;
@@ -82,15 +84,9 @@ package body Iour.Http.Server with SPARK_Mode => On is
          Iour.Net.Close (Sock, Transport);
          return;
       end if;
-      declare
-         Target : String (1 .. Target_Last - Target_First + 1);
-      begin
-         for Index in Target'Range loop
-            Target (Index) := Character'Val
-              (Integer (Head (Target_First + Index - Target'First)));
-         end loop;
-         Handle (Request_Method, Target, Payload, Payload_Length);
-      end;
+      Handle
+        (Request_Method, Head, Target_First, Target_Last, Payload,
+         Payload_Length);
       if Payload_Length > Payload'Length then
          Iour.Net.Close (Sock, Transport);
          return;
@@ -101,6 +97,10 @@ package body Iour.Http.Server with SPARK_Mode => On is
       Put_Text (Response, Response_Used,
                 "" & ASCII.CR & ASCII.LF & "Connection: close" & ASCII.CR
                 & ASCII.LF & ASCII.CR & ASCII.LF);
+      if Payload_Length > Response'Length - Response_Used then
+         Iour.Net.Close (Sock, Transport);
+         return;
+      end if;
       if Payload_Length > 0 then
          for Index in 0 .. Payload_Length - 1 loop
             Response (Response_Used + Index) := Payload (Index);

@@ -20,7 +20,7 @@ package body Http_Client_App with SPARK_Mode => On is
       procedure Set
         (Host : String; Port : Natural; Connections : Natural; Rounds : Natural);
       procedure Get
-        (Host : out String; Last : out Natural; Port : out Natural;
+            (Host : out Host_Text; Last : out Natural; Port : out Natural;
          Connections : out Natural; Rounds : out Natural);
    private
       Text : Host_Text := [others => ' '];
@@ -34,10 +34,13 @@ package body Http_Client_App with SPARK_Mode => On is
       procedure Set
         (Host : String; Port : Natural; Connections : Natural; Rounds : Natural) is
          Length : constant Natural := Natural'Min (Host'Length, Max_Host);
+         Destination : Natural := 1;
       begin
          Text := [others => ' '];
-         for Index in 1 .. Length loop
-            Text (Index) := Host (Host'First + Index - 1);
+         for Index in Host'Range loop
+            exit when Destination > Length;
+            Text (Destination) := Host (Index);
+            Destination := Destination + 1;
          end loop;
          Held := Length;
          Server_Port := Port;
@@ -46,7 +49,7 @@ package body Http_Client_App with SPARK_Mode => On is
       end Set;
 
       procedure Get
-        (Host : out String; Last : out Natural; Port : out Natural;
+            (Host : out Host_Text; Last : out Natural; Port : out Natural;
          Connections : out Natural; Rounds : out Natural) is
       begin
          Host := [others => ' '];
@@ -90,12 +93,22 @@ package body Http_Client_App with SPARK_Mode => On is
         (Ok : Boolean; Requests : Natural; At_Time : Rt.Time) is
       begin
          Last_End := At_Time;
-         Total_Started := Total_Started + 1;
-         Total_Requests := Total_Requests + Requests;
-         if Ok then
-            Total_Succeeded := Total_Succeeded + 1;
+         if Total_Started < Natural'Last then
+            Total_Started := Total_Started + 1;
+         end if;
+         if Requests > Natural'Last - Total_Requests then
+            Total_Requests := Natural'Last;
          else
-            Total_Failed := Total_Failed + 1;
+            Total_Requests := Total_Requests + Requests;
+         end if;
+         if Ok then
+            if Total_Succeeded < Natural'Last then
+               Total_Succeeded := Total_Succeeded + 1;
+            end if;
+         else
+            if Total_Failed < Natural'Last then
+               Total_Failed := Total_Failed + 1;
+            end if;
          end if;
       end Finished;
 
@@ -136,7 +149,7 @@ package body Http_Client_App with SPARK_Mode => On is
       Opened, Transport   : Iour.Io_Result;
       Port : Natural;
       Rounds, Connections, Host_Len : Natural;
-      Host : String (1 .. Max_Host);
+      Host : Host_Text;
       Requests : Natural := 0;
       Ok : Boolean := True;
       Now : Rt.Time;
@@ -152,15 +165,16 @@ package body Http_Client_App with SPARK_Mode => On is
             exit;
          end if;
          Sock := Iour.Net.Socket (Opened);
-         Iour.Net.Connect (Sock, Host (1 .. Host_Len), Port, Transport);
+             Iour.Net.Connect
+                (Sock, String (Host (1 .. Host_Len)), Port, Transport);
          if Iour.Failed (Transport) then
             Iour.Net.Close (Sock, Transport);
             Ok := False;
             exit;
          end if;
          Iour.Http.Client.Request
-           (Sock, Iour.Http.Get, Host (1 .. Host_Len), "/", Code, Transport,
-            Parse_State);
+                (Sock, Iour.Http.Get, String (Host (1 .. Host_Len)), "/", Code,
+                  Transport, Parse_State);
          Iour.Net.Close (Sock, Transport);
          if Transport < 0 or else Parse_State /= Iour.Http.Complete
            or else Code /= 200
@@ -168,7 +182,9 @@ package body Http_Client_App with SPARK_Mode => On is
             Ok := False;
             exit;
          end if;
-         Requests := Requests + 1;
+         if Requests < Natural'Last then
+            Requests := Requests + 1;
+         end if;
       end loop;
       Now := Rt.Clock;
       Stats.Finished (Ok, Requests, Now);

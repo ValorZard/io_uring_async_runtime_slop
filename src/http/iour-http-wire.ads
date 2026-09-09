@@ -19,8 +19,9 @@ package Iour.Http.Wire with SPARK_Mode => On is
       Head_End : out Natural;
       Status   : out Parse_Status;
       Transport : out Iour.Io_Result)
-     with Global => (In_Out => (Iour.Reactor.Engines, Iour.Fibers.Registry,
-                                Iour.Ffi.Kernel));
+       with Global => (In_Out => (Iour.Reactor.Engines, Iour.Fibers.Registry,
+                    Iour.Ffi.Kernel)),
+          Post => Used <= Head'Length;
 
    procedure Write_All
      (Sock      : Iour.Net.Socket;
