@@ -47,7 +47,7 @@ library project Io_Uring_Async_Runtime is
    Shards : Shards_Kind := external ("IOUR_SHARDS", "4");
    Config_Dir := "src/config/shards-" & Shards;
 
-   Portable_Dirs := ("src", "src/ffi", "src/runtime", "src/net")
+   Portable_Dirs := ("src", "src/ffi", "src/runtime", "src/net", "src/http")
                     & Config_Dir;
 
    case Host_Os is
