@@ -163,7 +163,20 @@ esac
 # The runtime's own pinning, read from the source.  It is reported rather
 # than imposed: the Ada binaries pin themselves because thread-per-core is
 # what they are, and nothing else here is pinned at all.
-SHARD_COUNT=$(sed -n 's/^ *Shard_Count *: *constant *:= *\([0-9]*\);.*/\1/p' src/iour.ads)
+#
+# Shard_Count is not in src/iour.ads and cannot be: it has to reach Ada as a
+# static constant, and a GPR external is a string only the project file can
+# see.  So the project selects one of the src/config/shards-<n> directories
+# instead, each declaring Iour_Config.Shard_Count with a different value.
+# Read the same directory the build will -- IOUR_SHARDS from the
+# environment, which is where gprbuild looks for the external too, and
+# failing that the default written into the project file.
+IOUR_SHARDS_DEFAULT=$(sed -n \
+    's/.*external *( *"IOUR_SHARDS" *, *"\([0-9]*\)" *).*/\1/p' \
+    io_uring_async_runtime.gpr)
+SHARDS_DIR=src/config/shards-${IOUR_SHARDS:-${IOUR_SHARDS_DEFAULT:-4}}
+SHARD_COUNT=$(sed -n 's/^ *Shard_Count *: *constant *:= *\([0-9]*\);.*/\1/p' \
+    "$SHARDS_DIR/iour_config.ads" 2> /dev/null)
 FIRST_CPU=$(sed -n 's/^ *First_Shard_Cpu *: *constant *:= *\([0-9]*\);.*/\1/p' src/iour.ads)
 MAX_FUTURES=$(sed -n 's/^ *Max_Futures *: *constant *:= *\([0-9_]*\);.*/\1/p' src/iour.ads | tr -d _)
 MAX_FIBERS=$(sed -n 's/^ *Max_Fibers *: *constant *:= *\([0-9_]*\);.*/\1/p' src/iour.ads | tr -d _)
@@ -281,7 +294,9 @@ build_variant() {
     rm -rf "$dir"; mkdir -p "$dir"
     cp -r src examples tests "$dir"/
     cp io_uring_async_runtime.gpr examples.gpr tests.gpr gnat.adc "$dir"/
-    sed -i "s/^\( *Shard_Count *: *constant *:= *\)[0-9]*;/\1$shards;/" "$dir/src/iour.ads"
+    # Shard_Count arrives through -XIOUR_SHARDS below, which picks one of
+    # the copied src/config directories; First_Shard_Cpu is the one tunable
+    # here that is still an editable constant.
     sed -i "s/^\( *First_Shard_Cpu *: *constant *:= *\)[0-9]*;/\1$first_cpu;/" "$dir/src/iour.ads"
     if [[ -n $client_cpu ]]; then
         # The client's environment task is pinned too; keep it off the
@@ -289,8 +304,11 @@ build_variant() {
         sed -i "s/^\(procedure Echo_Client with SPARK_Mode => On, CPU => \)[0-9]*/\1$client_cpu/" \
             "$dir/examples/echo_client.adb"
     fi
-    ( cd "$dir" && alr exec -- gprbuild -q -P io_uring_async_runtime.gpr -j0 \
-        && alr exec -- gprbuild -q -P examples.gpr -j0 ) > "$OUT/build-$name.log" 2>&1 \
+    ( cd "$dir" \
+        && alr exec -- gprbuild -q -P io_uring_async_runtime.gpr \
+                -XIOUR_SHARDS="$shards" -j0 \
+        && alr exec -- gprbuild -q -P examples.gpr \
+                -XIOUR_SHARDS="$shards" -j0 ) > "$OUT/build-$name.log" 2>&1 \
         || { log "  build of $name failed; see $OUT/build-$name.log"; return 1; }
     log "  built $name (Shard_Count $shards, First_Shard_Cpu $first_cpu)"
 }
@@ -399,7 +417,11 @@ run_pair() {
     # it is the whole story.
     failed=$(grep -oP 'failed\s*\K[0-9]+' "$clog" | head -1)
     ov=$(( $(overflows) - ov_before ))
-    ok=$([[ $cstatus -eq 0 && $sstatus -eq 0 ]] && echo yes || echo "no(c=$cstatus,s=$sstatus)")
+    # Semicolon, not comma: this is the last field of a CSV row and it is
+    # not quoted, so a comma inside it spills the rest into a column that
+    # is not there.  Nothing here reads a field after ok, which is why the
+    # damage was only ever a truncated status in someone else's reader.
+    ok=$([[ $cstatus -eq 0 && $sstatus -eq 0 ]] && echo yes || echo "no(c=$cstatus;s=$sstatus)")
     read -r su ss smax < "$stime" 2>/dev/null || { su=; ss=; smax=; }
     read -r cu cs cmax < "$ctime" 2>/dev/null || { cu=; cs=; cmax=; }
 
@@ -570,7 +592,7 @@ EOF
 
 mkdir -p "$OUT"
 [[ -n $SHARD_COUNT && -n $FIRST_CPU && -n $MAX_FUTURES && -n $MAX_FIBERS ]] \
-    || die "could not read the tunables from src/iour.ads"
+    || die "could not read the tunables from src/iour.ads and $SHARDS_DIR"
 command -v go > /dev/null || die "go not found (needed for bench/runwait as well as go_echo)"
 if [[ $HOST == linux ]]; then
     command -v ss > /dev/null || die "ss (iproute2) not found"

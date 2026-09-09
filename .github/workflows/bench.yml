@@ -1,0 +1,230 @@
+# Build, self-test and benchmark the Linux backend on every push.
+#
+# This is the first CI in the repository and it exists for one reason: the
+# harness had never been run on Linux at all -- open work item 3 in
+# CLAUDE.md -- because the only Linux here is an emulated aarch64 guest,
+# where TCG timings are meaningless.  A GitHub runner is a real x86_64
+# Linux with a real io_uring, so it is the first place the io_uring
+# backend gets exercised end to end.
+#
+# READ THIS BEFORE QUOTING A NUMBER FROM A RUN OF THIS WORKFLOW
+#
+# It is a regression gate, not a measurement.  Two things stop it being
+# one, and neither is fixable on a shared runner:
+#
+#   * The runner is a 4-vCPU VM on an oversubscribed host, and a different
+#     one every run.  CLAUDE.md already puts the drift between batches an
+#     hour apart on a dedicated workstation at a third; here it is worse,
+#     and no number from one run may be held against a number from
+#     another.
+#   * Four cores is not enough to hold the comparison equal.  The Ada
+#     server pins itself because thread-per-core is what it is, so it gets
+#     two of the four; the Ada client takes the other two; and Go and
+#     Tokio, which are unconfigured on purpose, help themselves to all
+#     four.  That asymmetry is deliberate and documented at length in
+#     scripts/bench.sh, and it is why `srv us/rt` is the only column worth
+#     reading even on a quiet machine.
+#
+# What the gate below actually asserts is the thing that survives noise:
+# every session completes.  A run that loses sessions is not a slow run,
+# it is not a result -- and it is a real regression signal, because it is
+# how every start-up race and shutdown bug in this runtime has announced
+# itself so far.
+#
+# If you ever want numbers you can quote, this needs a self-hosted runner
+# on a dedicated box, and the pinning below has to be rethought for it.
+
+name: bench
+
+on:
+  push:
+    # A README edit should not cost an hour of benchmarking.
+    paths:
+      - 'src/**'
+      - 'examples/**'
+      - 'tests/**'
+      - 'bench/**'
+      - 'scripts/bench.sh'
+      - '**.gpr'
+      - 'gnat.adc'
+      - 'alire.toml'
+      - 'Makefile'
+      - '.github/workflows/bench.yml'
+  workflow_dispatch:
+
+# Never benchmark two commits at once, and do not queue hour-long runs
+# behind a burst of pushes: the newest push is the only one worth the time.
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Two shards, so the server takes CPUs 0-1 and leaves 2-3 for the Ada
+  # client.  Nothing in scripts/bench.sh checks that the CPUs it pins to
+  # exist, and asking for one that does not raises TASKING_ERROR during
+  # elaboration -- before the program prints anything of its own -- so
+  # these numbers and the runner's core count have to be kept in step by
+  # hand.  See "Shards past Shard_Count, and the elaboration trap".
+  #
+  # gprbuild reads an external from the environment when no -X gives it,
+  # and scripts/bench.sh reads IOUR_SHARDS the same way, so this one
+  # variable sets the shard count for the build and the harness's idea of
+  # it at once.
+  IOUR_SHARDS: "2"
+
+jobs:
+  # The fast gate.  It settles two questions the benchmark would otherwise
+  # spend half an hour discovering: whether io_uring is reachable at all on
+  # the runner's kernel, and whether the context switch's start-up render
+  # check passes on this build.  A shard whose check fails refuses to run,
+  # and outside smoke that is silent -- echo_server exits 0 and prints an
+  # ordinary banner while serving nothing.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # liburing-dev is for tests/abi_check.c only.  The runtime links no C
+      # at all: the io_uring UAPI is mirrored in Ada, and abi_check is what
+      # proves the mirrors have not drifted from the headers.
+      - name: Install the liburing headers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq liburing-dev
+
+      - uses: alire-project/setup-alire@v6
+
+      # alire.toml depends on gnatprove, which alr solves for and fetches
+      # on every run even though nothing here proves anything.  It is a
+      # large download; cache it.
+      - name: Cache Alire
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/alire
+            ~/.local/share/alire
+          key: alire-${{ runner.os }}-${{ hashFiles('alire.toml') }}
+          restore-keys: alire-${{ runner.os }}-
+
+      - name: Report what we are running on
+        run: |
+          echo "cpus:   $(nproc)"
+          echo "kernel: $(uname -sr)"
+          echo "nofile: $(ulimit -n)"
+
+      - name: Check the ABI mirrors against the system headers
+        run: make abi-check
+
+      # make smoke reports the render check separately, and names the
+      # character where any divergence begins.
+      - name: Self-test
+        run: make smoke
+
+      - name: Await and handover test
+        run: make multi-await
+
+  bench:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # The Ada client's shard 0 goes on Ada CPU 3, which is Linux CPU 2:
+      # the harness counts CPUs the way Ada does, one higher than Linux.
+      # With two shards each that is the server on Linux 0-1 and the client
+      # on Linux 2-3.  There is no fifth core for the client's environment
+      # task, which the harness pins one below its shards, so that lands on
+      # Linux 1 beside the server's second shard.  It mostly waits, and on
+      # four cores something has to share.
+      BENCH_CLIENT_FIRST_CPU: "3"
+      # Only 1 and 2 shards fit.  A four-shard build wants four cores and
+      # would leave the client nowhere to go; an eight-shard build cannot
+      # elaborate here at all.
+      BENCH_SHARDS: "1 2"
+      # Trimmed for CI.  The defaults are 3 repetitions over four
+      # connection counts up to 5000, which is 108 matrix runs.
+      BENCH_REPS: "2"
+      BENCH_SCALES: "100:1000 1000:100"
+      BENCH_CONNS: "1000"
+      BENCH_ROUNDS: "100"
+      BENCH_RUN_TIMEOUT: "60"
+      BENCH_OUT: bench/results/ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: alire-project/setup-alire@v6
+
+      - name: Cache Alire
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/alire
+            ~/.local/share/alire
+          key: alire-${{ runner.os }}-${{ hashFiles('alire.toml') }}
+          restore-keys: alire-${{ runner.os }}-
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            bench/tokio_echo/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('bench/tokio_echo/Cargo.lock', 'bench/tokio_echo/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # The pinning and the machine have to agree, and the way they
+      # disagree is a TASKING_ERROR with no output before it.  Say so here
+      # rather than letting it surface as an unexplained failed run forty
+      # minutes in.
+      - name: Check the runner is big enough for the pinning
+        run: |
+          ncpu=$(nproc)
+          echo "runner has $ncpu CPUs"
+          if (( ncpu < 4 )); then
+            echo "::error::this workflow pins a 2-shard server to CPUs 0-1 and a 2-shard client to CPUs 2-3, which needs 4 CPUs; the runner has $ncpu. Lower IOUR_SHARDS and BENCH_CLIENT_FIRST_CPU together."
+            exit 1
+          fi
+          if (( ncpu > 4 )); then
+            echo "::warning::runner has $ncpu CPUs, not the 4 this workflow is tuned for; Go and Tokio spread over all of them while the Ada server stays on 2, so the throughput asymmetry is wider than the comments say."
+          fi
+
+      # Built as its own step so a compile failure is not buried in one of
+      # the harness's own build logs.
+      - name: Build the runtime and examples
+        run: make examples
+
+      - name: Benchmark
+        run: |
+          # A thousand simultaneous connections on each side, and nothing
+          # raises the limit for the Rust binaries.
+          ulimit -n 65536
+          ./scripts/bench.sh
+
+      # The gate.  scripts/bench.sh always exits 0 -- it is a measuring
+      # instrument, and a slow run is still a run -- so the pass/fail
+      # decision is made here, over what it wrote.
+      #
+      # It asserts only that sessions complete, which is the one signal
+      # that survives a noisy shared runner.  Throughput is deliberately
+      # not gated: it is not reproducible enough here to threshold without
+      # producing red builds nobody believes.
+      - name: Check that every session completed
+        run: python3 scripts/bench_gate.py "$BENCH_OUT"
+
+      - name: Summary
+        if: always()
+        run: |
+          if [[ -f $BENCH_OUT/summary.txt ]]; then
+            {
+              echo '```'
+              cat "$BENCH_OUT/summary.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: bench/results/ci
+          if-no-files-found: warn
