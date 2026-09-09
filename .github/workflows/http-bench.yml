@@ -29,7 +29,11 @@ jobs:
     timeout-minutes: 20
     env:
       IOUR_SHARDS: "1"
-      BENCH_HTTP_REPS: "3"
+      # CI gates completion across every server/client pairing. A full
+      # performance run remains available through the local script defaults.
+      BENCH_HTTP_REPS: "1"
+      BENCH_HTTP_SCALES: "400:20"
+      BENCH_HTTP_RUN_TIMEOUT: "30"
       BENCH_HTTP_OUT: bench/results/http-ci
     steps:
       - uses: actions/checkout@v4
