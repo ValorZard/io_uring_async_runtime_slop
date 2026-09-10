@@ -23,10 +23,13 @@ package Iour.Http.Wire with SPARK_Mode => On is
                     Iour.Ffi.Kernel)),
           Post => Used <= Head'Length;
 
+   --  The bound is Iour.Net.Send_All's own, passed straight through: one
+   --  submission cannot offer the kernel more than that.
    procedure Write_All
      (Sock      : Iour.Net.Socket;
       Data      : Iour.Byte_Array;
       Transport : out Iour.Io_Result)
-     with Global => (In_Out => (Iour.Reactor.Engines, Iour.Fibers.Registry,
+     with Pre    => Data'Length <= Iour.Max_Transfer,
+          Global => (In_Out => (Iour.Reactor.Engines, Iour.Fibers.Registry,
                                   Iour.Ffi.Kernel));
 end Iour.Http.Wire;

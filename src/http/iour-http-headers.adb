@@ -18,10 +18,10 @@ package body Iour.Http.Headers with SPARK_Mode => On is
 
    procedure Add
      (Headers     : in out Header_Table;
-      Name_First  : Natural;
-      Name_Last   : Natural;
-      Value_First : Natural;
-      Value_Last  : Natural;
+      Name_First  : Head_Index;
+      Name_Last   : Head_Index;
+      Value_First : Head_Index;
+      Value_Last  : Head_Index;
       Status      : out Parse_Status)
    is
    begin
@@ -49,8 +49,12 @@ package body Iour.Http.Headers with SPARK_Mode => On is
       Found := False;
       Value := (others => 0);
       for Index in 1 .. Headers.Used loop
+         --  Both ends of the slice have to lie inside Data, not just the
+         --  far one: Data may be any window the caller has, including an
+         --  empty one, whose 'First is then above its 'Last.
          if Headers.Entries (Index).Name_Last - Headers.Entries (Index).Name_First
               + 1 = Name'Length
+           and then Headers.Entries (Index).Name_First >= Data'First
            and then Headers.Entries (Index).Name_Last <= Data'Last
          then
             Match := True;

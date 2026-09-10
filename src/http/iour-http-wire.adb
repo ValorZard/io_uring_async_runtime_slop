@@ -20,6 +20,12 @@ package body Iour.Http.Wire with SPARK_Mode => On is
       Transport := 0;
 
       loop
+         --  Carries the spec's postcondition round the loop.  Without it
+         --  nothing is known about Used at the top of an iteration, so
+         --  neither the slice below nor Find_Head_End's precondition
+         --  holds.
+         pragma Loop_Invariant (Used <= Head'Length);
+
          if Used = Head'Length then
             Status := Too_Large;
             return;

@@ -5,11 +5,27 @@ package body Iour.Http.Client with SPARK_Mode => On is
 
    Max_Request_Bytes : constant := 2_048;
 
+   --  A named constrained subtype, and Put_Text takes it rather than an
+   --  unconstrained Byte_Array.  Byte_Array is indexed by Natural, so an
+   --  unconstrained one running to Natural'Last has a length of
+   --  Natural'Last + 1: its 'Length is not itself a Natural, and every
+   --  bound written in terms of it carries a range check nothing can
+   --  discharge.  Constrained, the length is static.
+   subtype Request_Buffer is Iour.Byte_Array (0 .. Max_Request_Bytes - 1);
+
    procedure Put_Text
-     (Into : in out Iour.Byte_Array; Used : in out Natural; Value : String) is
+     (Into : in out Request_Buffer; Used : in out Natural; Value : String)
+     with Pre  => Used <= Max_Request_Bytes
+                  and then Value'Length <= Max_Request_Bytes - Used,
+          Post => Used = Used'Old + Value'Length;
+
+   procedure Put_Text
+     (Into : in out Request_Buffer; Used : in out Natural; Value : String) is
    begin
       for Index in Value'Range loop
-         Into (Into'First + Used) := Iour.Byte (Character'Pos (Value (Index)));
+         pragma Loop_Invariant (Used = Used'Loop_Entry + (Index - Value'First));
+         pragma Loop_Invariant (Used < Max_Request_Bytes);
+         Into (Used) := Iour.Byte (Character'Pos (Value (Index)));
          Used := Used + 1;
       end loop;
    end Put_Text;
@@ -23,7 +39,7 @@ package body Iour.Http.Client with SPARK_Mode => On is
       Transport       : out Iour.Io_Result;
       Status          : out Parse_Status)
    is
-      Outgoing : Iour.Byte_Array (0 .. Max_Request_Bytes - 1) := [others => 0];
+      Outgoing : Request_Buffer := [others => 0];
       Used     : Natural := 0;
       Head     : Head_Buffer;
       Head_Used, Head_End, Line_End : Natural;
@@ -32,8 +48,14 @@ package body Iour.Http.Client with SPARK_Mode => On is
       Response_Status := 500;
       Transport := 0;
       Status := Malformed;
+      --  64 is the fixed text of the largest request this builds: "POST "
+      --  and " HTTP/1.1" CRLF "Host: " and CRLF and "Content-Length: 0"
+      --  CRLF and "Connection: close" CRLF CRLF, which is 5 + 17 + 2 + 19
+      --  + 21.  Written as two subtractions rather than as a sum, so that
+      --  a pathological Host or Target cannot overflow the test itself.
       if (Request_Method /= Get and then Request_Method /= Post)
-        or else Host'Length + Target'Length + 64 > Outgoing'Length
+        or else Host'Length > Max_Request_Bytes - 64
+        or else Target'Length > Max_Request_Bytes - 64 - Host'Length
       then
          Transport := -Iour.E_Invalid;
          return;

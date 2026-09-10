@@ -11,6 +11,12 @@ package Iour.Http with SPARK_Mode => On is
 
   subtype Head_Buffer is Byte_Array (0 .. Max_Header_Bytes - 1);
 
+   --  A position within a head buffer.  Bounding it is what keeps the
+   --  header table's span arithmetic -- Name_Last - Name_First + 1 --
+   --  inside Natural without a guard at every use, and it says what such
+   --  a position actually is rather than leaving it an unbounded Natural.
+   subtype Head_Index is Natural range 0 .. Max_Header_Bytes - 1;
+
    type Method is (Get, Head, Post, Put, Delete, Options, Patch, Connect);
 
    type Version is (Http_10, Http_11);

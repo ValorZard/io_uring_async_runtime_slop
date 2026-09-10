@@ -1,8 +1,4 @@
-with Iour;
-with Iour.Ffi;
 with Iour.Fibers;
-with Iour.Net;
-with Iour.Reactor;
 
 generic
    with procedure Handle
@@ -20,9 +16,14 @@ package Iour.Http.Server with SPARK_Mode => On is
 
    --  Start one detached acceptor on Shard. Each accepted socket belongs to
    --  its handler fiber until the response is complete and the socket closes.
+   --
+   --  The global is the job registry alone.  Everything the acceptor and
+   --  its handlers go on to touch -- the reactor, the kernel -- is reached
+   --  from the fiber, and this call only puts a job number on a shard's
+   --  run queue.  Claiming more here is not conservative, it is a global
+   --  gnatprove then reports as unused at every instantiation.
    procedure Start_Acceptor
      (Shard : Iour.Active_Shard; Listener : Iour.Descriptor; Started : out Boolean)
-     with Global => (In_Out => (Iour.Reactor.Engines, Iour.Fibers.Registry,
-                                Iour.Ffi.Kernel));
+     with Global => (In_Out => Iour.Fibers.Registry);
 
 end Iour.Http.Server;

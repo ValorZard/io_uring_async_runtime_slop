@@ -75,16 +75,18 @@ alr gnatprove -P io_uring_async_runtime.gpr -XIOUR_OS=linux --mode=all --level=3
 ```
 
 Current state, all measured after deleting `obj/gnatprove`:
-**Linux x86_64 1217 checks proved, 2 justified; Linux AArch64 1252 proved,
-2 justified; Windows 1037 proved, 1 justified. Nothing unproved anywhere.**
+**Linux x86_64 1424 checks proved, 2 justified; Linux AArch64 1459 proved,
+2 justified; Windows 1244 proved, 1 justified. Nothing unproved anywhere.**
+It was 1217, 1252 and 1037 before `src/http` was added.
 
-And, separately, the *consumers*: **`make prove-consumers` proves 1721
-checks**, covering the echo server, the echo client, `smoke` and
-`multi_await` against the library, with their fiber bodies race-checked
-through the witness every `Iour.Fibers.Job` instance carries. It was 1586
-while that witness was one per program rather than one per job. See *Fiber
-bodies are numbers, not pointers* for why that target exists, and
-*Race-checking fibers* for what makes the fiber bodies visible to the
+And, separately, the *consumers*: **`make prove-consumers` proves 2294
+checks**, covering the echo server, the echo client, the HTTP server, the
+HTTP client, `smoke`, `multi_await` and `http_parse_test` against the
+library, with their fiber bodies race-checked through the witness every
+`Iour.Fibers.Job` instance carries. It was 1721 before the HTTP programs,
+and 1586 while that witness was one per program rather than one per job.
+See *Fiber bodies are numbers, not pointers* for why that target exists,
+and *Race-checking fibers* for what makes the fiber bodies visible to the
 data-race rule at all.
 
 Every justification is `unused global
@@ -1601,6 +1603,57 @@ unprovable overflow checks, and a server runs for as long as the process
 does, so they are not spurious. Both apps now use the `Bump` idiom
 `Iour.Scheduler` already had.
 
+### And what `src/http` had to change, which was almost all one thing
+
+`src/http` and its two example programs arrived with 35 unproved checks.
+Thirty of them were the same mistake wearing different hats, and it is the
+one worth knowing before writing the next bounded-buffer layer.
+
+**`Iour.Byte_Array` is indexed by `Natural`, so an unconstrained one's
+`'Length` is not a `Natural`.** An array running from 0 to `Natural'Last`
+has a length of `Natural'Last + 1`. So `Count <= Source'Length` carries a
+range check on `Source'Length` that nothing can discharge, and every bound
+written in terms of it inherits that. `Buffer'Length <= Max_Transfer` in
+`Iour.Net` is fine because the comparison is against a literal and stays
+in universal arithmetic; it is mixing `'Length` with a `Natural` that
+fails. Two answers, both used here:
+
+* **Take a named constrained subtype.** `Iour.Http.Client`'s
+  `Request_Buffer` and `Iour.Http.Server`'s `Response_Buffer` are
+  `Byte_Array (0 .. N - 1)`, so their length is static and the arithmetic
+  in the text writers is ordinary. This is also what removed the
+  `Into'First + Used` form: `Into'First` is 0 and known.
+* **State the bound in index arithmetic.** `Iour.Http.Buffer.Append`'s
+  precondition says `Count - 1 <= Source'Last - Source'First` rather than
+  `Count <= Source'Length`, because it genuinely does take any window.
+
+The same shape bites a *position*. Four `Natural` fields for a header
+slice make `Name_Last - Name_First + 1` an unprovable overflow, so
+`Iour.Http` declares `Head_Index` and the slice uses it; and a record
+discriminant reached by the type's own predicate has to be bounded too,
+which is why `Iour.Http.Buffer`'s `Capacity` is a `Capacity_Range` and not
+a bare `Positive` -- the predicate mentions `Capacity + 1`.
+
+Three smaller things, each of which will recur:
+
+* **A digit loop that builds a divisor cannot be bounded cheaply.**
+  `Put_Length` multiplied a divisor by ten until it passed the value, and
+  bounding that needs an invariant relating the divisor to an integer
+  division. Writing the digits least-significant-first into a small local
+  and playing them out in reverse needs only "at most four digits", which
+  follows from `Max_Response_Body` and reads as the bound it is.
+* **A loop that a postcondition depends on needs that postcondition as its
+  invariant.** `Wire.Read_Head` promises `Used <= Head'Length` and loops;
+  without `pragma Loop_Invariant (Used <= Head'Length)` nothing is known
+  about `Used` at the top of an iteration, so neither the slice it passes
+  to `Receive` nor `Find_Head_End`'s precondition holds.
+* **A generic's `Global` must be what the body touches, not what the
+  instance will eventually reach.** `Iour.Http.Server.Start_Acceptor`
+  claimed `Reactor.Engines` and `Ffi.Kernel` because its acceptor fibers
+  use them; it only calls `Spawn_On`, whose global is the job registry
+  alone, so gnatprove reported two unused globals at the instantiation.
+  Over-claiming is not the conservative choice here.
+
 ---
 
 ## Running gnatprove without lying to yourself
@@ -2270,6 +2323,16 @@ build now runs on `-smp 4`.
 - A record's `'Size` is **not static**, so it cannot appear in a named-number
   declaration. Use a typed constant plus a `Compile_Time_Error`.
 - **Anonymous arrays are not allowed as record components.** Name the type.
+- **An unconstrained `Iour.Byte_Array`'s `'Length` is not a `Natural`.** The
+  index type is `Natural`, so an array from 0 to `Natural'Last` has a length
+  of `Natural'Last + 1`. Comparing it against a literal, as
+  `Buffer'Length <= Max_Transfer` does, stays in universal arithmetic and is
+  fine; mixing it with a `Natural` -- `Count <= Source'Length`,
+  `Used <= Into'Length` -- carries a range check on `'Length` itself that
+  nothing can discharge. Either take a named constrained subtype, or say it
+  in index arithmetic: `Count - 1 <= Source'Last - Source'First`. See *And
+  what `src/http` had to change*. `String` does not have this problem, being
+  indexed by `Positive`.
 - **`C_Long` is 32-bit on Windows** (LLP64) and 64-bit on Linux. Range guards
   that are live on one are provably dead on the other; keep them and silence the
   warning locally rather than deleting them.

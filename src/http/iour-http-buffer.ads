@@ -7,7 +7,15 @@
 
 package Iour.Http.Buffer with SPARK_Mode => On is
 
-   type Buffer (Capacity : Positive) is record
+   --  The predicate below allows the one-past-the-end position, so the
+   --  capacity has to stay far enough below Positive'Last that Capacity + 1
+   --  cannot overflow.  A megabyte is orders of magnitude more than one
+   --  connection's window ever needs.
+   Max_Capacity : constant := 1_048_576;
+
+   subtype Capacity_Range is Positive range 1 .. Max_Capacity;
+
+   type Buffer (Capacity : Capacity_Range) is record
     Data  : Byte_Array (1 .. Capacity) := [others => 0];
     First : Natural := 1;
     Last  : Natural := 1;
@@ -24,10 +32,20 @@ package Iour.Http.Buffer with SPARK_Mode => On is
 
    procedure Compact (B : in out Buffer);
 
+   --  "Count bytes are available from Source'First" is stated in index
+   --  arithmetic rather than as Count <= Source'Length, because Byte_Array
+   --  is indexed by Natural: an array running to Natural'Last has a length
+   --  of Natural'Last + 1, so Source'Length is not itself a Natural and
+   --  comparing Count against it carries a range check nothing can
+   --  discharge.
    procedure Append
      (B      : in out Buffer;
       Source : Iour.Byte_Array;
       Count  : Natural)
-     with Pre => Count <= Source'Length and then Count <= Free (B);
+     with Pre => Count <= Free (B)
+                 and then (Count = 0
+                           or else (Source'First <= Source'Last
+                                    and then Count - 1 <=
+                                               Source'Last - Source'First));
 
 end Iour.Http.Buffer;

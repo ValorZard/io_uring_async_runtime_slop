@@ -9,14 +9,52 @@ with Http_Server_App;
 
 procedure Http_Server with SPARK_Mode => On, CPU => 1 is
 
+   --  Every path here ends in Exit_Process, which is No_Return, so
+   --  gnatprove reports that this procedure never returns normally.  That
+   --  is the design and not a defect; echo_server says the same at length.
+   pragma Annotate
+     (GNATprove, Intentional,
+      "all paths",
+      "A Jorvik partition ends by calling Exit_Process; returning from the "
+      & "main subprogram would hang on tasks that may not terminate.");
+
+   --  Nothing on this command line is a large number, and bounding them
+   --  is what keeps the arithmetic below provable.
+   Max_Argument : constant := 1_000_000;
+
+   --  Hand-rolled the same way as in the other three example mains.
+   --  Natural'Value carries a precondition SPARK cannot discharge for an
+   --  arbitrary command-line string, and the Constraint_Error handler
+   --  that used to stand in for it is not something SPARK reasons about
+   --  either.  Digits and a bound, and the whole thing is provable and
+   --  total.
    function Argument_Or (Index : Positive; Default : Natural) return Natural is
+      Value : Natural := 0;
    begin
       if Argument_Count < Index then
          return Default;
       end if;
-      return Natural'Value (Argument (Index));
-   exception
-      when Constraint_Error => return Default;
+      declare
+         Text : constant String := Argument (Index);
+      begin
+         if Text'Length = 0 then
+            return Default;
+         end if;
+         for Character_At in Text'Range loop
+            pragma Loop_Invariant (Value <= Max_Argument);
+            if Text (Character_At) not in '0' .. '9' then
+               return Default;
+            end if;
+            if Value > (Max_Argument - (Character'Pos (Text (Character_At))
+                                        - Character'Pos ('0'))) / 10
+            then
+               return Default;   --  too large to be meant
+            end if;
+            Value := Value * 10
+              + (Character'Pos (Text (Character_At)) - Character'Pos ('0'));
+         end loop;
+         return Value;
+      end;
    end Argument_Or;
 
    Listener : Io_Result;

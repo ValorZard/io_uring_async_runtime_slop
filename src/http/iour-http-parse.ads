@@ -12,12 +12,17 @@ package Iour.Http.Parse with SPARK_Mode => On is
               with Pre    => Available <= Data'Length,
           Global => null;
 
+   --  End_At names the CR of the first CRLF, so a caller that has found a
+   --  line can pass End_At - 1 as its last byte.  The postcondition is
+   --  what makes that legal without a second guard: a found position is
+   --  inside Data, and 0 -- the not-found answer -- is too.
    procedure Find_Line_End
      (Data      : Head_Buffer;
       Available : Natural;
       Status    : out Parse_Status;
       End_At    : out Natural)
      with Pre    => Available <= Data'Length,
+          Post   => End_At <= Data'Last,
       Global => null;
    procedure Request_Line
        (Data         : Head_Buffer;

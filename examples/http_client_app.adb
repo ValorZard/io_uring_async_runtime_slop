@@ -19,12 +19,16 @@ package body Http_Client_App with SPARK_Mode => On is
    protected Configuration with Priority => Iour.Runtime_Priority is
       procedure Set
         (Host : String; Port : Natural; Connections : Natural; Rounds : Natural);
+      --  The postcondition is what lets a session slice Host (1 .. Last)
+      --  without a guard of its own; without it Last is an unbounded
+      --  Natural and the slice's bounds are unprovable.
       procedure Get
             (Host : out Host_Text; Last : out Natural; Port : out Natural;
-         Connections : out Natural; Rounds : out Natural);
+         Connections : out Natural; Rounds : out Natural)
+        with Post => Last <= Max_Host;
    private
       Text : Host_Text := [others => ' '];
-      Held : Natural := 0;
+      Held : Natural range 0 .. Max_Host := 0;
       Server_Port : Natural := 8080;
       Session_Count : Natural := 1;
       Round_Count : Natural := 1;
@@ -34,13 +38,11 @@ package body Http_Client_App with SPARK_Mode => On is
       procedure Set
         (Host : String; Port : Natural; Connections : Natural; Rounds : Natural) is
          Length : constant Natural := Natural'Min (Host'Length, Max_Host);
-         Destination : Natural := 1;
       begin
          Text := [others => ' '];
-         for Index in Host'Range loop
-            exit when Destination > Length;
-            Text (Destination) := Host (Index);
-            Destination := Destination + 1;
+         for Index in 1 .. Length loop
+            pragma Loop_Invariant (Length <= Host'Length);
+            Text (Index) := Host (Host'First + (Index - 1));
          end loop;
          Held := Length;
          Server_Port := Port;

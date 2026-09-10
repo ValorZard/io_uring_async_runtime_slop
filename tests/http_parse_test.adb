@@ -6,6 +6,14 @@ with Iour.Http.Parse;
 
 procedure Http_Parse_Test with SPARK_Mode => On, CPU => 1 is
 
+   --  Ends in Exit_Process, which is No_Return, for the reason every main
+   --  in this repository does: a Jorvik partition cannot end by returning.
+   pragma Annotate
+     (GNATprove, Intentional,
+      "all paths",
+      "A Jorvik partition ends by calling Exit_Process; returning from the "
+      & "main subprogram would hang on tasks that may not terminate.");
+
   use type Http.Body_Kind;
   use type Http.Method;
   use type Http.Parse_Status;
@@ -14,8 +22,12 @@ procedure Http_Parse_Test with SPARK_Mode => On, CPU => 1 is
 
   Cr_Lf : constant String := "" & ASCII.CR & ASCII.LF;
 
+   --  Data is a Head_Buffer rather than an unconstrained Byte_Array.
+   --  Byte_Array is indexed by Natural, so an unconstrained one's 'Length
+   --  is not a Natural, and a postcondition mentioning it carries a range
+   --  check nothing can discharge.  Constrained, the length is static.
    procedure Load
-     (Text : String; Data : out Byte_Array; Available : out Natural)
+     (Text : String; Data : out Http.Head_Buffer; Available : out Natural)
     with Pre  => Text'Length <= Data'Length,
        Post => Available = Text'Length and then Available <= Data'Length
    is
@@ -23,9 +35,8 @@ procedure Http_Parse_Test with SPARK_Mode => On, CPU => 1 is
    begin
       Data := [others => 0];
       for Index in Text'Range loop
-      pragma Loop_Invariant
-        (Position = Natural (Index - Text'First));
-      pragma Loop_Invariant (Position <= Data'Last);
+      pragma Loop_Invariant (Position = Index - Text'First);
+      pragma Loop_Invariant (Position < Text'Length);
          Data (Position) := Byte (Character'Pos (Text (Index)));
          Position := Position + 1;
       end loop;

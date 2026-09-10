@@ -1,7 +1,6 @@
 with Iour.Http;
 with Iour.Http.Server;
 with Iour.Ffi.Net;
-with Iour.Net;
 with Iour.Scheduler;
 
 package body Http_Server_App with SPARK_Mode => On is
@@ -48,7 +47,12 @@ package body Http_Server_App with SPARK_Mode => On is
       Control.Finished (Last);
       if Last then
          Control.Listener (Socket);
+         --  Shutdown is a Side_Effects function, so its result has to be
+         --  assigned somewhere; there is nothing useful to do with it when
+         --  the run is already ending.  Echo_Server_App.Stop_One says the
+         --  same thing the same way.
          Status := Iour.Ffi.Net.Shutdown (Socket, Iour.Ffi.Net.Shut_Both);
+         pragma Unreferenced (Status);
          Iour.Scheduler.Request_Shutdown;
       end if;
    end Request_Completed;
