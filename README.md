@@ -1,5 +1,8 @@
 # A ring-based async runtime for Ada 2022 / SPARK
 
+## Note: Much of this code and documentation is AI-Generated.
+## While I really want to sit down and clean up all of this, I figured it would be more useful for now if I shared this async runtime directly.
+
 A thread-per-core asynchronous runtime built on the operating system's own
 completion machinery — `io_uring` on Linux, **I/O completion ports** on
 Windows — written entirely in Ada 2022 under the **Jorvik** tasking profile
