@@ -1460,12 +1460,140 @@ error message that says what to do.
    instantiation rather than in the library. `pragma SPARK_Mode (Off);`
    immediately after `private` confines it to those two declarations.
 
-There is no fourth option. A `Global` aspect on the access-to-subprogram
-type is what SPARK ought to want here, and GNAT 15.2 does not accept it:
-`error: incorrect placement of aspect "Global"`, from the compiler rather
-than from gnatprove, with `-gnat2022` on, for both `Global => null` and a
-real one. Checked in both directions; do not spend the afternoon on it
-again.
+There is no fourth option, and the reason is in the language rather than in
+GNAT. **SPARK RM 6.1.4 enumerates where the aspect may appear:** "The Global
+aspect shall only be specified for the initial declaration of a subprogram
+(which may be a declaration, a body or a body stub), of a protected entry,
+or of a task unit." A type is not one of the three, so `error: incorrect
+placement of aspect "Global"` -- from the compiler rather than gnatprove,
+with `-gnat2022` on, for both `Global => null` and a real one -- is the
+conforming answer and not a gap to be worked around.
+
+What makes it look like a gap is that `Pre` and `Post` **are** accepted on
+an access-to-subprogram type, and prove clean; measured, `type Cb is access
+procedure (X : Integer) with Pre => X > 0, Post => True;` is accepted. The
+machinery for contracts on these types exists and is worked out -- RM 3.10
+and 4.1.4 carry approximation rules relating the prefix's or the source
+type's pre- and postconditions to the target's. `Global` did not get that
+treatment, and rather than leave a hole RM 4.1.4's *verification* rules take
+the blunt route: "A subprogram used as the prefix of an Access attribute
+reference shall have no global inputs and outputs."
+
+AdaCore say as much, with "currently" in it twice. User's Guide 5.9: named
+access-to-subprogram types "can be annotated with a contract ... but the
+designated subprograms cannot currently have global inputs or outputs".
+And 5.9.4: "Theoretically, a similar notion of approximation should be used
+for Data Dependencies and Flow Dependencies contracts. However, as these
+contracts are not currently allowed on access-to-subprogram types, SPARK
+simply disallows taking the Access attribute on a subprogram which has
+global inputs or outputs." The neighbouring note matters here too --
+annotations about whether a subprogram returns are not available on these
+types either, so "all calls through dereferences are considered to possibly
+not terminate", which is why `Invoke` does not claim `Always_Terminates`.
+
+So it is a known language limitation with a known intended fix, not a
+toolchain bug. Checked against the 27.0w development documentation, which is
+newer than the gnatprove in use; re-testing it on a toolchain upgrade is
+wasted time until the User's Guide drops the word "currently".
+
+### Can `Trampoline'Access` be made sound?
+
+Asked properly in a throwaway project, because "confine it and write the
+assumption down" is the shape of an answer that invites a better one. The
+short version: **no arrangement makes it legal, and the one design SPARK
+*does* model soundly would require this runtime to name its applications'
+state in its own `Refined_State`.**
+
+All three walls below are the same obstruction wearing different hats.
+SPARK's `Global` is a closed list of names, and a library cannot name the
+state of programs that do not exist yet.
+
+**Wall 1, the pointer itself.** RM 4.1.4 does not say the prefix's globals
+must be *declared*; it says there shall be *none*. So no amount of contract
+writing reaches it, and threading the effects through a parameter instead
+only moves the problem: `Trampoline` calls `Work`, and `Work` is the
+consumer's, with the consumer's globals.
+
+**Wall 2, a wrapper that declares the union.** A wrapper inside a generic
+*is* checked against the actual at instantiation -- measured, `high:
+"nostate.next_core" must be listed in the Global aspect of "Call_It" (SPARK
+RM 6.1.4(15)), in instantiation at inst.ads:9`. So the lever is real. It is
+the wrong shape: it fires on the consumer's *legitimate* state exactly as
+readily as on anything else, because the union cannot mention it.
+
+**Wall 3, tagged dispatch instead of a subprogram pointer.** This is the one
+runtime-selection mechanism SPARK models soundly, and it is the obvious
+replacement for `Fiber_Body`: an abstract `Runner` whose `Run` carries the
+library's union, overridden once per job. RM 6.1.6 kills it, by name:
+
+```
+error: "Consumer.Mine" is an In_Out of overriding subprogram, but it is
+       not an Input of overridden subprogram "Run" at lib.ads:13
+       (SPARK RM 6.1.6)
+```
+
+An overriding's `Global` may only *narrow* the root's. A consumer's fiber
+body cannot add its own state, which is the one thing every fiber body does.
+
+**The door, and why it is not a way through.** RM 6.1.6 lets an overriding
+name "a direct or indirect constituent" of an abstraction the root named,
+and `Part_Of` is how a variable declared elsewhere becomes one. It works: a
+private child with `Abstract_State => (Mine with Part_Of => Lib.State)`,
+overriding `Run` with the root's own `Global`, proves clean -- no `'Access`
+and no `SPARK_Mode => Off` anywhere. The price is in the library's body:
+
+```ada
+with Lib.Consumer;
+package body Lib with SPARK_Mode,
+  Refined_State => (State => (Owned, Lib.Consumer.Mine))
+```
+
+Every application would have to be a **private child of the runtime**, and
+`Iour.Fibers`'s body would have to `with` each one and name its state. The
+runtime could not be compiled without knowing every program that will ever
+use it, and no two programs could share a build. That is not a
+general-purpose library, so this is recorded as measured-and-rejected rather
+than as open.
+
+**What is actually left unsound is narrower than it looks.** `Invoke`'s
+`Global` over-approximates the library's own state, which is the
+conservative direction. What it cannot name is the consumer's -- and a fiber
+body's effects on consumer state are *not* effects of `Spawn`, because the
+fiber runs later and on another shard, so they are a concurrency matter
+rather than a sequential one. That dimension is covered, soundly, by the
+witness, which reaches `Work` directly rather than through the pointer.
+
+What remains is that **`Invoke`'s union is asserted, nothing cross-checks it,
+and it has already drifted.** The witness path and the `Invoke` path are
+disjoint, so a library state reached by a fiber body but left off that list
+is reported nowhere.
+
+Be exact about how much that matters, because the first version of this
+section was not. `Fiber_Main` is `Export, Convention => C` and is entered
+from the context switch; **no SPARK subprogram calls it**, so the union
+propagates to no caller. What it constrains is `Fiber_Main`'s own analysis,
+which does real work after `Invoke` returns -- reads the slot back, resolves
+the future, resumes a waiter -- and which would otherwise be proved against
+a fiber body that changed nothing.
+
+**The drift is live**, and it is the shape of the problem rather than a bug.
+`Iour.Scheduler`'s `Control` is missing from the union, and every example
+program's fiber bodies reach it: `Echo_Server_App.Serve` calls
+`Iour.Scheduler.Request_Shutdown`, as do both HTTP apps, the echo client,
+`multi_await_workload` and `smoke_workload`. It is missing because
+`Iour.Scheduler` declares no `Abstract_State`, so gnatprove auto-abstracts
+its body state and **nothing outside can name it in a `Global`** -- the
+union could not have included it had anyone noticed. Harmless as it stands,
+because `Fiber_Main` reads nothing derived from it.
+
+The structural point: the union lives inside `Iour.Fibers` and can only name
+what that package sees, while a fiber body may call into packages layered
+*above* it. Closing the `Iour.Scheduler` case means giving that package an
+`Abstract_State` and `with`ing it from `Iour.Fibers`'s body -- legal, since
+`iour-scheduler.ads` withs nothing and there is no cycle -- and buys
+documentation rather than a discharged check. Left undone deliberately. The
+comment on `Invoke` now says all of this; re-read the union when adding
+state to the runtime.
 
 ### The generic's body cannot be `On`, and the reason is a chain of Ada rules
 
@@ -2019,6 +2147,44 @@ shard cannot preempt each other -- but it was a configuration invariant
 that nothing enforced and SPARK cannot express. One atomic scalar,
 incremented once per accepted connection, and the argument is gone.
 
+### `Synchronous` state is not a substitute, and the difference is sharp
+
+Worth recording because it is the obvious way to delete the threads: mark a
+consumer's state `Abstract_State => (State with Synchronous)` and let the
+refinement rule do the work. It fires with no tasks in the partition at all,
+in phase 2, in seconds -- and it does catch both shapes the witness
+originally found:
+
+```
+error: constituent of synchronized state "State" must be synchronized
+--> plain.adb    (Next_Core as a plain variable)
+error: constituent of synchronized state "State" must be synchronized
+--> comps.adb    (an array with Atomic_Components)
+```
+
+It is still not a substitute, for two measured reasons.
+
+**It checks where state is declared, not what a fiber body reaches.** A
+package whose own abstraction is impeccably `Synchronous`, whose fiber body
+then touches a plain variable in a *neighbouring* package, is **silent**
+under `--mode=flow`: nothing obliges a procedure's globals to be
+synchronized, so listing the neighbour's variable in the `Global` is all it
+takes. Two witness tasks on that same body report `high: possible data race
+when accessing variable "other.shared"`. Same body, same variable, same run.
+The witness is transitive over the call graph; this is per-package
+bookkeeping.
+
+**And nothing makes a consumer opt in.** `Echo_Server_App` declares no
+`Abstract_State` at all -- gnatprove generates one -- and a package in that
+shape reports nothing. Needing the declaration is exactly the class of
+consumer-side omission the witness was moved into `Job` to abolish, and
+there is no lever to force it: a `Global` on `Job`'s formal `Work` is
+rejected outright, `error: incorrect placement of aspect "Global"`. See
+*Can `Trampoline'Access` be made sound?*.
+
+Worth having as local discipline in a consumer that wants a cheap phase-2
+check. Not a replacement, and it retires no threads.
+
 ### What it still does not cover
 
 The witness models "these bodies run on two shards", which is what the
@@ -2349,14 +2515,19 @@ build now runs on `-smp 4`.
   become unreadable. `Fill_Sqe` is named apart from `Encode` for that reason.
 - **An access-to-subprogram type carries an implicit `Global => null`**, and
   `'Access` is then legal only on a subprogram with no global effects at all
-  -- `access to subprogram with global effects is not allowed in SPARK`. The
-  `Global` aspect that ought to fix this is **rejected by GNAT 15.2 on the
-  type declaration**, `error: incorrect placement of aspect "Global"`, from
-  the compiler rather than gnatprove and with `-gnat2022` on, for both
-  `Global => null` and a real one. Calling *through* such a value is
-  allowed, and is modelled as touching nothing -- which is worse than a
-  rejection, because it is silent. See *Fiber bodies are numbers, not
-  pointers*.
+  -- `access to subprogram with global effects is not allowed in SPARK`,
+  which is **SPARK RM 4.1.4**: "A subprogram used as the prefix of an Access
+  attribute reference shall have no global inputs and outputs." The `Global`
+  aspect that ought to fix this is **not a GNAT gap but a language one**:
+  **RM 6.1.4** allows the aspect only on a subprogram's initial declaration,
+  a protected entry or a task unit, so `error: incorrect placement of aspect
+  "Global"` is conforming. `Pre` and `Post` *are* accepted on such a type
+  and prove clean, which is what makes it look like an oversight; the SPARK
+  User's Guide calls it one, twice, with "currently" in it, and names the
+  intended fix. Calling *through* such a value is allowed, and is modelled
+  as touching nothing -- which is worse than a rejection, because it is
+  silent. See *Fiber bodies are numbers, not pointers* and *Can
+  `Trampoline'Access` be made sound?*.
 - **`Atomic` on an object makes it synchronized; `Atomic_Components` on an
   array does not.** An array of atomic components is an ordinary variable as
   far as SPARK's data-race rule is concerned. This is why `Iour.Per_Shard`

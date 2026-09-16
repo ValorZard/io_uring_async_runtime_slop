@@ -282,25 +282,51 @@ is
    --  SPARK reads a call through an access-to-subprogram as having no
    --  global effects whatever.  A fiber body has them by definition -- it
    --  does the I/O the runtime exists for -- so that reading is false, and
-   --  leaving it inline in Fiber_Main made it false invisibly: everything
-   --  above was proved against a fiber body that touches nothing.
+   --  leaving it inline in Fiber_Main made it false invisibly.
    --
    --  Confining it here does not make the assumption true.  It makes it
    --  one named subprogram with the assumption written on it -- the same
    --  arrangement Iour.Ffi.Fiber's Asm body has -- and it lets the Global
-   --  below over-approximate honestly instead: the union of everything in
-   --  this library a fiber body can reach, which is every state the
-   --  runtime owns, because it can spawn, it can await, it can submit to
-   --  its shard's engine and it can trace.  Over-approximating is the same
-   --  union rule the portable Ffi specs use for two bodies that do
+   --  below over-approximate honestly instead.  Over-approximating is the
+   --  same union rule the portable Ffi specs use for two bodies that do
    --  different amounts.
    --
-   --  What the Global still cannot name is the consumer's own state,
-   --  because this library cannot see it.  A fiber body that touches a
-   --  variable of the program that spawned it is invisible here, and that
-   --  is the one thing a consumer has to reason about itself; see *What
-   --  SPARK proves about deadlock and data races* in CLAUDE.md, and the
-   --  README section of the same name.
+   --  Be exact about the scope of what that buys, because an earlier
+   --  version of this comment was not.  Fiber_Main is Export, Convention
+   --  => C, and is entered from the context switch's assembly; no SPARK
+   --  subprogram calls it.  So this Global propagates to no caller,
+   --  because there are none.  What it constrains is Fiber_Main's own
+   --  analysis -- which is where the damage was, and is the whole point:
+   --  Fiber_Main goes on working after the body returns, reading the slot
+   --  back, resolving the future and resuming a waiter, and every one of
+   --  those reads would otherwise be analysed against state SPARK
+   --  believed the fiber had left alone.
+   --
+   --  Two things the union does NOT cover.  Neither is checked by
+   --  anything, so both are read rather than relied on.
+   --
+   --    * The consumer's own state.  This library cannot see it, so a
+   --      fiber body that touches a variable of the program that spawned
+   --      it is invisible here.  Its effects on that state are concurrent
+   --      rather than sequential, though, so the dimension that matters
+   --      is covered by Iour.Fibers.Race_Witness instead.
+   --
+   --    * State of this runtime that Iour.Fibers cannot name.  The list
+   --      below is every state THIS PACKAGE can reach, which is not the
+   --      same thing as every state the runtime owns: a fiber body may
+   --      call into packages layered ABOVE this one.  Iour.Scheduler's
+   --      Control is the live example -- every example program's fiber
+   --      bodies reach it through Iour.Scheduler.Request_Shutdown -- and
+   --      it is absent here because Iour.Scheduler declares no
+   --      Abstract_State, so its body state cannot be named in a Global
+   --      from outside at all.  Harmless as it stands: Fiber_Main reads
+   --      nothing derived from it.  Closing it would mean giving
+   --      Iour.Scheduler an Abstract_State and withing it from this body
+   --      -- legal, as that spec withs nothing and there is no cycle --
+   --      and would buy documentation rather than a discharged check.
+   --
+   --  See *Can `Trampoline'Access` be made sound?* in CLAUDE.md, and the
+   --  README section on deadlock and data races.
    procedure Invoke (Work : Fiber_Body; Arg : Fiber_Argument)
      with Pre    => Work /= null,
           Global => (In_Out => (Banks, Shard_Cells, Jobs,
